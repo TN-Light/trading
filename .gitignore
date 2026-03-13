@@ -1,0 +1,36 @@
+# Prometheus Trading System
+*.pyc
+__pycache__/
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Credentials — NEVER commit
+prometheus/config/credentials.yaml
+
+# Data files
+prometheus/data/*.db
+prometheus/data/cache/
+prometheus/data/models/
+data/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environment
+venv/
+.venv/
+env/

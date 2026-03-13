@@ -1,0 +1,261 @@
+# ============================================================================
+# PROMETHEUS Trading System — Master Configuration
+# ============================================================================
+
+system:
+  name: "PROMETHEUS"
+  version: "1.0.0"
+  mode: "paper"  # paper | signal | semi_auto | full_auto
+  timezone: "Asia/Kolkata"
+  log_level: "INFO"
+
+# ---------------------------------------------------------------------------
+# Capital & Account
+# ---------------------------------------------------------------------------
+capital:
+  initial: 15000            # INR — small capital test
+  max_deployment: 0.45      # max 45% per trade (1 lot reality with 15K)
+  reserved_cash: 0.15       # 15% buffer (small capital needs more deployed)
+  max_single_trade: 0.45    # max 45% in one trade
+  max_correlated_exposure: 0.50  # max 50% in correlated positions
+
+# ---------------------------------------------------------------------------
+# Market Configuration
+# ---------------------------------------------------------------------------
+market:
+  exchange: "NSE"
+  indices:
+    - "NIFTY 50"
+    - "NIFTY BANK"
+    - "NIFTY FIN SERVICE"
+  trading_hours:
+    start: "09:15"
+    end: "15:30"
+    pre_open_start: "09:00"
+    pre_open_end: "09:08"
+  holidays_calendar: "india_nse"  # auto-loaded
+
+# ---------------------------------------------------------------------------
+# Broker Configuration — Zerodha Kite Connect
+# ---------------------------------------------------------------------------
+broker:
+  name: "zerodha"
+  api_key: ""              # set in credentials.yaml
+  api_secret: ""           # set in credentials.yaml
+  access_token: ""         # refreshed daily
+  base_url: "https://api.kite.trade"
+  websocket_url: "wss://ws.kite.trade"
+  max_orders_per_second: 3
+  rate_limit_buffer: 0.5   # seconds between API calls
+
+# ---------------------------------------------------------------------------
+# Data Engine
+# ---------------------------------------------------------------------------
+data:
+  historical_source: "kite"   # kite | nse_archive | csv
+  db_path: "data/prometheus.db"
+  cache_dir: "data/cache"
+  ohlcv_intervals: ["minute", "5minute", "15minute", "60minute", "day"]
+  max_historical_days: 1095   # 3 years
+  options_chain:
+    refresh_interval: 5       # seconds
+    strikes_around_atm: 10    # fetch 10 strikes above and below ATM
+    expiries_to_fetch: 3      # current + next 2 expiries
+
+# ---------------------------------------------------------------------------
+# Signal Engine
+# ---------------------------------------------------------------------------
+signals:
+  # Signal weights (0 to 1) — higher = more trusted
+  weights:
+    volume_profile: 0.85
+    vwap: 0.80
+    oi_analysis: 0.80
+    regime_detector: 0.75
+    liquidity_sweep: 0.70
+    fvg_imbalance: 0.60
+    rsi_divergence: 0.40      # secondary only
+    macd_crossover: 0.20      # lowest priority
+
+  # Minimum confluence score to generate a signal (0 to 1)
+  min_confluence: 0.65
+
+  # Multi-timeframe config
+  timeframes:
+    primary: "60minute"       # hourly for bias
+    secondary: "15minute"     # for entry zones
+    execution: "5minute"      # for precise entries
+
+# ---------------------------------------------------------------------------
+# AI Intelligence Layer — Multi-Provider, 100% FREE
+# ---------------------------------------------------------------------------
+# Priority: Groq (70B) → Gemini 2.0 Flash → Ollama local → FinBERT
+# All providers have generous free tiers. A trading day uses ~30-50 calls.
+ai:
+  # PRIMARY: Groq Cloud — Llama 3.3 70B for FREE (best reasoning)
+  # Free tier: 30 RPM, 14,400 requests/day — more than enough
+  # Setup: Get free key at https://console.groq.com/keys
+  groq:
+    enabled: true
+    api_key: ""                    # set in credentials.yaml
+    model: "llama-3.3-70b-versatile"
+    temperature: 0.3
+    max_tokens: 2048
+
+  # SECONDARY: Google Gemini 2.0 Flash — powerful cloud backup
+  # Free tier: 15 RPM, 1,500 requests/day, 1M tokens/day
+  # Setup: Get free key at https://aistudio.google.com/apikey
+  gemini:
+    enabled: true
+    api_key: ""                    # set in credentials.yaml
+    model: "gemini-2.0-flash"
+    rpm_limit: 15
+
+  # TERTIARY: Ollama Local — offline fallback (works without internet)
+  # Setup: Install from https://ollama.ai, then: ollama pull llama3.2:3b
+  ollama:
+    enabled: true
+    base_url: "http://localhost:11434"
+    model: "llama3.2:3b"          # or qwen2.5:7b if you have 5GB+ VRAM
+    timeout: 90
+    temperature: 0.3
+    max_tokens: 2048
+
+  # Financial Sentiment: FinBERT (runs locally, specialized for finance)
+  finbert:
+    enabled: true
+    model: "ProsusAI/finbert"
+    cache_dir: "data/models/finbert"
+    batch_size: 16
+
+  # Pattern Matching: Sentence Transformers (local)
+  embeddings:
+    enabled: true
+    model: "all-MiniLM-L6-v2"
+    cache_dir: "data/models/embeddings"
+
+# ---------------------------------------------------------------------------
+# Strategy Modules
+# ---------------------------------------------------------------------------
+strategies:
+  active_modules:
+    - "trend"
+    - "volatility"
+    - "expiry"
+
+  trend:
+    enabled: true
+    instruments: ["NIFTY 50", "NIFTY BANK"]
+    entry_type: "options_buying"  # options_buying | debit_spread
+    min_signal_strength: 0.70
+    max_sl_points: 30             # max stop loss in index points
+    target_rr_ratio: 2.5          # minimum reward:risk
+
+  volatility:
+    enabled: true
+    instruments: ["NIFTY 50", "NIFTY BANK"]
+    entry_type: "straddle_buy"    # buy straddle/strangle before events
+    iv_percentile_trigger: 30     # buy vol when IV percentile < 30
+    event_proximity_days: 2       # enter 2 days before known event
+    max_position_cost: 0.20       # max 20% of capital per vol trade
+
+  expiry:
+    enabled: true
+    instruments: ["NIFTY 50", "NIFTY BANK"]
+    entry_type: "debit_spread"    # capital efficient for under 2L
+    days_to_expiry_max: 2         # only trade within 2 days of expiry
+    min_iv_percentile: 50         # only sell premium in high IV
+
+  mean_reversion:
+    enabled: false                # needs more capital for spreads
+    instruments: ["NIFTY 50"]
+
+# ---------------------------------------------------------------------------
+# Risk Management — NON-NEGOTIABLE HARD LIMITS
+# ---------------------------------------------------------------------------
+risk:
+  # Daily limits
+  max_daily_loss: 5000           # INR — hard stop, no trading after this
+  max_daily_loss_pct: 3.0        # % of capital
+  max_daily_trades: 6            # prevent overtrading
+
+  # Weekly limits
+  max_weekly_loss: 10000         # INR
+  max_weekly_loss_pct: 6.0       # % of capital
+
+  # Position limits
+  max_open_positions: 3          # with under 2L, max 3 positions
+  max_single_position_pct: 30.0  # max % of capital in one position
+  max_correlated_pct: 50.0       # max % in same sector/direction
+
+  # Stop loss rules
+  stop_loss_type: "atr"          # atr | fixed | trailing
+  atr_multiplier: 2.0            # 2x ATR for stop loss
+  trailing_activation: 1.5       # activate trailing after 1.5x target
+  max_stop_loss_pct: 50.0        # never lose more than 50% on a single option trade
+
+  # Margin safety
+  margin_utilization_max: 70.0   # never use more than 70% of available margin
+  margin_buffer_pct: 30.0        # keep 30% margin buffer
+
+  # Circuit breakers
+  consecutive_losses_pause: 3    # pause after 3 consecutive losses
+  pause_duration_minutes: 60     # cool-off period
+  drawdown_halt_pct: 10.0        # halt system if 10% drawdown from peak
+
+# ---------------------------------------------------------------------------
+# Backtesting
+# ---------------------------------------------------------------------------
+backtest:
+  start_date: "2022-01-01"
+  end_date: "2025-12-31"
+  initial_capital: 15000
+  slippage_pct: 0.05             # 0.05% slippage per trade
+  commission_model: "zerodha"     # uses Zerodha brokerage rates
+
+  # Zerodha cost structure
+  costs:
+    equity_delivery_brokerage: 0  # zero
+    intraday_brokerage: 20        # flat Rs 20 or 0.03%
+    options_brokerage: 20         # flat Rs 20 per order
+    stt_options_sell: 0.0625      # 0.0625% on sell side
+    stt_futures: 0.0125           # 0.0125% on sell side
+    transaction_charges: 0.053    # NSE: 0.053%
+    gst: 18.0                     # 18% on brokerage + transaction
+    sebi_charges: 0.0001          # Rs 10 per crore
+    stamp_duty: 0.003             # 0.003% on buy side
+
+# ---------------------------------------------------------------------------
+# Interface
+# ---------------------------------------------------------------------------
+interface:
+  cli:
+    refresh_rate: 2               # seconds
+    theme: "dark"
+    show_greeks: true
+    show_pnl: true
+    show_signals: true
+
+  telegram:
+    enabled: true
+    bot_token: ""                 # set in credentials.yaml
+    chat_id: ""                   # your chat ID
+    alert_on:
+      - "new_signal"
+      - "order_placed"
+      - "order_filled"
+      - "stop_loss_hit"
+      - "target_hit"
+      - "risk_breach"
+      - "daily_summary"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  file: "logs/prometheus.log"
+  max_size_mb: 50
+  backup_count: 5
+  trade_log: "logs/trades.log"
+  signal_log: "logs/signals.log"
