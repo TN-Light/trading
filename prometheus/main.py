@@ -628,9 +628,14 @@ class Prometheus:
         primary_interval: str,
         symbol: str,
         param_overrides: dict = None,
+        parrondo: bool = False,
     ):
         """
         Factory that returns a pro_signal_generator closure.
+
+        When parrondo=True, enables per-bar regime detection and routes to
+        trend-following or mean-reversion logic based on current regime
+        (Parrondo's Paradox: alternating strategies beats either alone).
 
         param_overrides keys (all optional):
             - confluence_trending: float (default 2.5)
@@ -639,48 +644,37 @@ class Prometheus:
             - time_stop_bars: int (overrides capital-adaptive default)
             - kelly_wr: float (default 0.35)
             - breakeven_ratio: float (default 0.4, passed through to engine)
+            - recheck_bars: int (default 5 daily / 10 15min, Parrondo only)
+            - mr_sl_atr: float (default 0.8, mean-reversion SL in ATR)
+            - mr_target_atr: float (default 1.5, mean-reversion target in ATR)
+            - mr_min_rr: float (default 1.5, mean-reversion minimum R:R)
+            - mr_time_stop: int (default 3 daily / 8 15min)
+            - mr_kelly_wr: float (default 0.50)
+            - mr_breakeven_ratio: float (default 0.3)
+            - mr_vwap_deviation: float (default 1.0, min ATR from VWAP)
+            - mr_rsi_oversold: int (default 30)
+            - mr_rsi_overbought: int (default 70)
         """
         overrides = param_overrides or {}
 
-        def pro_signal_generator(data_so_far: pd.DataFrame) -> Optional[Dict]:
-            if len(data_so_far) < 50:
-                return None
+        # Capture regime detector for Parrondo per-bar detection
+        regime_detector = self.regime_detector if parrondo else None
+        if parrondo and regime_detector:
+            regime_detector.reset_cache()
+            recheck_interval = overrides.get(
+                "recheck_bars", 5 if primary_interval == "day" else 10
+            )
 
-            recent_window = data_so_far.tail(100) if len(data_so_far) > 100 else data_so_far
+        # Parrondo regime transition tracking
+        _prev_regime = [None]  # mutable container for nonlocal in closure
+        _regime_transitions = []
 
-            close = recent_window["close"]
-            current = close.iloc[-1]
-            current_bar = recent_window.iloc[-1]
-            prev_bar = recent_window.iloc[-2] if len(recent_window) >= 2 else current_bar
+        # ================================================================
+        # SHARED HELPERS (used by both trend and mean-reversion paths)
+        # ================================================================
 
-            bar_bullish = current_bar["close"] > current_bar["open"]
-            bar_bearish = current_bar["close"] < current_bar["open"]
-            prev_bar_bullish = prev_bar["close"] > prev_bar["open"] if len(data_so_far) >= 2 else False
-            prev_bar_bearish = prev_bar["close"] < prev_bar["open"] if len(data_so_far) >= 2 else False
-
-            current_date = str(current_bar.get("timestamp", ""))[:10]
-            bias = hourly_bias_map.get(current_date, "neutral")
-
-            # --- REGIME FILTER (with overridable thresholds) ---
-            conf_trending = overrides.get("confluence_trending", 2.5)
-            conf_sideways = overrides.get("confluence_sideways", 3.5)
-            if regime_state:
-                regime = regime_state.regime.value
-                if regime in ("accumulation", "distribution", "unknown", "volatile"):
-                    regime_min_confluence = conf_sideways
-                else:
-                    regime_min_confluence = conf_trending
-            else:
-                regime_min_confluence = conf_trending
-
-            # --- ATR ---
-            atr_series = calculate_atr(recent_window, period=14)
-            atr = float(atr_series.iloc[-1]) if not atr_series.empty and len(atr_series) >= 14 else current * 0.005
-
-            # ================================================================
-            # PROFESSIONAL INDICATORS
-            # ================================================================
-
+        def _compute_indicators(recent_window, current, prev_bar, atr):
+            """Compute all 8 professional indicators. Returns a dict of results."""
             # 1. LIQUIDITY SWEEPS
             sweeps = detect_liquidity_sweeps(recent_window, lookback=20, threshold_pct=0.001)
             recent_sweep = None
@@ -751,7 +745,7 @@ class Prometheus:
             current_vol = recent_window["volume"].iloc[-1]
             volume_surge = current_vol > vol_avg * 1.3 if vol_avg > 0 else False
 
-            # 7. VWAP POSITION
+            # 7. VWAP
             vwap_df = calculate_vwap(recent_window.copy())
             vwap_val = vwap_df["vwap"].iloc[-1] if "vwap" in vwap_df.columns else current
             vwap_direction = "bullish" if current > vwap_val else "bearish"
@@ -767,103 +761,19 @@ class Prometheus:
                 elif price_change < 0 and vol_trend:
                     vol_confirm_dir = "bearish"
 
-            # ================================================================
-            # CONFLUENCE SCORING
-            # ================================================================
-            bull_score = 0
-            bear_score = 0
-            bull_reasons = []
-            bear_reasons = []
+            return {
+                "recent_sweep": recent_sweep, "sweep_direction": sweep_direction,
+                "fvg_direction": fvg_direction,
+                "vp_direction": vp_direction, "poc": poc, "va_high": va_high, "va_low": va_low,
+                "ote_direction": ote_direction,
+                "div_direction": div_direction,
+                "volume_surge": volume_surge,
+                "vwap_val": vwap_val, "vwap_direction": vwap_direction,
+                "vol_confirm_dir": vol_confirm_dir,
+            }
 
-            if sweep_direction == "bullish":
-                bull_score += 1.5
-                bull_reasons.append("LiqSweep")
-            elif sweep_direction == "bearish":
-                bear_score += 1.5
-                bear_reasons.append("LiqSweep")
-
-            if fvg_direction == "bullish":
-                bull_score += 1.5
-                bull_reasons.append("FVG")
-            elif fvg_direction == "bearish":
-                bear_score += 1.5
-                bear_reasons.append("FVG")
-
-            if vp_direction == "bullish":
-                bull_score += 1.0
-                bull_reasons.append("VP")
-            elif vp_direction == "bearish":
-                bear_score += 1.0
-                bear_reasons.append("VP")
-
-            if ote_direction == "bullish":
-                bull_score += 1.0
-                bull_reasons.append("OTE")
-            elif ote_direction == "bearish":
-                bear_score += 1.0
-                bear_reasons.append("OTE")
-
-            if div_direction == "bullish":
-                bull_score += 1.5
-                bull_reasons.append("RSI_Div")
-            elif div_direction == "bearish":
-                bear_score += 1.5
-                bear_reasons.append("RSI_Div")
-
-            if volume_surge:
-                if bull_score > bear_score:
-                    bull_score += 0.5
-                    bull_reasons.append("VolSurge")
-                elif bear_score > bull_score:
-                    bear_score += 0.5
-                    bear_reasons.append("VolSurge")
-
-            if vol_confirm_dir == "bullish":
-                bull_score += 0.5
-                bull_reasons.append("Acc")
-            elif vol_confirm_dir == "bearish":
-                bear_score += 0.5
-                bear_reasons.append("Dist")
-
-            if vwap_direction == "bullish":
-                bull_score += 0.5
-                bull_reasons.append("VWAP")
-            else:
-                bear_score += 0.5
-                bear_reasons.append("VWAP")
-
-            if bias == "bullish":
-                bull_score += 0.5
-            elif bias == "bearish":
-                bear_score += 0.5
-
-            # ================================================================
-            # DIRECTIONAL DECISION
-            # ================================================================
-            min_confluence = regime_min_confluence
-
-            net_bull = bull_score - bear_score
-            net_bear = bear_score - bull_score
-
-            if bull_score >= min_confluence and net_bull >= 1.5:
-                direction = "bullish"
-                score = bull_score
-                reasons = bull_reasons
-            elif bear_score >= min_confluence and net_bear >= 1.5:
-                direction = "bearish"
-                score = bear_score
-                reasons = bear_reasons
-            else:
-                return None
-
-            if bias == "bullish" and direction == "bearish":
-                return None
-            if bias == "bearish" and direction == "bullish":
-                return None
-
-            # ================================================================
-            # OPTIONS PRICING via Black-Scholes
-            # ================================================================
+        def _price_options(current, direction, atr, data_so_far):
+            """Black-Scholes pricing. Returns (premium, delta, lot_size, strike, sigma) or None."""
             lot_size = get_lot_size(symbol)
             strike = get_atm_strike(current, symbol)
 
@@ -893,13 +803,140 @@ class Prometheus:
             delta = abs(greeks.get("delta", 0.5))
             delta = max(delta, 0.20)
 
-            # ================================================================
-            # SL & TARGET — Maximum Extraction
-            # ================================================================
+            return premium, delta, lot_size, strike, sigma
+
+        def _size_position(premium, premium_sl, lot_size):
+            """Position sizing. Returns total_quantity or None if invalid."""
+            if capital < 30000:
+                risk_pct = 0.04
+            elif capital < 75000:
+                risk_pct = 0.03
+            else:
+                risk_pct = 0.02
+
+            risk_per_trade = capital * risk_pct
+            loss_per_lot = (premium - premium_sl) * lot_size
+            if loss_per_lot <= 0:
+                return None
+
+            lots = max(1, int(risk_per_trade / loss_per_lot))
+            premium_per_lot = premium * lot_size
+            max_deploy = 0.45 if capital < 50000 else (0.35 if capital < 100000 else 0.25)
+            max_lots = max(1, int((capital * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
+            lots = min(lots, max_lots)
+            return lots * lot_size
+
+        def _build_signal(direction, premium, premium_sl, premium_target,
+                          total_quantity, reasons, time_stop_bars, be_ratio, strategy_prefix="pro"):
+            """Build the final signal dict."""
+            return {
+                "symbol": symbol,
+                "direction": direction,
+                "entry_price": premium,
+                "stop_loss": premium_sl,
+                "target": premium_target,
+                "quantity": total_quantity,
+                "strategy": f"{strategy_prefix}_{'+'.join(reasons)}",
+                "instrument_type": "options",
+                "delta": 0,  # placeholder, overwritten below
+                "max_bars": time_stop_bars,
+                "bar_interval": primary_interval,
+                "breakeven_ratio": be_ratio,
+            }
+
+        # ================================================================
+        # TREND SIGNAL GENERATION (existing logic)
+        # ================================================================
+
+        def _generate_trend_signal(data_so_far, recent_window, current, prev_bar,
+                                   atr, bias, min_confluence, indicators):
+            """Trend-following signal: directional confluence → BS pricing → sizing."""
+            ind = indicators
+
+            # --- Confluence scoring ---
+            bull_score = 0
+            bear_score = 0
+            bull_reasons = []
+            bear_reasons = []
+
+            if ind["sweep_direction"] == "bullish":
+                bull_score += 1.5; bull_reasons.append("LiqSweep")
+            elif ind["sweep_direction"] == "bearish":
+                bear_score += 1.5; bear_reasons.append("LiqSweep")
+
+            if ind["fvg_direction"] == "bullish":
+                bull_score += 1.5; bull_reasons.append("FVG")
+            elif ind["fvg_direction"] == "bearish":
+                bear_score += 1.5; bear_reasons.append("FVG")
+
+            if ind["vp_direction"] == "bullish":
+                bull_score += 1.0; bull_reasons.append("VP")
+            elif ind["vp_direction"] == "bearish":
+                bear_score += 1.0; bear_reasons.append("VP")
+
+            if ind["ote_direction"] == "bullish":
+                bull_score += 1.0; bull_reasons.append("OTE")
+            elif ind["ote_direction"] == "bearish":
+                bear_score += 1.0; bear_reasons.append("OTE")
+
+            if ind["div_direction"] == "bullish":
+                bull_score += 1.5; bull_reasons.append("RSI_Div")
+            elif ind["div_direction"] == "bearish":
+                bear_score += 1.5; bear_reasons.append("RSI_Div")
+
+            if ind["volume_surge"]:
+                if bull_score > bear_score:
+                    bull_score += 0.5; bull_reasons.append("VolSurge")
+                elif bear_score > bull_score:
+                    bear_score += 0.5; bear_reasons.append("VolSurge")
+
+            if ind["vol_confirm_dir"] == "bullish":
+                bull_score += 0.5; bull_reasons.append("Acc")
+            elif ind["vol_confirm_dir"] == "bearish":
+                bear_score += 0.5; bear_reasons.append("Dist")
+
+            if ind["vwap_direction"] == "bullish":
+                bull_score += 0.5; bull_reasons.append("VWAP")
+            else:
+                bear_score += 0.5; bear_reasons.append("VWAP")
+
+            if bias == "bullish":
+                bull_score += 0.5
+            elif bias == "bearish":
+                bear_score += 0.5
+
+            # --- Directional decision ---
+            net_bull = bull_score - bear_score
+            net_bear = bear_score - bull_score
+
+            if bull_score >= min_confluence and net_bull >= 1.5:
+                direction = "bullish"
+                score = bull_score
+                reasons = bull_reasons
+            elif bear_score >= min_confluence and net_bear >= 1.5:
+                direction = "bearish"
+                score = bear_score
+                reasons = bear_reasons
+            else:
+                return None
+
+            # Bias filter
+            if bias == "bullish" and direction == "bearish":
+                return None
+            if bias == "bearish" and direction == "bullish":
+                return None
+
+            # --- Options pricing ---
+            pricing = _price_options(current, direction, atr, data_so_far)
+            if pricing is None:
+                return None
+            premium, delta, lot_size, strike, sigma = pricing
+
+            # --- SL & TARGET ---
             sl_atr_mult = 1.0 if capital < 50000 else (1.2 if capital < 100000 else 1.5)
 
-            if recent_sweep and sweep_direction == direction:
-                sl_level = recent_sweep["level"]
+            if ind["recent_sweep"] and ind["sweep_direction"] == direction:
+                sl_level = ind["recent_sweep"]["level"]
                 if direction == "bullish":
                     sl_index_move = current - sl_level + atr * 0.3
                 else:
@@ -914,7 +951,7 @@ class Prometheus:
             if risk_check <= 0:
                 return None
 
-            # Target ATR multiplier (overridable)
+            # Target ATR multiplier
             o_target_atr = overrides.get("target_atr_mult", None)
             if o_target_atr is not None:
                 base_target = o_target_atr
@@ -946,7 +983,7 @@ class Prometheus:
             if risk_check > 0 and reward / risk_check < min_rr:
                 premium_target = premium + risk_check * min_rr
 
-            # KELLY GATE
+            # Kelly gate
             kelly_wr = overrides.get("kelly_wr", 0.35)
             final_reward = premium_target - premium
             final_risk = premium - premium_sl
@@ -954,66 +991,273 @@ class Prometheus:
             if ev <= 0:
                 return None
 
-            # ================================================================
-            # POSITION SIZING
-            # ================================================================
-            if capital < 30000:
-                risk_pct = 0.04
-            elif capital < 75000:
-                risk_pct = 0.03
-            else:
-                risk_pct = 0.02
-
-            risk_per_trade = capital * risk_pct
-            loss_per_lot = (premium - premium_sl) * lot_size
-            if loss_per_lot <= 0:
+            # --- Position sizing ---
+            total_quantity = _size_position(premium, premium_sl, lot_size)
+            if total_quantity is None:
                 return None
 
-            lots = max(1, int(risk_per_trade / loss_per_lot))
-            premium_per_lot = premium * lot_size
-            max_deploy = 0.45 if capital < 50000 else (0.35 if capital < 100000 else 0.25)
-            max_lots = max(1, int((capital * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
-            lots = min(lots, max_lots)
-            total_quantity = lots * lot_size
-
-            # Time stop (overridable)
+            # --- Time stop ---
             o_time_stop = overrides.get("time_stop_bars", None)
             if o_time_stop is not None:
                 time_stop_bars = o_time_stop
             elif primary_interval == "day":
-                if capital < 50000:
-                    time_stop_bars = 5
-                elif capital < 100000:
-                    time_stop_bars = 4
-                else:
-                    time_stop_bars = 3
+                time_stop_bars = 5 if capital < 50000 else (4 if capital < 100000 else 3)
             else:
-                if capital < 50000:
-                    time_stop_bars = 16
-                elif capital < 100000:
-                    time_stop_bars = 12
-                else:
-                    time_stop_bars = 10
+                time_stop_bars = 16 if capital < 50000 else (12 if capital < 100000 else 10)
 
-            sig_dict = {
-                "symbol": symbol,
-                "direction": direction,
-                "entry_price": premium,
-                "stop_loss": premium_sl,
-                "target": premium_target,
-                "quantity": total_quantity,
-                "strategy": f"pro_{'+'.join(reasons)}",
-                "instrument_type": "options",
-                "delta": delta,
-                "max_bars": time_stop_bars,
-                "bar_interval": primary_interval,
-            }
-
-            # Pass breakeven_ratio to engine if overridden
             be_ratio = overrides.get("breakeven_ratio", 0.4)
-            sig_dict["breakeven_ratio"] = be_ratio
 
-            return sig_dict
+            sig = _build_signal(direction, premium, premium_sl, premium_target,
+                                total_quantity, reasons, time_stop_bars, be_ratio, "pro")
+            sig["delta"] = delta
+            return sig
+
+        # ================================================================
+        # MEAN-REVERSION SIGNAL GENERATION (Parrondo — new)
+        # ================================================================
+
+        def _generate_mean_reversion_signal(data_so_far, recent_window, current, prev_bar,
+                                            atr, bias, bar_regime, indicators):
+            """
+            Mean-reversion signal for sideways/accumulation/distribution regimes.
+
+            Fades overextended moves back toward VWAP/POC.
+            Entry requires: VWAP deviation + RSI extreme + VP boundary + no active trend.
+            """
+            ind = indicators
+
+            # --- Mean-reversion parameters (overridable) ---
+            mr_vwap_dev = overrides.get("mr_vwap_deviation", 1.0)
+            mr_rsi_os = overrides.get("mr_rsi_oversold", 30)
+            mr_rsi_ob = overrides.get("mr_rsi_overbought", 70)
+
+            vwap_val = ind["vwap_val"]
+            poc = ind["poc"]
+            va_high = ind["va_high"]
+            va_low = ind["va_low"]
+
+            # Need valid VWAP and VP data
+            if vwap_val <= 0 or poc <= 0 or va_high <= 0 or va_low <= 0:
+                return None
+
+            # Check regime confirms no strong trend
+            if bar_regime and abs(bar_regime.trend_strength) > 0.3:
+                return None
+
+            # --- RSI for mean-reversion ---
+            rsi_series = calculate_rsi(recent_window["close"], period=14)
+            if rsi_series.empty:
+                return None
+            current_rsi = rsi_series.iloc[-1]
+            if pd.isna(current_rsi):
+                return None
+
+            # --- Determine mean-reversion direction ---
+            vwap_distance = (current - vwap_val) / atr  # in ATR units
+            direction = None
+            reasons = []
+
+            # Score-based mean-reversion (need 2+ conditions, not all 3)
+            mr_bull_score = 0
+            mr_bear_score = 0
+            mr_bull_reasons = []
+            mr_bear_reasons = []
+
+            # VWAP deviation (strongest MR signal)
+            if vwap_distance >= mr_vwap_dev:
+                mr_bear_score += 1.5
+                mr_bear_reasons.append("MR_VWAP")
+            elif vwap_distance <= -mr_vwap_dev:
+                mr_bull_score += 1.5
+                mr_bull_reasons.append("MR_VWAP")
+
+            # RSI extremes
+            if current_rsi >= mr_rsi_ob:
+                mr_bear_score += 1.5
+                mr_bear_reasons.append("MR_RSI_OB")
+            elif current_rsi <= mr_rsi_os:
+                mr_bull_score += 1.5
+                mr_bull_reasons.append("MR_RSI_OS")
+
+            # Volume Profile boundary (price at/beyond VA edge, fading back to POC)
+            if current >= va_high:
+                mr_bear_score += 1.0
+                mr_bear_reasons.append("MR_VA_H")
+            elif current <= va_low:
+                mr_bull_score += 1.0
+                mr_bull_reasons.append("MR_VA_L")
+
+            # RSI divergence confirmation
+            if ind["div_direction"] == "bearish":
+                mr_bear_score += 1.0
+                mr_bear_reasons.append("RSI_Div")
+            elif ind["div_direction"] == "bullish":
+                mr_bull_score += 1.0
+                mr_bull_reasons.append("RSI_Div")
+
+            # Need score >= 2.5 (at least 2 conditions) and net edge >= 1.0
+            mr_min_score = 2.5
+            if mr_bear_score >= mr_min_score and mr_bear_score - mr_bull_score >= 1.0:
+                direction = "bearish"
+                reasons = mr_bear_reasons
+            elif mr_bull_score >= mr_min_score and mr_bull_score - mr_bear_score >= 1.0:
+                direction = "bullish"
+                reasons = mr_bull_reasons
+
+            if direction is None:
+                return None
+
+            # Bias filter (relaxed for MR — allow counter-bias with extra confirmation)
+            if bias == "bullish" and direction == "bearish":
+                return None
+            if bias == "bearish" and direction == "bullish":
+                return None
+
+            # --- Options pricing ---
+            pricing = _price_options(current, direction, atr, data_so_far)
+            if pricing is None:
+                return None
+            premium, delta, lot_size, strike, sigma = pricing
+
+            # --- SL & TARGET (tighter for mean-reversion) ---
+            mr_sl = overrides.get("mr_sl_atr", 0.8)
+            mr_target = overrides.get("mr_target_atr", 1.5)
+            mr_min_rr = overrides.get("mr_min_rr", 1.5)
+
+            sl_index_move = atr * mr_sl
+            sl_premium_drop = delta * sl_index_move
+            premium_sl = max(premium - sl_premium_drop, premium * 0.35)
+
+            risk_check = premium - premium_sl
+            if risk_check <= 0:
+                return None
+
+            # Target: aim for VWAP/POC reversion
+            target_index_move = atr * mr_target
+            premium_target = premium + delta * target_index_move
+
+            # Enforce minimum R:R
+            reward = premium_target - premium
+            if risk_check > 0 and reward / risk_check < mr_min_rr:
+                premium_target = premium + risk_check * mr_min_rr
+
+            # Kelly gate (higher WR assumption for mean-reversion)
+            mr_kelly = overrides.get("mr_kelly_wr", 0.50)
+            final_reward = premium_target - premium
+            final_risk = premium - premium_sl
+            ev = mr_kelly * final_reward - (1 - mr_kelly) * final_risk
+            if ev <= 0:
+                return None
+
+            # --- Position sizing ---
+            total_quantity = _size_position(premium, premium_sl, lot_size)
+            if total_quantity is None:
+                return None
+
+            # --- Time stop (shorter for mean-reversion) ---
+            mr_ts = overrides.get("mr_time_stop", None)
+            if mr_ts is not None:
+                time_stop_bars = mr_ts
+            elif primary_interval == "day":
+                time_stop_bars = 3
+            else:
+                time_stop_bars = 8
+
+            mr_be = overrides.get("mr_breakeven_ratio", 0.3)
+
+            sig = _build_signal(direction, premium, premium_sl, premium_target,
+                                total_quantity, reasons, time_stop_bars, mr_be, "mr")
+            sig["delta"] = delta
+            return sig
+
+        # ================================================================
+        # MAIN SIGNAL GENERATOR CLOSURE
+        # ================================================================
+
+        def pro_signal_generator(data_so_far: pd.DataFrame) -> Optional[Dict]:
+            if len(data_so_far) < 50:
+                return None
+
+            recent_window = data_so_far.tail(100) if len(data_so_far) > 100 else data_so_far
+
+            close = recent_window["close"]
+            current = close.iloc[-1]
+            current_bar = recent_window.iloc[-1]
+            prev_bar = recent_window.iloc[-2] if len(recent_window) >= 2 else current_bar
+
+            current_date = str(current_bar.get("timestamp", ""))[:10]
+            bias = hourly_bias_map.get(current_date, "neutral")
+
+            # --- ATR ---
+            atr_series = calculate_atr(recent_window, period=14)
+            atr = float(atr_series.iloc[-1]) if not atr_series.empty and len(atr_series) >= 14 else current * 0.005
+
+            # --- INDICATORS (computed once, shared by both paths) ---
+            indicators = _compute_indicators(recent_window, current, prev_bar, atr)
+
+            # ================================================================
+            # REGIME ROUTING
+            # ================================================================
+            if parrondo and regime_detector:
+                # PER-BAR REGIME DETECTION (Parrondo mode)
+                bar_regime = regime_detector.detect_fast(data_so_far, recheck_every=recheck_interval)
+                regime_value = bar_regime.regime.value
+
+                # Track transitions
+                if _prev_regime[0] is not None and bar_regime.regime != _prev_regime[0]:
+                    _regime_transitions.append({
+                        "bar": len(data_so_far),
+                        "from": _prev_regime[0].value,
+                        "to": regime_value,
+                        "confidence": bar_regime.confidence,
+                    })
+                _prev_regime[0] = bar_regime.regime
+
+                # ROUTE based on detected regime
+                if regime_value == "volatile":
+                    # Capital preservation — skip trading in volatile regime
+                    return None
+                elif regime_value in ("accumulation", "distribution"):
+                    # MEAN-REVERSION mode
+                    mr_signal = _generate_mean_reversion_signal(
+                        data_so_far, recent_window, current, prev_bar,
+                        atr, bias, bar_regime, indicators
+                    )
+                    if mr_signal:
+                        return mr_signal
+                    # Fallback: try trend with higher confluence if MR doesn't fire
+                    conf_sideways = overrides.get("confluence_sideways", 3.5)
+                    return _generate_trend_signal(
+                        data_so_far, recent_window, current, prev_bar,
+                        atr, bias, conf_sideways, indicators
+                    )
+                else:
+                    # TREND mode (markup, markdown, unknown)
+                    conf_trending = overrides.get("confluence_trending", 2.5)
+                    return _generate_trend_signal(
+                        data_so_far, recent_window, current, prev_bar,
+                        atr, bias, conf_trending, indicators
+                    )
+            else:
+                # STATIC REGIME (original behavior — backward compatible)
+                conf_trending = overrides.get("confluence_trending", 2.5)
+                conf_sideways = overrides.get("confluence_sideways", 3.5)
+                if regime_state:
+                    regime = regime_state.regime.value
+                    if regime in ("accumulation", "distribution", "unknown", "volatile"):
+                        min_confluence = conf_sideways
+                    else:
+                        min_confluence = conf_trending
+                else:
+                    min_confluence = conf_trending
+
+                return _generate_trend_signal(
+                    data_so_far, recent_window, current, prev_bar,
+                    atr, bias, min_confluence, indicators
+                )
+
+        # Attach transition log to the closure for post-backtest analysis
+        pro_signal_generator.regime_transitions = _regime_transitions
 
         return pro_signal_generator
 
@@ -1024,18 +1268,21 @@ class Prometheus:
         strategy_name: str = "default",
         param_overrides: dict = None,
         verbose: bool = True,
+        parrondo: bool = False,
     ):
         """
         Run a backtest on an arbitrary date-sliced DataFrame.
         Handles regime detection, bias, and signal generator independently (no leakage).
         Returns (BacktestResult, BacktestEngine).
         """
-        # Regime detection on this slice only
+        # Regime detection on this slice only (static — used when parrondo=False)
         regime_state = None
         if len(data_slice) >= 50:
             regime_state = self.regime_detector.detect(data_slice)
             if verbose:
                 logger.info(f"  Regime: {regime_state.regime.value} | Confidence: {regime_state.confidence:.2f}")
+                if parrondo:
+                    logger.info("  Parrondo regime-switching: ENABLED (per-bar detection)")
 
         # Compute bias from daily data only (consistent for all periods)
         hourly_bias_map = self._compute_daily_bias(data_slice)
@@ -1051,6 +1298,7 @@ class Prometheus:
             primary_interval="day",
             symbol=symbol,
             param_overrides=param_overrides,
+            parrondo=parrondo,
         )
 
         # Run backtest
@@ -1093,6 +1341,24 @@ class Prometheus:
                     wr = s["wins"] / s["count"] * 100 if s["count"] > 0 else 0
                     print(f"    {r}: {s['count']} trades, {wr:.0f}% WR, PnL Rs {s['total_pnl']:+,.0f}")
 
+            # Parrondo regime transition analysis
+            if parrondo and hasattr(signal_gen, 'regime_transitions'):
+                transitions = signal_gen.regime_transitions
+                if transitions:
+                    print(f"\n  Regime Transitions: {len(transitions)} switches")
+                    # Count transitions by type
+                    from_to_counts = {}
+                    for t in transitions:
+                        key = f"{t['from']} -> {t['to']}"
+                        from_to_counts[key] = from_to_counts.get(key, 0) + 1
+                    for key, count in sorted(from_to_counts.items(), key=lambda x: -x[1]):
+                        print(f"    {key}: {count}x")
+
+                    # Count strategy mode distribution
+                    mr_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('mr_'))
+                    trend_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('pro_'))
+                    print(f"  Strategy Split: {trend_trades} trend, {mr_trades} mean-reversion")
+
         return result, engine
 
     # ─────────────────────────────────────────────────────────────────────
@@ -1102,11 +1368,13 @@ class Prometheus:
         self,
         symbol: str = "NIFTY 50",
         days: int = 365,
-        strategy: str = "trend"
+        strategy: str = "trend",
+        parrondo: bool = False,
     ):
         """Run backtest on historical data using professional signal stack."""
         self.dashboard.show_header()
-        logger.info(f"Starting backtest: {strategy} on {symbol} ({days} days)")
+        logger.info(f"Starting backtest: {strategy} on {symbol} ({days} days)" +
+                     (" [PARRONDO]" if parrondo else ""))
 
         # ================================================================
         # MULTI-TIMEFRAME DATA FETCH
@@ -1219,7 +1487,23 @@ class Prometheus:
         # ================================================================
         # PROFESSIONAL SIGNAL GENERATOR (adapts to primary timeframe)
         # ================================================================
-        def pro_signal_generator(data_so_far: pd.DataFrame) -> Optional[Dict]:
+
+        # When Parrondo mode is enabled, use the factory-generated signal
+        # generator which supports per-bar regime detection and mean-reversion.
+        # Otherwise, use the original inline signal generator (backward compatible).
+        _use_parrondo_gen = parrondo
+        if _use_parrondo_gen:
+            self.regime_detector.reset_cache()
+            pro_signal_generator = self._make_signal_generator(
+                regime_state=regime_state,
+                hourly_bias_map=hourly_bias_map,
+                capital=self.initial_capital,
+                primary_interval=primary_interval,
+                symbol=symbol,
+                parrondo=True,
+            )
+
+        def _inline_signal_generator(data_so_far: pd.DataFrame) -> Optional[Dict]:
             """
             Professional signal generator v4 — Smart Exits approach.
 
@@ -1632,6 +1916,10 @@ class Prometheus:
                 "bar_interval": primary_interval,
             }
 
+        # Select signal generator: Parrondo (factory) or original (inline)
+        if not _use_parrondo_gen:
+            pro_signal_generator = _inline_signal_generator
+
         # Track capital across bars for dynamic sizing
         capital = self.initial_capital
 
@@ -1642,7 +1930,8 @@ class Prometheus:
             cost_config=cost_cfg,
         )
 
-        logger.info(f"Running backtest on {len(data_primary)} bars of {primary_interval} data...")
+        logger.info(f"Running backtest on {len(data_primary)} bars of {primary_interval} data..."
+                     + (" [PARRONDO]" if parrondo else ""))
 
         result = engine.run(
             data=data_primary,
@@ -1697,6 +1986,21 @@ class Prometheus:
                 wr = s["wins"] / s["count"] * 100 if s["count"] > 0 else 0
                 print(f"  {r}: {s['count']} trades, {wr:.0f}% WR, PnL Rs {s['total_pnl']:+,.0f}")
 
+        # Parrondo regime transition analysis
+        if parrondo and hasattr(pro_signal_generator, 'regime_transitions'):
+            transitions = pro_signal_generator.regime_transitions
+            if transitions:
+                print(f"\n--- Parrondo Regime Transitions: {len(transitions)} switches ---")
+                from_to_counts = {}
+                for t in transitions:
+                    key = f"{t['from']} -> {t['to']}"
+                    from_to_counts[key] = from_to_counts.get(key, 0) + 1
+                for key, count in sorted(from_to_counts.items(), key=lambda x: -x[1]):
+                    print(f"  {key}: {count}x")
+                mr_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('mr_'))
+                trend_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('pro_'))
+                print(f"  Strategy Split: {trend_trades} trend, {mr_trades} mean-reversion")
+
         # Scenario analysis
         print("\n--- Scenario Analysis ---")
         for pct in [-5, -3, -1, 1, 3, 5]:
@@ -1716,6 +2020,7 @@ class Prometheus:
         train_end: str = "2020-12-31",
         test_start: str = "2021-01-01",
         strategy: str = "trend",
+        parrondo: bool = False,
     ):
         """
         Walk-forward validation: train on historical, test on unseen data.
@@ -1763,7 +2068,8 @@ class Prometheus:
         print("  IN-SAMPLE (Training Period)")
         print("=" * 70)
         result_train, engine_train = self._run_backtest_on_slice(
-            data_train, symbol, f"WF_train_{symbol.replace(' ', '_')}"
+            data_train, symbol, f"WF_train_{symbol.replace(' ', '_')}",
+            parrondo=parrondo,
         )
 
         # ── OUT-OF-SAMPLE ──
@@ -1771,7 +2077,8 @@ class Prometheus:
         print("  OUT-OF-SAMPLE (Test Period — UNSEEN DATA)")
         print("=" * 70)
         result_test, engine_test = self._run_backtest_on_slice(
-            data_test, symbol, f"WF_test_{symbol.replace(' ', '_')}"
+            data_test, symbol, f"WF_test_{symbol.replace(' ', '_')}",
+            parrondo=parrondo,
         )
 
         # ── COMPARISON ──
@@ -2214,6 +2521,12 @@ def main():
         default="2021-01-01",
         help="Start date for test period in walkforward mode (default: 2021-01-01)",
     )
+    parser.add_argument(
+        "--parrondo",
+        action="store_true",
+        default=False,
+        help="Enable Parrondo regime-switching: per-bar regime detection with mean-reversion in sideways markets",
+    )
 
     args = parser.parse_args()
 
@@ -2242,6 +2555,7 @@ def main():
             symbol=args.symbol or "NIFTY 50",
             days=args.days,
             strategy=args.strategy,
+            parrondo=args.parrondo,
         )
 
     elif args.mode == "signal":
@@ -2256,6 +2570,7 @@ def main():
             train_end=args.train_end,
             test_start=args.test_start,
             strategy=args.strategy,
+            parrondo=args.parrondo,
         )
 
     elif args.mode == "sensitivity":

@@ -337,6 +337,39 @@ class RegimeDetector:
         }
         return strategy_map.get(regime, ["trend"])
 
+    def detect_fast(
+        self,
+        df: pd.DataFrame,
+        recheck_every: int = 5,
+    ) -> RegimeState:
+        """
+        Per-bar regime detection with caching for performance.
+
+        Designed for bar-by-bar calling inside a backtest signal generator.
+        Re-detects regime every `recheck_every` bars (default 5) and returns
+        the cached result in between.
+
+        Args:
+            df: OHLCV DataFrame (full data_so_far — will use last 100 bars)
+            recheck_every: Re-detect regime every N calls
+        """
+        self._cache_bar_count = getattr(self, '_cache_bar_count', 0) + 1
+        if hasattr(self, '_cached_regime') and self._cache_bar_count < recheck_every:
+            return self._cached_regime
+
+        self._cache_bar_count = 0
+        # Use last 100 bars for detection (50 minimum + buffer for rolling calcs)
+        window = df.tail(100) if len(df) > 100 else df
+        result = self.detect(window)
+        self._cached_regime = result
+        return result
+
+    def reset_cache(self):
+        """Reset the per-bar detection cache. Call before a new backtest run."""
+        if hasattr(self, '_cached_regime'):
+            del self._cached_regime
+        self._cache_bar_count = 0
+
     def _build_details(
         self,
         regime: MarketRegime,
