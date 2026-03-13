@@ -423,6 +423,9 @@ class BacktestEngine:
                 net_pnl=round(net_pnl, 2),
                 strategy=position["strategy"],
                 exit_reason=reason,
+                option_expiry_date=position.get("option_expiry_date", ""),
+                atr_at_entry=float(position.get("atr_at_entry", 0.0)),
+                regime_at_entry=position.get("regime_at_entry", "unknown"),
             )
             return capital, trade
 
@@ -462,6 +465,9 @@ class BacktestEngine:
             net_pnl=round(net_pnl, 2),
             strategy=position["strategy"],
             exit_reason=reason,
+            option_expiry_date=position.get("option_expiry_date", ""),
+            atr_at_entry=float(position.get("atr_at_entry", 0.0)),
+            regime_at_entry=position.get("regime_at_entry", "unknown"),
         )
 
         return capital, trade
@@ -505,13 +511,33 @@ class BacktestEngine:
                 else:
                     theta_pct = 0.002  # Accelerates if held too long
             else:
-                # Daily bars: original progressive decay
+                # Daily bars: original progressive decay + DTE acceleration
+                base_theta = 0.008
                 if bars_held <= 3:
-                    theta_pct = 0.008
+                    base_theta = 0.008
                 elif bars_held <= 6:
-                    theta_pct = 0.015
+                    base_theta = 0.015
                 else:
-                    theta_pct = 0.025
+                    base_theta = 0.025
+
+                # DTE-aware acceleration: theta accelerates into expiry
+                # Extract expiry date from position (stored when signal created)
+                option_expiry = position.get("option_expiry_date", "")
+                dte_acceleration = 1.0  # Default: no acceleration
+
+                if option_expiry:
+                    try:
+                        from datetime import datetime
+                        expiry_date = datetime.strptime(option_expiry, "%Y-%m-%d")
+                        bar_date = datetime.strptime(str(bar["timestamp"])[:10], "%Y-%m-%d")
+                        days_to_expiry = max((expiry_date - bar_date).days, 1)
+                        # Accelerate: theta_actual = base × (1 + 3/DTE)
+                        # E.g., at 1 DTE: 4x acceleration, at 3 DTE: 2x, at 7 DTE: 1.43x
+                        dte_acceleration = 1.0 + 3.0 / days_to_expiry
+                    except Exception:
+                        pass  # If parse fails, use default acceleration
+
+                theta_pct = base_theta * dte_acceleration
             theta_decay = current_premium * theta_pct
 
             # Estimate premium range using delta × index range
