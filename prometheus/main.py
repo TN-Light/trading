@@ -1096,7 +1096,7 @@ class Prometheus:
                 mr_bull_reasons.append("RSI_Div")
 
             # Need score >= 2.5 (at least 2 conditions) and net edge >= 1.0
-            mr_min_score = 2.5
+            mr_min_score = overrides.get("mr_min_score", 2.5)
             if mr_bear_score >= mr_min_score and mr_bear_score - mr_bull_score >= 1.0:
                 direction = "bearish"
                 reasons = mr_bear_reasons
@@ -1275,10 +1275,18 @@ class Prometheus:
         Handles regime detection, bias, and signal generator independently (no leakage).
         Returns (BacktestResult, BacktestEngine).
         """
-        # Regime detection on this slice only (static — used when parrondo=False)
-        regime_state = None
-        if len(data_slice) >= 50:
-            regime_state = self.regime_detector.detect(data_slice)
+        # Extract regime_overrides if present in param_overrides (for tuning sweeps)
+        overrides = param_overrides or {}
+        regime_overrides = overrides.get("regime_overrides", None)
+        mr_min_score = overrides.get("mr_min_score", 2.5)
+
+        # Create a tuned regime detector if overrides provided
+        if regime_overrides:
+            tuned_detector = RegimeDetector(**regime_overrides)
+            regime_state = tuned_detector.detect(data_slice) if len(data_slice) >= 50 else None
+        else:
+            tuned_detector = None
+            regime_state = self.regime_detector.detect(data_slice) if len(data_slice) >= 50 else None
             if verbose:
                 logger.info(f"  Regime: {regime_state.regime.value} | Confidence: {regime_state.confidence:.2f}")
                 if parrondo:
@@ -1291,15 +1299,31 @@ class Prometheus:
 
         # Create signal generator
         capital = self.initial_capital
+
+        # If regime_overrides provided, force parrondo=True for per-bar detection
+        use_parrondo = parrondo or bool(regime_overrides)
+
+        # Create clean param_overrides (without regime_overrides) for signal generator
+        clean_param_overrides = {k: v for k, v in overrides.items() if k not in ["regime_overrides"]}
+
+        # Set tuned detector if available
+        if tuned_detector:
+            original_detector = self.regime_detector
+            self.regime_detector = tuned_detector
+
         signal_gen = self._make_signal_generator(
             regime_state=regime_state,
             hourly_bias_map=hourly_bias_map,
             capital=capital,
             primary_interval="day",
             symbol=symbol,
-            param_overrides=param_overrides,
-            parrondo=parrondo,
+            param_overrides=clean_param_overrides,
+            parrondo=use_parrondo,
         )
+
+        # Restore original detector if we swapped it
+        if tuned_detector:
+            self.regime_detector = original_detector
 
         # Run backtest
         cost_cfg = get("backtest.costs", {})
@@ -1370,6 +1394,8 @@ class Prometheus:
         days: int = 365,
         strategy: str = "trend",
         parrondo: bool = False,
+        regime_overrides: Optional[Dict] = None,
+        mr_min_score: float = 2.5,
     ):
         """Run backtest on historical data using professional signal stack."""
         self.dashboard.show_header()
@@ -1408,6 +1434,13 @@ class Prometheus:
                 use_daily_primary = True
 
         logger.info(f"Loaded: {len(data_primary)} x {primary_interval}, {len(data_hourly)} x hourly, {len(data_daily)} x daily bars")
+
+        # ================================================================
+        # CREATE TUNED REGIME DETECTOR (if regime_overrides provided for sensitivity sweep)
+        # ================================================================
+        if regime_overrides:
+            self.regime_detector = RegimeDetector(**regime_overrides)
+            logger.info(f"Parrondo regime overrides applied: {regime_overrides}")
 
         # ================================================================
         # REGIME DETECTION (from daily data — stable, not noisy)
@@ -1494,12 +1527,19 @@ class Prometheus:
         _use_parrondo_gen = parrondo
         if _use_parrondo_gen:
             self.regime_detector.reset_cache()
+            # Build param_overrides dict from mr_min_score and regime_overrides
+            param_overrides_dict = {"mr_min_score": mr_min_score}
+            if regime_overrides:
+                # Extract recheck_bars from regime_overrides if present
+                if "recheck_bars" in regime_overrides:
+                    param_overrides_dict["recheck_bars"] = regime_overrides["recheck_bars"]
             pro_signal_generator = self._make_signal_generator(
                 regime_state=regime_state,
                 hourly_bias_map=hourly_bias_map,
                 capital=self.initial_capital,
                 primary_interval=primary_interval,
                 symbol=symbol,
+                param_overrides=param_overrides_dict,
                 parrondo=True,
             )
 
@@ -2187,6 +2227,189 @@ class Prometheus:
         print("  " + "=" * 65)
 
     # ─────────────────────────────────────────────────────────────────────
+    # MODE: PARRONDO REGIME TUNING — 243-COMBO SENSITIVITY SWEEP
+    # ─────────────────────────────────────────────────────────────────────
+    def run_parrondo_tuning(
+        self,
+        symbol: str = "BANKNIFTY",
+        days: int = 5475,
+    ):
+        """
+        Parrondo regime-switching parameter sensitivity sweep (243 combinations).
+
+        Tests all 5 tunable regime detection parameters:
+        - trend_strength_strong: {0.35, 0.4, 0.45} (MARKUP/MARKDOWN threshold)
+        - trend_strength_sideways: {0.25, 0.3, 0.35} (sideways classification)
+        - vol_expanding_mult: {1.15, 1.2, 1.25} (volatility expansion detector)
+        - hurst_accumulation: {0.40, 0.45, 0.50} (mean-reversion gate)
+        - mr_min_score: {2.0, 2.5, 3.0} (confluence minimum for MR trades)
+
+        Filters for: WR >= 52% AND DD <= 55% AND PF >= 1.4
+        """
+        self.dashboard.show_header()
+        print("\n" + "=" * 80)
+        print("  PARRONDO REGIME TUNING — 243-COMBO SENSITIVITY SWEEP")
+        print(f"  Symbol: {symbol} | Period: {days} days (15yr baseline)")
+        print("=" * 80)
+
+        # Define parameter ranges (3 x 3 x 3 x 3 x 3 = 243 combos)
+        param_grid = {
+            "trend_strength_strong": [0.35, 0.40, 0.45],
+            "trend_strength_sideways": [0.25, 0.30, 0.35],
+            "vol_expanding_mult": [1.15, 1.20, 1.25],
+            "hurst_accumulation": [0.40, 0.45, 0.50],
+            "mr_min_score": [2.0, 2.5, 3.0],
+        }
+
+        # Fetch data once (avoid repeated network calls)
+        logger.info(f"Fetching {days} days of daily data for {symbol}...")
+        data_all = self.data.fetch_historical(symbol, days=days, interval="day", force_refresh=True)
+
+        if data_all.empty or len(data_all) < 100:
+            logger.error(f"Insufficient data: {len(data_all)} bars")
+            return None
+
+        print(f"\n  Data: {len(data_all)} bars ({str(data_all['timestamp'].iloc[0])[:10]} to {str(data_all['timestamp'].iloc[-1])[:10]})")
+
+        # Run baseline (defaults)
+        print("\n  --- Baseline (default params) ---")
+        baseline, _ = self._run_backtest_on_slice(
+            data_all, symbol, "baseline", param_overrides=None, verbose=False
+        )
+        print(f"  Baseline: PF={baseline.profit_factor:.2f}, Sharpe={baseline.sharpe_ratio:.2f}, "
+              f"WR={baseline.win_rate*100 if baseline.win_rate <= 1 else baseline.win_rate:.0f}%, "
+              f"DD={baseline.max_drawdown_pct:.1f}%, Trades={baseline.total_trades}")
+
+        # Generate all 243 combinations
+        import itertools
+        combos = list(itertools.product(
+            param_grid["trend_strength_strong"],
+            param_grid["trend_strength_sideways"],
+            param_grid["vol_expanding_mult"],
+            param_grid["hurst_accumulation"],
+            param_grid["mr_min_score"],
+        ))
+
+        print(f"\n  Running {len(combos)} parameter combinations...")
+        print(f"  (Progress will update every 24 combos)")
+        print("  ─" * 40)
+
+        results = []
+        for idx, (strong, sideways, vol_exp, hurst, mr_score) in enumerate(combos):
+            regime_override = {
+                "trend_strength_strong": strong,
+                "trend_strength_sideways": sideways,
+                "vol_expanding_mult": vol_exp,
+                "hurst_accumulation": hurst,
+            }
+
+            # Build label for tracking
+            label = (f"TS{strong:.2f}_SS{sideways:.2f}_VE{vol_exp:.2f}_"
+                    f"HA{hurst:.2f}_MR{mr_score:.1f}")
+
+            try:
+                # Run backtest with these specific overrides
+                result, trades_df = self._run_backtest_on_slice(
+                    data_all,
+                    symbol,
+                    label,
+                    param_overrides={
+                        "regime_overrides": regime_override,
+                        "mr_min_score": mr_score,
+                    },
+                    verbose=False,
+                )
+
+                results.append({
+                    "combo": label,
+                    "trend_strength_strong": strong,
+                    "trend_strength_sideways": sideways,
+                    "vol_expanding_mult": vol_exp,
+                    "hurst_accumulation": hurst,
+                    "mr_min_score": mr_score,
+                    "pf": result.profit_factor,
+                    "sharpe": result.sharpe_ratio,
+                    "wr": result.win_rate,
+                    "dd": result.max_drawdown_pct,
+                    "return": result.total_return_pct,
+                    "trades": result.total_trades,
+                })
+
+            except Exception as e:
+                logger.warning(f"Combo {label} failed: {e}")
+                results.append({
+                    "combo": label,
+                    "trend_strength_strong": strong,
+                    "trend_strength_sideways": sideways,
+                    "vol_expanding_mult": vol_exp,
+                    "hurst_accumulation": hurst,
+                    "mr_min_score": mr_score,
+                    "pf": 0,
+                    "sharpe": 0,
+                    "wr": 0,
+                    "dd": 100,
+                    "return": 0,
+                    "trades": 0,
+                })
+
+            # Progress update every 24 combos
+            if (idx + 1) % 24 == 0:
+                print(f"  {idx + 1}/{len(combos)} combos tested...")
+
+        # Filter for good combos: WR >= 52% AND DD <= 55% AND PF >= 1.4
+        filtered = [
+            r for r in results
+            if r['wr'] >= 0.52 and r['dd'] <= 55.0 and r['pf'] >= 1.4
+        ]
+
+        print(f"\n  ═" * 40)
+        print(f"  RESULTS: {len(filtered)} combos passed filters (WR>=52%, DD<=55%, PF>=1.4)")
+        print(f"  ═" * 40)
+
+        # Sort by Sharpe (best risk-adjusted returns first)
+        filtered.sort(key=lambda x: -x['sharpe'])
+
+        # Print top 20
+        print(f"\n  TOP 20 COMBOS (sorted by Sharpe):\n")
+        print(f"{'Rank':<6} {'Combo':<40} {'PF':<6} {'Sharpe':<7} {'WR':<6} {'DD':<7} {'MR_Min':<7}")
+        print("  ─" * 70)
+
+        for rank, r in enumerate(filtered[:20], 1):
+            print(f"  {rank:<5} {r['combo'][:39]:<40} {r['pf']:>5.2f} {r['sharpe']:>6.2f} "
+                  f"{r['wr']*100:>5.0f}% {r['dd']:>6.1f}% {r['mr_min_score']:>6.1f}")
+
+        # Save full results to CSV
+        import csv
+        csv_file = f"parrondo_sweep_{symbol}_{days}days.csv"
+        try:
+            import os
+            csv_path = os.path.join(os.path.dirname(__file__), "..", csv_file)
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=results[0].keys())
+                writer.writeheader()
+                writer.writerows(results)
+            print(f"\n  Full results saved to: {csv_file}")
+        except Exception as e:
+            logger.warning(f"Could not save CSV: {e}")
+
+        # Print best combo summary
+        if filtered:
+            best = filtered[0]
+            print(f"\n  ✓ BEST COMBO (Sharpe-optimized):")
+            print(f"    trend_strength_strong:    {best['trend_strength_strong']:.2f}")
+            print(f"    trend_strength_sideways:  {best['trend_strength_sideways']:.2f}")
+            print(f"    vol_expanding_mult:       {best['vol_expanding_mult']:.2f}")
+            print(f"    hurst_accumulation:       {best['hurst_accumulation']:.2f}")
+            print(f"    mr_min_score:             {best['mr_min_score']:.1f}")
+            print(f"    PF={best['pf']:.2f}, Sharpe={best['sharpe']:.2f}, "
+                  f"WR={best['wr']*100:.0f}%, DD={best['dd']:.1f}%")
+        else:
+            print(f"\n  ✗ No combos met the filter criteria. Relax filters or increase search range.")
+
+        print("  " + "=" * 80)
+        return filtered
+
+    # ─────────────────────────────────────────────────────────────────────
     # MODE: PARAMETER SENSITIVITY SWEEP
     # ─────────────────────────────────────────────────────────────────────
     def run_sensitivity(
@@ -2480,7 +2703,7 @@ def main():
 
     parser.add_argument(
         "mode",
-        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity"],
+        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning"],
         help="Operating mode",
     )
     parser.add_argument(
@@ -2578,6 +2801,12 @@ def main():
             symbol=args.symbol or "NIFTY 50",
             days=args.days,
             strategy=args.strategy,
+        )
+
+    elif args.mode == "parrondo_tuning":
+        prometheus.run_parrondo_tuning(
+            symbol=args.symbol or "BANKNIFTY",
+            days=args.days,
         )
 
 

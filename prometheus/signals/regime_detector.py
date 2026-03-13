@@ -58,6 +58,27 @@ class RegimeDetector:
     VIX_HIGH = 24
     VIX_EXTREME = 30
 
+    def __init__(self, **kwargs):
+        """
+        Initialize with optional tunable parameters for sensitivity sweeps.
+
+        Tunable parameters (kwargs):
+            trend_strength_strong (default 0.4): Threshold for MARKUP/MARKDOWN detection
+            trend_strength_sideways (default 0.3): Threshold for sideways classification
+            vol_expanding_mult (default 1.2): Multiplier for vol_5 vs vol_20 (volatility expansion)
+            volume_profile_mult (default 1.3): Multiplier for volume profile expansion check
+            hurst_accumulation (default 0.45): Hurst threshold for ACCUMULATION regime
+            trend_strength_weak (default 0.15): Threshold for weak bullish/bearish default
+            sideways_direction (default 0.2): Threshold for sideways direction detection
+        """
+        self.trend_strength_strong = kwargs.get("trend_strength_strong", 0.4)
+        self.trend_strength_sideways = kwargs.get("trend_strength_sideways", 0.3)
+        self.vol_expanding_mult = kwargs.get("vol_expanding_mult", 1.2)
+        self.volume_profile_mult = kwargs.get("volume_profile_mult", 1.3)
+        self.hurst_accumulation = kwargs.get("hurst_accumulation", 0.45)
+        self.trend_strength_weak = kwargs.get("trend_strength_weak", 0.15)
+        self.sideways_direction = kwargs.get("sideways_direction", 0.2)
+
     def detect(
         self,
         df: pd.DataFrame,
@@ -129,7 +150,7 @@ class RegimeDetector:
 
         # Also check short-term vol vs long-term vol
         realized_vol_5 = returns.tail(5).std() * np.sqrt(252) * 100
-        vol_expanding = realized_vol_5 > realized_vol_20 * 1.2
+        vol_expanding = realized_vol_5 > realized_vol_20 * self.vol_expanding_mult
 
         # Use VIX if available, otherwise use realized vol
         reference_vol = vix if vix else realized_vol_20
@@ -208,7 +229,7 @@ class RegimeDetector:
 
         trend_strength = max(-1, min(1, trend_strength))
 
-        if abs(trend_strength) < 0.2:
+        if abs(trend_strength) < self.sideways_direction:
             direction = "sideways"
         elif trend_strength > 0:
             direction = "up"
@@ -273,7 +294,7 @@ class RegimeDetector:
         vol_5 = df["volume"].tail(5).mean()
         vol_20 = df["volume"].tail(20).mean()
 
-        return vol_5 > vol_20 * 1.3  # Volume expanding
+        return vol_5 > vol_20 * self.volume_profile_mult  # Volume expanding
 
     def _classify_regime(
         self,
@@ -291,32 +312,32 @@ class RegimeDetector:
             return MarketRegime.VOLATILE, 0.85
 
         # Strong uptrend
-        if trend_strength > 0.4 and hurst > 0.5:
+        if trend_strength > self.trend_strength_strong and hurst > 0.5:
             confidence = min(trend_strength + (hurst - 0.5), 1.0)
             return MarketRegime.MARKUP, confidence
 
         # Strong downtrend
-        if trend_strength < -0.4 and hurst > 0.5:
+        if trend_strength < -self.trend_strength_strong and hurst > 0.5:
             confidence = min(abs(trend_strength) + (hurst - 0.5), 1.0)
             return MarketRegime.MARKDOWN, confidence
 
         # Low volatility + sideways + mean-reverting
-        if vol_regime in ("low", "medium") and abs(trend_strength) < 0.3 and hurst < 0.45:
+        if vol_regime in ("low", "medium") and abs(trend_strength) < self.trend_strength_sideways and hurst < self.hurst_accumulation:
             confidence = (1 - abs(trend_strength)) * (1 - hurst)
             return MarketRegime.ACCUMULATION, min(confidence, 0.8)
 
         # High volatility + sideways at top
-        if vol_regime == "high" and abs(trend_strength) < 0.3:
+        if vol_regime == "high" and abs(trend_strength) < self.trend_strength_sideways:
             return MarketRegime.DISTRIBUTION, 0.6
 
         # High volatility + trending
-        if vol_regime == "high" and abs(trend_strength) > 0.3:
+        if vol_regime == "high" and abs(trend_strength) > self.trend_strength_sideways:
             return MarketRegime.VOLATILE, 0.7
 
         # Default: use trend direction with lower confidence
-        if trend_strength > 0.15:
+        if trend_strength > self.trend_strength_weak:
             return MarketRegime.MARKUP, abs(trend_strength)
-        elif trend_strength < -0.15:
+        elif trend_strength < -self.trend_strength_weak:
             return MarketRegime.MARKDOWN, abs(trend_strength)
         else:
             return MarketRegime.ACCUMULATION, 0.4
