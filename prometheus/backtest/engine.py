@@ -39,6 +39,24 @@ class BacktestTrade:
     hold_duration_minutes: int = 0
     exit_reason: str = ""
 
+    # Signal features (for regression training)
+    signal_liqsweep: bool = False
+    signal_fvg: bool = False
+    signal_vp: bool = False
+    signal_ote: bool = False
+    signal_rsi_div: bool = False
+    signal_vol_surge: bool = False
+    signal_vol_confirm: bool = False
+    signal_vwap: bool = False
+    signal_bias: bool = False
+
+    # Signal context (for feature extraction)
+    bull_score: float = 0.0
+    bear_score: float = 0.0
+    atr_at_entry: float = 0.0
+    regime_at_entry: str = ""
+    option_expiry_date: str = ""  # For DTE-aware theta
+
 
 @dataclass
 class BacktestResult:
