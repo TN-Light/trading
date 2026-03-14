@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
+from itertools import combinations
 
 from prometheus.utils.logger import logger
 
@@ -81,6 +82,7 @@ class BacktestResult:
     sharpe_ratio: float
     sortino_ratio: float
     calmar_ratio: float
+    alpha_pct: float
     avg_trade_pnl: float
     avg_hold_duration_min: float
     total_costs: float
@@ -99,7 +101,8 @@ class BacktestResult:
             f"Initial Capital: Rs {self.initial_capital:,.0f}\n"
             f"Final Capital: Rs {self.final_capital:,.0f}\n"
             f"Total Return: {self.total_return_pct:.1f}%\n"
-            f"Annualized Return: {self.annualized_return_pct:.1f}%\n"
+            f"CAGR: {self.annualized_return_pct:.1f}%\n"
+            f"Alpha vs Buy-Hold: {self.alpha_pct:+.1f}%\n"
             f"{'─'*60}\n"
             f"Total Trades: {self.total_trades}\n"
             f"Win Rate: {self.win_rate:.1f}%\n"
@@ -109,11 +112,13 @@ class BacktestResult:
             f"{'─'*60}\n"
             f"Sharpe Ratio: {self.sharpe_ratio:.2f}\n"
             f"Sortino Ratio: {self.sortino_ratio:.2f}\n"
+            f"Calmar Ratio: {self.calmar_ratio:.2f}\n"
             f"Max Drawdown: {self.max_drawdown_pct:.1f}%\n"
             f"Max DD Duration: {self.max_drawdown_duration_days} days\n"
             f"{'─'*60}\n"
             f"Total Costs (brokerage, STT, etc.): Rs {self.total_costs:,.0f}\n"
             f"Avg Trade PnL: Rs {self.avg_trade_pnl:,.0f}\n"
+            f"Avg Hold Duration: {self.avg_hold_duration_min:.0f} min\n"
             f"{'='*60}\n"
         )
 
@@ -149,8 +154,10 @@ class ZerodhaCostModel:
         instrument_type: str = "options"
     ) -> Dict:
         """Calculate all trading costs for a round-trip trade."""
-        # Brokerage: Rs 20 per order × 2 (buy + sell)
-        brokerage = self.brokerage_per_order * 2
+        # Brokerage: Rs 20 per order OR 0.03% of trade value, whichever is lower
+        leg1_brok = min(self.brokerage_per_order, buy_value * 0.0003)
+        leg2_brok = min(self.brokerage_per_order, sell_value * 0.0003)
+        brokerage = leg1_brok + leg2_brok
 
         # STT (Securities Transaction Tax) — only on sell side
         if instrument_type == "options":
@@ -170,10 +177,10 @@ class ZerodhaCostModel:
         # Stamp duty — only on buy side
         stamp = buy_value * self.stamp_duty_pct
 
-        # Slippage (estimated)
-        slippage = (buy_value + sell_value) * self.slippage_pct
+        # Slippage already applied in _open_position() and _close_position()
+        # Do NOT double-count here
 
-        total = brokerage + stt + transaction + gst + sebi + stamp + slippage
+        total = brokerage + stt + transaction + gst + sebi + stamp
 
         return {
             "brokerage": round(brokerage, 2),
@@ -182,7 +189,7 @@ class ZerodhaCostModel:
             "gst": round(gst, 2),
             "sebi_charges": round(sebi, 2),
             "stamp_duty": round(stamp, 2),
-            "slippage": round(slippage, 2),
+            "slippage": 0.0,
             "total": round(total, 2),
         }
 
@@ -207,6 +214,11 @@ class BacktestEngine:
         entry_timing: bool = False,
         entry_pullback_atr: float = 0.3,
         entry_max_wait_bars: int = 2,
+        capital_tracker: Dict = None,
+        # ── Institutional risk overlays ──
+        vol_target: float = 0.0,       # Target annualized vol (e.g. 0.15 = 15%). 0 = disabled
+        dd_throttle: bool = False,      # Reduce size during drawdowns
+        equity_curve_filter: bool = False,  # Skip trades when equity < SMA
     ):
         self.initial_capital = initial_capital
         self.cost_model = ZerodhaCostModel(cost_config)
@@ -221,6 +233,86 @@ class BacktestEngine:
             "filled_at_open": 0,
             "expired_no_fill": 0,
         }
+        # Dynamic capital tracking — signal generators can read this
+        self.current_capital = initial_capital
+        # Shared mutable tracker dict — syncs capital between engine and signal generator
+        self._capital_tracker = capital_tracker
+        # ── Institutional risk overlays ──
+        self.vol_target = vol_target
+        self.dd_throttle = dd_throttle
+        self.equity_curve_filter = equity_curve_filter
+        self.risk_overlay_stats = {
+            "signals_received": 0,
+            "vol_scaled": 0,
+            "dd_throttled": 0,
+            "equity_filtered": 0,
+        }
+
+    def _sync_capital(self, capital: float):
+        """Keep current_capital and external tracker in sync."""
+        self.current_capital = capital
+        if self._capital_tracker is not None:
+            self._capital_tracker["capital"] = capital
+
+    def _apply_risk_overlays(self, signal: Dict, data_so_far: pd.DataFrame, capital: float) -> Optional[Dict]:
+        """
+        Institutional risk overlays applied AFTER signal generation, BEFORE entry.
+        Returns modified signal (with scaled quantity) or None (skip trade).
+
+        1. Equity curve filter  — skip trade entirely if equity < 50-bar SMA
+        2. Volatility targeting — scale quantity by (target_vol / realized_vol)
+        3. Drawdown throttle   — further scale down during drawdowns
+        """
+        self.risk_overlay_stats["signals_received"] += 1
+
+        # ── 1. Equity Curve Filter ──
+        # If equity is below its own moving average, system is in a losing regime → sit out
+        if self.equity_curve_filter and len(self.equity_curve) >= 50:
+            eq_sma = np.mean(self.equity_curve[-50:])
+            if self.equity_curve[-1] < eq_sma:
+                self.risk_overlay_stats["equity_filtered"] += 1
+                return None
+
+        qty = signal.get("quantity", 1)
+        original_qty = qty
+
+        # ── 2. Volatility Targeting ──
+        # Scale position size so portfolio volatility stays constant
+        # When market is wild: trade small. When calm: trade normal/larger.
+        if self.vol_target > 0 and len(data_so_far) >= 25:
+            returns = data_so_far["close"].pct_change().dropna().values[-20:]
+            if len(returns) >= 10:
+                realized_vol = float(np.std(returns)) * np.sqrt(252)
+                if realized_vol > 0.001:
+                    vol_scalar = self.vol_target / realized_vol
+                    vol_scalar = max(0.25, min(vol_scalar, 2.0))  # Clamp: 0.25x to 2x
+                    qty = max(1, int(qty * vol_scalar))
+                    if vol_scalar != 1.0:
+                        self.risk_overlay_stats["vol_scaled"] += 1
+
+        # ── 3. Drawdown Throttle ──
+        # During extreme drawdowns only — soft touch to avoid over-filtering
+        if self.dd_throttle and len(self.equity_curve) > 1:
+            peak = max(self.equity_curve)
+            current_eq = self.equity_curve[-1]
+            dd_pct = (peak - current_eq) / peak if peak > 0 else 0
+
+            if dd_pct > 0.40:
+                dd_scalar = 0.50   # 50% size at >40% DD (crisis mode only)
+                self.risk_overlay_stats["dd_throttled"] += 1
+            elif dd_pct > 0.30:
+                dd_scalar = 0.75   # 75% size at >30% DD
+                self.risk_overlay_stats["dd_throttled"] += 1
+            else:
+                dd_scalar = 1.0
+            qty = max(1, int(qty * dd_scalar))
+
+        # Apply modified quantity
+        if qty != original_qty:
+            signal = signal.copy()
+            signal["quantity"] = qty
+
+        return signal
 
     def run(
         self,
@@ -240,6 +332,7 @@ class BacktestEngine:
             warmup_bars: Number of bars to skip for indicator warmup
         """
         capital = self.initial_capital
+        self._sync_capital(capital)
         peak_capital = capital
         self.trades = []
         self.equity_curve = [capital]
@@ -266,8 +359,9 @@ class BacktestEngine:
                 daily_trades = 0
                 last_date = current_date
 
-            # Check daily loss limit
-            if daily_pnl < -self.initial_capital * 0.03:
+            # Check daily loss limit (fixed 3% of initial capital)
+            daily_loss_limit = self.initial_capital * 0.03
+            if daily_pnl < -daily_loss_limit:
                 if position:
                     # Force close on daily loss limit
                     if position.get("instrument_type") == "options":
@@ -279,6 +373,7 @@ class BacktestEngine:
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
+                    self._sync_capital(capital)
                     position = None
                 # Cancel any pending signal on daily loss limit
                 pending_signal = None
@@ -298,6 +393,7 @@ class BacktestEngine:
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
                     daily_trades += 1
+                    self._sync_capital(capital)
                     position = None
 
             # If no position, check for new signal (or fill pending)
@@ -326,6 +422,8 @@ class BacktestEngine:
                         data_so_far = data.iloc[:i + 1]
                         signal = signal_generator(data_so_far)
                         if signal:
+                            signal = self._apply_risk_overlays(signal, data_so_far, capital)
+                        if signal:
                             self.entry_timing_stats["signals_generated"] += 1
                             pending_signal = signal
                             pending_bars_waited = 0
@@ -333,6 +431,8 @@ class BacktestEngine:
                     # ── ORIGINAL MODE (no change) ──
                     data_so_far = data.iloc[:i + 1]
                     signal = signal_generator(data_so_far)
+                    if signal:
+                        signal = self._apply_risk_overlays(signal, data_so_far, capital)
                     if signal:
                         position = self._open_position(signal, current_bar, current_time)
 
@@ -366,6 +466,7 @@ class BacktestEngine:
                 capital, "end_of_data"
             )
             self.trades.append(trade)
+            self._sync_capital(capital)
 
         # Calculate metrics
         return self._calculate_metrics(strategy_name, data, capital)
@@ -676,19 +777,10 @@ class BacktestEngine:
                 else:
                     theta_pct = 0.002  # Accelerates if held too long
             else:
-                # Daily bars: original progressive decay + DTE acceleration
-                base_theta = 0.008
-                if bars_held <= 3:
-                    base_theta = 0.008
-                elif bars_held <= 6:
-                    base_theta = 0.015
-                else:
-                    base_theta = 0.025
-
-                # DTE-aware acceleration: theta accelerates into expiry
-                # Extract expiry date from position (stored when signal created)
+                # Daily bars: progressive decay + DTE acceleration
+                # DTE-based theta (not bars-held-based)
                 option_expiry = position.get("option_expiry_date", "")
-                dte_acceleration = 1.0  # Default: no acceleration
+                dte_acceleration = 1.0
 
                 if option_expiry:
                     try:
@@ -696,30 +788,75 @@ class BacktestEngine:
                         expiry_date = datetime.strptime(option_expiry, "%Y-%m-%d")
                         bar_date = datetime.strptime(str(bar["timestamp"])[:10], "%Y-%m-%d")
                         days_to_expiry = max((expiry_date - bar_date).days, 1)
-                        # Accelerate: theta_actual = base × (1 + 3/DTE)
-                        # E.g., at 1 DTE: 4x acceleration, at 3 DTE: 2x, at 7 DTE: 1.43x
-                        dte_acceleration = 1.0 + 3.0 / days_to_expiry
+                        # DTE-based theta: realistic daily decay rates
+                        # Weekly (1-2 DTE): 3% daily, (3-5 DTE): 2%, Monthly: 0.8-1.2%
+                        if days_to_expiry <= 2:
+                            base_theta = 0.030  # 3% per day at 1-2 DTE
+                        elif days_to_expiry <= 5:
+                            base_theta = 0.020  # 2% per day at 3-5 DTE
+                        elif days_to_expiry <= 10:
+                            base_theta = 0.012  # 1.2% per day at 6-10 DTE
+                        else:
+                            base_theta = 0.008  # 0.8% per day >10 DTE
                     except Exception:
-                        pass  # If parse fails, use default acceleration
+                        base_theta = 0.008
+                        if bars_held <= 3:
+                            base_theta = 0.008
+                        elif bars_held <= 6:
+                            base_theta = 0.015
+                        else:
+                            base_theta = 0.025
+                else:
+                    # Fallback: bars-held based (when no expiry date available)
+                    if bars_held <= 3:
+                        base_theta = 0.008
+                    elif bars_held <= 6:
+                        base_theta = 0.015
+                    else:
+                        base_theta = 0.025
 
-                theta_pct = base_theta * dte_acceleration
+                theta_pct = base_theta
             theta_decay = current_premium * theta_pct
 
-            # Estimate premium range using delta × index range
+            # Estimate premium range using delta × index range + GAMMA correction
             index_move_high = bar["high"] - prev_close
             index_move_low = bar["low"] - prev_close
             index_move_close = bar["close"] - prev_close
 
+            # Gamma: second-order sensitivity. For ATM options, gamma ≈ delta(1-delta)/(S×sigma×sqrt(T))
+            # Simplified estimate: gamma contribution = 0.5 × gamma × (dS)²
+            # We estimate gamma from delta: ATM gamma peaks at delta=0.5
+            # gamma ≈ N'(d1) / (S × sigma × sqrt(T)) ≈ 0.4 / (S × 0.20 × sqrt(T))
+            # For practical use: gamma_pct = delta × (1 - delta) × gamma_scale
+            # gamma_scale calibrated so ATM weekly has ~0.0008 gamma per index point
+            spot_price = prev_close
+            gamma_scale = 2.0 / max(spot_price, 1.0)  # ~0.0001 for NIFTY 22000
+            gamma = delta * (1 - abs(delta)) * gamma_scale
+
             if position["direction"] == "bullish":
-                # Call option: premium moves WITH index, minus theta
-                premium_high = current_premium + delta * index_move_high - theta_decay
-                premium_low = current_premium + delta * index_move_low - theta_decay
-                premium_close = current_premium + delta * index_move_close - theta_decay
+                # Call option: premium moves WITH index, minus theta, plus gamma convexity
+                gamma_high = 0.5 * gamma * index_move_high ** 2
+                gamma_low = 0.5 * gamma * index_move_low ** 2
+                gamma_close = 0.5 * gamma * index_move_close ** 2
+                premium_high = current_premium + delta * index_move_high + gamma_high - theta_decay
+                premium_low = current_premium + delta * index_move_low + gamma_low - theta_decay
+                premium_close = current_premium + delta * index_move_close + gamma_close - theta_decay
             else:
-                # Put option: premium moves AGAINST index, minus theta
-                premium_high = current_premium - delta * index_move_low - theta_decay
-                premium_low = current_premium - delta * index_move_high - theta_decay
-                premium_close = current_premium - delta * index_move_close - theta_decay
+                # Put option: premium moves AGAINST index, minus theta, plus gamma convexity
+                gamma_high = 0.5 * gamma * index_move_low ** 2
+                gamma_low = 0.5 * gamma * index_move_high ** 2
+                gamma_close = 0.5 * gamma * index_move_close ** 2
+                premium_high = current_premium - delta * index_move_low + gamma_high - theta_decay
+                premium_low = current_premium - delta * index_move_high + gamma_low - theta_decay
+                premium_close = current_premium - delta * index_move_close + gamma_close - theta_decay
+
+            # Update delta for next bar (delta drift / charm approximation)
+            # As underlying moves, delta shifts: ITM options → delta increases, OTM → decreases
+            if spot_price > 0:
+                delta_shift = gamma * index_move_close  # approximate charm
+                new_delta = delta + delta_shift
+                new_delta = max(0.05, min(0.95, new_delta))  # clamp to valid range
+                position["delta"] = new_delta
 
             # Clamp premiums — can't go below zero
             premium_high = max(premium_high, 0)
@@ -820,7 +957,7 @@ class BacktestEngine:
                 total_trades=0, winning_trades=0, losing_trades=0,
                 win_rate=0, avg_win=0, avg_loss=0, profit_factor=0,
                 max_drawdown_pct=0, max_drawdown_duration_days=0,
-                sharpe_ratio=0, sortino_ratio=0, calmar_ratio=0,
+                sharpe_ratio=0, sortino_ratio=0, calmar_ratio=0, alpha_pct=0,
                 avg_trade_pnl=0, avg_hold_duration_min=0, total_costs=0,
                 equity_curve=self.equity_curve, drawdown_curve=[],
                 monthly_returns={}, trades=[]
@@ -830,7 +967,12 @@ class BacktestEngine:
         total_return = (final_capital - initial) / initial * 100
         days = max((pd.to_datetime(data["timestamp"].iloc[-1]) -
                      pd.to_datetime(data["timestamp"].iloc[0])).days, 1) if "timestamp" in data.columns else 365
-        annual_return = total_return * 365 / days
+        # CAGR (compound annual growth rate) — not linear scaling
+        years = days / 365.25
+        if years > 0 and final_capital > 0:
+            annual_return = ((final_capital / initial) ** (1.0 / years) - 1) * 100
+        else:
+            annual_return = 0.0
 
         wins = [t for t in self.trades if t.net_pnl > 0]
         losses = [t for t in self.trades if t.net_pnl <= 0]
@@ -850,20 +992,53 @@ class BacktestEngine:
         drawdown = (peak - equity) / peak * 100
         max_drawdown = drawdown.max()
 
-        # Max drawdown duration
+        # Detect bar frequency for correct annualization
+        if "timestamp" in data.columns and len(data) >= 2:
+            t0 = pd.to_datetime(data["timestamp"].iloc[0])
+            t1 = pd.to_datetime(data["timestamp"].iloc[1])
+            bar_gap_minutes = (t1 - t0).total_seconds() / 60
+            if bar_gap_minutes < 60:
+                # Intraday bars (15min, 5min, etc.)
+                bars_per_day = max(int(390 / bar_gap_minutes), 1)  # 390 min trading day
+                annualization_factor = np.sqrt(252 * bars_per_day)
+            else:
+                # Daily or higher
+                bars_per_day = 1
+                annualization_factor = np.sqrt(252)
+        else:
+            bars_per_day = 1
+            annualization_factor = np.sqrt(252)
+
+        # Max drawdown duration in CALENDAR DAYS (not bars)
         dd_duration = 0
         max_dd_duration = 0
+        dd_start_idx = 0
+        max_dd_duration_days = 0
         for i in range(1, len(equity)):
             if equity[i] < peak[i]:
+                if dd_duration == 0:
+                    dd_start_idx = i
                 dd_duration += 1
                 max_dd_duration = max(max_dd_duration, dd_duration)
+                # Convert to calendar days using timestamps
+                if "timestamp" in data.columns and dd_duration == max_dd_duration:
+                    try:
+                        start_ts = pd.to_datetime(data["timestamp"].iloc[min(dd_start_idx, len(data) - 1)])
+                        end_ts = pd.to_datetime(data["timestamp"].iloc[min(i, len(data) - 1)])
+                        max_dd_duration_days = max(max_dd_duration_days, (end_ts - start_ts).days)
+                    except Exception:
+                        max_dd_duration_days = max_dd_duration  # fallback to bars
             else:
                 dd_duration = 0
 
-        # Sharpe & Sortino
+        # If we couldn't compute calendar days, approximate from bars
+        if max_dd_duration_days == 0 and max_dd_duration > 0:
+            max_dd_duration_days = max(1, max_dd_duration // bars_per_day)
+
+        # Sharpe & Sortino — measure on trading days only, not calendar flat days
         if len(self.trades) > 1:
             daily_returns = np.diff(equity) / equity[:-1]
-            daily_returns = daily_returns[daily_returns != 0]
+            daily_returns = daily_returns[daily_returns != 0]  # Filter out flat days (no trades)
 
             if len(daily_returns) > 0 and daily_returns.std() > 0:
                 sharpe = np.mean(daily_returns) / daily_returns.std() * np.sqrt(252)
@@ -878,6 +1053,45 @@ class BacktestEngine:
             sortino = 0
 
         calmar = annual_return / max_drawdown if max_drawdown > 0 else 0
+
+        # Compute hold duration from timestamps
+        hold_durations = []
+        for t in self.trades:
+            try:
+                t_entry = pd.to_datetime(t.entry_time)
+                t_exit = pd.to_datetime(t.exit_time)
+                hold_min = (t_exit - t_entry).total_seconds() / 60
+                hold_durations.append(hold_min)
+            except Exception:
+                hold_durations.append(0)
+        avg_hold = np.mean(hold_durations) if hold_durations else 0
+
+        # Compute monthly returns
+        monthly_returns = {}
+        if "timestamp" in data.columns and len(self.equity_curve) > 1:
+            try:
+                eq_series = pd.Series(
+                    self.equity_curve[:len(data)],
+                    index=pd.to_datetime(data["timestamp"].iloc[:len(self.equity_curve[:len(data)])])
+                )
+                monthly_eq = eq_series.resample("M").last().dropna()
+                for i in range(1, len(monthly_eq)):
+                    key = monthly_eq.index[i].strftime("%Y-%m")
+                    monthly_returns[key] = round(
+                        (monthly_eq.iloc[i] / monthly_eq.iloc[i - 1] - 1) * 100, 2
+                    )
+            except Exception:
+                pass
+
+        # Alpha vs buy-and-hold
+        if "timestamp" in data.columns and len(data) > 1:
+            bh_return = (data["close"].iloc[-1] / data["close"].iloc[0] - 1) * 100
+            bh_years = days / 365.25
+            bh_cagr = ((1 + bh_return / 100) ** (1.0 / bh_years) - 1) * 100 if bh_years > 0 else 0
+            alpha = annual_return - bh_cagr
+        else:
+            bh_cagr = 0
+            alpha = 0
 
         return BacktestResult(
             strategy=strategy_name,
@@ -895,16 +1109,17 @@ class BacktestEngine:
             avg_loss=round(avg_loss, 2),
             profit_factor=round(profit_factor, 2),
             max_drawdown_pct=round(max_drawdown, 2),
-            max_drawdown_duration_days=max_dd_duration,
+            max_drawdown_duration_days=max_dd_duration_days,
             sharpe_ratio=round(sharpe, 2),
             sortino_ratio=round(sortino, 2),
             calmar_ratio=round(calmar, 2),
+            alpha_pct=round(alpha, 2),
             avg_trade_pnl=round(np.mean([t.net_pnl for t in self.trades]), 2),
-            avg_hold_duration_min=round(np.mean([t.hold_duration_minutes for t in self.trades]), 1),
+            avg_hold_duration_min=round(avg_hold, 1),
             total_costs=round(total_costs, 2),
             equity_curve=self.equity_curve,
             drawdown_curve=drawdown.tolist(),
-            monthly_returns={},
+            monthly_returns=monthly_returns,
             trades=[{
                 "entry": t.entry_time, "exit": t.exit_time,
                 "direction": t.direction, "pnl": t.net_pnl,
@@ -916,28 +1131,38 @@ class BacktestEngine:
         self,
         result: BacktestResult,
         num_simulations: int = 1000,
-        num_trades: int = 100
     ) -> Dict:
         """
-        Monte Carlo simulation — reshuffle trade sequence to test robustness.
+        Monte Carlo simulation — block bootstrap to test robustness.
 
-        If a strategy is robust, its metrics should be stable across
-        different orderings of the same trades.
+        Uses block bootstrap (block_size=5) to preserve serial correlation
+        (e.g., losing streaks during crashes). Sample size matches actual
+        trade count for fair comparison.
         """
         if not result.trades:
             return {"error": "No trades to simulate"}
 
         trade_pnls = [t["pnl"] for t in result.trades]
+        n_trades = len(trade_pnls)
+        block_size = min(5, max(1, n_trades // 10))  # 5 trades per block, min 1
 
         final_capitals = []
         max_drawdowns = []
+        sharpes = []
 
         for _ in range(num_simulations):
-            # Random sample of trades (with replacement)
-            sampled = np.random.choice(trade_pnls, size=min(num_trades, len(trade_pnls)), replace=True)
+            # Block bootstrap: sample blocks of consecutive trades to preserve streaks
             equity = [self.initial_capital]
+            sampled_pnls = []
 
-            for pnl in sampled:
+            while len(sampled_pnls) < n_trades:
+                start_idx = np.random.randint(0, max(1, n_trades - block_size + 1))
+                block = trade_pnls[start_idx:start_idx + block_size]
+                sampled_pnls.extend(block)
+
+            sampled_pnls = sampled_pnls[:n_trades]  # trim to exact size
+
+            for pnl in sampled_pnls:
                 equity.append(equity[-1] + pnl)
 
             equity_arr = np.array(equity)
@@ -947,18 +1172,122 @@ class BacktestEngine:
             final_capitals.append(equity[-1])
             max_drawdowns.append(dd.max())
 
+            # Per-simulation Sharpe (simple daily-approximated)
+            returns = np.diff(equity_arr) / equity_arr[:-1]
+            if len(returns) > 1 and returns.std() > 0:
+                sharpes.append(np.mean(returns) / returns.std() * np.sqrt(min(252, n_trades)))
+            else:
+                sharpes.append(0)
+
         final_arr = np.array(final_capitals)
         dd_arr = np.array(max_drawdowns)
+        sharpe_arr = np.array(sharpes)
+
+        # Confidence interval on prob_profit
+        prob_profit = np.mean(final_arr > self.initial_capital)
+        prob_profit_se = np.sqrt(prob_profit * (1 - prob_profit) / num_simulations) * 100
 
         return {
             "simulations": num_simulations,
+            "num_trades": n_trades,
+            "block_size": block_size,
             "median_final_capital": round(np.median(final_arr), 2),
             "mean_final_capital": round(np.mean(final_arr), 2),
             "p5_final_capital": round(np.percentile(final_arr, 5), 2),
             "p95_final_capital": round(np.percentile(final_arr, 95), 2),
-            "p5_worst_capital": round(np.percentile(final_arr, 5), 2),
-            "prob_profit": round(np.mean(final_arr > self.initial_capital) * 100, 1),
+            "prob_profit": round(prob_profit * 100, 1),
+            "prob_profit_ci": round(prob_profit_se, 1),
             "prob_20pct_drawdown": round(np.mean(dd_arr > 20) * 100, 1),
             "median_max_drawdown": round(np.median(dd_arr), 2),
             "p95_max_drawdown": round(np.percentile(dd_arr, 95), 2),
+            "median_sharpe": round(np.median(sharpe_arr), 2),
+            "p5_sharpe": round(np.percentile(sharpe_arr, 5), 2),
+        }
+
+    def probability_of_backtest_overfitting(
+        self,
+        result: BacktestResult,
+        n_partitions: int = 10,
+    ) -> Dict:
+        """
+        Probability of Backtest Overfitting (PBO) via Combinatorially Symmetric
+        Cross-Validation (CSCV).
+
+        Bailey et al. (2015) method:
+          1. Split trade PnLs into N equal partitions
+          2. For each C(N, N/2) combination, one half is "in-sample", other is "out-of-sample"
+          3. Rank IS performance, pick best IS partition combo
+          4. Check if corresponding OOS performance ranks below median
+          5. PBO = fraction of combos where best IS underperforms OOS median
+
+        PBO < 0.30 = likely robust, 0.30–0.50 = borderline, > 0.50 = likely overfit
+        """
+        if not result.trades or len(result.trades) < n_partitions * 2:
+            return {"error": f"Need >= {n_partitions * 2} trades, got {len(result.trades)}"}
+
+        trade_pnls = np.array([t["pnl"] for t in result.trades])
+        n_trades = len(trade_pnls)
+
+        # Split into N roughly equal partitions
+        partition_size = n_trades // n_partitions
+        partitions = []
+        for i in range(n_partitions):
+            start = i * partition_size
+            end = start + partition_size if i < n_partitions - 1 else n_trades
+            partitions.append(trade_pnls[start:end])
+
+        # Compute Sharpe-like performance metric per partition
+        partition_metrics = []
+        for p in partitions:
+            if len(p) > 1 and p.std() > 0:
+                partition_metrics.append(p.mean() / p.std())
+            else:
+                partition_metrics.append(p.mean() if len(p) > 0 else 0)
+        partition_metrics = np.array(partition_metrics)
+
+        half = n_partitions // 2
+        all_combos = list(combinations(range(n_partitions), half))
+
+        # Cap combinations for performance (C(10,5) = 252, fine; C(16,8) = 12870, cap it)
+        max_combos = 500
+        if len(all_combos) > max_combos:
+            rng = np.random.default_rng(42)
+            indices = rng.choice(len(all_combos), max_combos, replace=False)
+            all_combos = [all_combos[i] for i in indices]
+
+        overfit_count = 0
+        logit_values = []
+
+        for is_indices in all_combos:
+            oos_indices = tuple(i for i in range(n_partitions) if i not in is_indices)
+
+            is_metrics = partition_metrics[list(is_indices)]
+            oos_metrics = partition_metrics[list(oos_indices)]
+
+            # Best IS partition index (within IS set) → check its rank in OOS
+            best_is_local = np.argmax(is_metrics)
+            best_is_perf = is_metrics[best_is_local]
+
+            # OOS performance of the IS-best partition
+            oos_perf_of_best = oos_metrics[best_is_local] if best_is_local < len(oos_metrics) else np.median(oos_metrics)
+
+            oos_median = np.median(oos_metrics)
+
+            if oos_perf_of_best <= oos_median:
+                overfit_count += 1
+
+            # Logit for distribution: relative rank of OOS performance
+            oos_rank = np.sum(oos_metrics <= oos_perf_of_best) / len(oos_metrics)
+            if 0 < oos_rank < 1:
+                logit_values.append(np.log(oos_rank / (1 - oos_rank)))
+
+        pbo = overfit_count / len(all_combos)
+
+        return {
+            "pbo": round(pbo, 3),
+            "n_partitions": n_partitions,
+            "n_combinations": len(all_combos),
+            "n_trades": n_trades,
+            "mean_logit": round(np.mean(logit_values), 3) if logit_values else 0,
+            "verdict": "ROBUST" if pbo < 0.30 else "BORDERLINE" if pbo < 0.50 else "LIKELY OVERFIT",
         }
