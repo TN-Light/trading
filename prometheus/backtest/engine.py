@@ -38,6 +38,7 @@ class BacktestTrade:
     strategy: str
     hold_duration_minutes: int = 0
     exit_reason: str = ""
+    entry_type: str = "immediate"  # "immediate" | "pullback_limit" | "gap_fill"
 
     # Signal features (for regression training)
     signal_liqsweep: bool = False
@@ -202,12 +203,24 @@ class BacktestEngine:
     def __init__(
         self,
         initial_capital: float = 200000,
-        cost_config: Optional[Dict] = None
+        cost_config: Optional[Dict] = None,
+        entry_timing: bool = False,
+        entry_pullback_atr: float = 0.3,
+        entry_max_wait_bars: int = 2,
     ):
         self.initial_capital = initial_capital
         self.cost_model = ZerodhaCostModel(cost_config)
         self.trades: List[BacktestTrade] = []
         self.equity_curve: List[float] = []
+        self.entry_timing = entry_timing
+        self.entry_pullback_atr = entry_pullback_atr
+        self.entry_max_wait_bars = entry_max_wait_bars
+        self.entry_timing_stats = {
+            "signals_generated": 0,
+            "filled_at_pullback": 0,
+            "filled_at_open": 0,
+            "expired_no_fill": 0,
+        }
 
     def run(
         self,
@@ -236,6 +249,10 @@ class BacktestEngine:
         daily_trades = 0
         last_date = None
 
+        # Entry timing state
+        pending_signal = None
+        pending_bars_waited = 0
+
         logger.info(f"Starting backtest: {strategy_name} on {len(data)} bars")
 
         for i in range(warmup_bars, len(data)):
@@ -263,6 +280,9 @@ class BacktestEngine:
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
                     position = None
+                # Cancel any pending signal on daily loss limit
+                pending_signal = None
+                pending_bars_waited = 0
                 self.equity_curve.append(capital)
                 continue
 
@@ -280,14 +300,41 @@ class BacktestEngine:
                     daily_trades += 1
                     position = None
 
-            # If no position, check for new signal
+            # If no position, check for new signal (or fill pending)
             if position is None and daily_trades < 6:
-                # Only pass data up to current bar (no look-ahead)
-                data_so_far = data.iloc[:i + 1]
-                signal = signal_generator(data_so_far)
+                if self.entry_timing:
+                    # ── ENTRY TIMING MODE: next-bar limit order ──
 
-                if signal:
-                    position = self._open_position(signal, current_bar, current_time)
+                    # A) Try to fill pending signal on current bar
+                    if pending_signal is not None:
+                        filled, fill_result = self._try_fill_pending(
+                            pending_signal, current_bar, current_time
+                        )
+                        if filled:
+                            position = fill_result
+                            pending_signal = None
+                            pending_bars_waited = 0
+                        else:
+                            pending_bars_waited += 1
+                            if pending_bars_waited >= self.entry_max_wait_bars:
+                                self.entry_timing_stats["expired_no_fill"] += 1
+                                pending_signal = None
+                                pending_bars_waited = 0
+
+                    # B) No pending and no position → generate new signal → store as pending
+                    if pending_signal is None and position is None:
+                        data_so_far = data.iloc[:i + 1]
+                        signal = signal_generator(data_so_far)
+                        if signal:
+                            self.entry_timing_stats["signals_generated"] += 1
+                            pending_signal = signal
+                            pending_bars_waited = 0
+                else:
+                    # ── ORIGINAL MODE (no change) ──
+                    data_so_far = data.iloc[:i + 1]
+                    signal = signal_generator(data_so_far)
+                    if signal:
+                        position = self._open_position(signal, current_bar, current_time)
 
             # Update equity curve
             unrealized = 0
@@ -393,6 +440,80 @@ class BacktestEngine:
                 "instrument_type": "futures",
             }
 
+    def _try_fill_pending(
+        self,
+        signal: Dict,
+        bar: pd.Series,
+        timestamp: str,
+    ) -> Tuple[bool, Optional[Dict]]:
+        """
+        Attempt to fill a pending signal as a limit order on the current bar.
+
+        For bullish: limit = signal_spot - pullback × ATR; check if bar low reaches it.
+        For bearish: limit = signal_spot + pullback × ATR; check if bar high reaches it.
+        Returns (filled, position_or_None).
+        """
+        direction = signal.get("direction", "bullish")
+        signal_spot = signal.get("signal_spot", 0)
+        atr = signal.get("atr_at_signal", 0)
+
+        if signal_spot <= 0 or atr <= 0:
+            # Missing data — fall back to immediate fill
+            position = self._open_position(signal, bar, timestamp)
+            return True, position
+
+        pullback = atr * self.entry_pullback_atr
+
+        if direction == "bullish":
+            limit_price = signal_spot - pullback
+
+            if bar["open"] <= limit_price:
+                fill_spot = bar["open"]
+                entry_type = "gap_fill"
+                self.entry_timing_stats["filled_at_open"] += 1
+            elif bar["low"] <= limit_price:
+                fill_spot = limit_price
+                entry_type = "pullback_limit"
+                self.entry_timing_stats["filled_at_pullback"] += 1
+            else:
+                return False, None
+        else:
+            limit_price = signal_spot + pullback
+
+            if bar["open"] >= limit_price:
+                fill_spot = bar["open"]
+                entry_type = "gap_fill"
+                self.entry_timing_stats["filled_at_open"] += 1
+            elif bar["high"] >= limit_price:
+                fill_spot = limit_price
+                entry_type = "pullback_limit"
+                self.entry_timing_stats["filled_at_pullback"] += 1
+            else:
+                return False, None
+
+        # Re-price option premium using delta approximation
+        delta = signal.get("delta", 0.5)
+        original_premium = signal.get("entry_price", 0)
+        spot_diff = fill_spot - signal_spot
+
+        if direction == "bullish":
+            adjusted_premium = original_premium + delta * spot_diff
+        else:
+            adjusted_premium = original_premium - delta * spot_diff
+
+        # Floor: don't go below 50% of original or 1.0
+        adjusted_premium = max(adjusted_premium, original_premium * 0.5)
+        adjusted_premium = max(adjusted_premium, 1.0)
+
+        # Create modified signal with adjusted premium and entry type marker
+        adjusted_signal = signal.copy()
+        adjusted_signal["entry_price"] = adjusted_premium
+        adjusted_signal["_entry_type"] = entry_type
+
+        position = self._open_position(adjusted_signal, bar, timestamp)
+        position["entry_type"] = entry_type
+        return True, position
+
     def _close_position(
         self,
         position: Dict,
@@ -457,6 +578,7 @@ class BacktestEngine:
                 atr_at_entry=float(position.get("atr_at_entry", 0.0)),
                 regime_at_entry=position.get("regime_at_entry", "unknown"),
                 option_expiry_date=position.get("option_expiry_date", ""),
+                entry_type=position.get("entry_type", "immediate"),
             )
             return capital, trade
 
@@ -510,6 +632,7 @@ class BacktestEngine:
             atr_at_entry=float(position.get("atr_at_entry", 0.0)),
             regime_at_entry=position.get("regime_at_entry", "unknown"),
             option_expiry_date=position.get("option_expiry_date", ""),
+            entry_type=position.get("entry_type", "immediate"),
         )
 
         return capital, trade

@@ -1,0 +1,38 @@
+{
+  "method": "ridge",
+  "r2_train": 0.05199949499433165,
+  "r2_test": -0.22534314899375163,
+  "raw_weights": {
+    "signal_liqsweep": -306.72078750644846,
+    "signal_fvg": -292.3125849000684,
+    "signal_vp": -298.6148415650866,
+    "signal_ote": 179.04766669507916,
+    "signal_rsi_div": -202.02874643033087,
+    "signal_vol_surge": -177.57942621115743,
+    "signal_vol_confirm": -18.148780392523133,
+    "signal_vwap": 61.57725897555456,
+    "signal_bias": -150.5167892702457
+  },
+  "normalized_weights": {
+    "signal_liqsweep": 1.0,
+    "signal_fvg": 0.9530250208226361,
+    "signal_vp": 0.9735722315814951,
+    "signal_ote": 0.5837480666070436,
+    "signal_rsi_div": 0.6586731472384585,
+    "signal_vol_surge": 0.5789611706947773,
+    "signal_vol_confirm": 0.05917036318297003,
+    "signal_vwap": 0.20075997938111698,
+    "signal_bias": 0.49072901283901815
+  },
+  "baseline_weights": {
+    "signal_liqsweep": 1.5,
+    "signal_fvg": 1.5,
+    "signal_vp": 1.0,
+    "signal_ote": 1.0,
+    "signal_rsi_div": 1.5,
+    "signal_vol_surge": 0.5,
+    "signal_vol_confirm": 0.5,
+    "signal_vwap": 0.5,
+    "signal_bias": 0.5
+  }
+}

@@ -88,7 +88,10 @@ python prometheus/main.py backtest       # Backtest (default: 59 days, 15min bar
 python prometheus/main.py backtest --days 1825  # 5-year backtest (daily bars)
 python prometheus/main.py backtest --days 1825 --parrondo  # 5yr with Parrondo regime-switching
 python prometheus/main.py backtest --days 5475 --parrondo  # 15yr with Parrondo
+python prometheus/main.py backtest --days 1825 --parrondo --entry-timing  # Parrondo + entry timing
+python prometheus/main.py backtest --days 1825 --entry-timing --entry-pullback-atr 0.2  # Custom pullback
 python prometheus/main.py walkforward --parrondo  # Walk-forward with Parrondo
+python prometheus/main.py walkforward --parrondo --entry-timing  # Walk-forward with entry timing
 python prometheus/main.py backtest --days 6750  # MAX ~18.5yr backtest (daily bars, back to 2007)
 python prometheus/main.py paper          # Paper trade
 python prometheus/main.py signal         # Signals only

@@ -43,7 +43,7 @@ from prometheus.utils.indian_market import (
     is_market_open, is_trading_day, days_to_expiry,
     get_lot_size, get_atm_strike, IST
 )
-from prometheus.utils.options_math import iv_percentile, iv_rank, black_scholes_price, calculate_greeks, OptionType
+from prometheus.utils.options_math import iv_percentile, iv_rank, black_scholes_price, calculate_greeks, OptionType, get_implied_vol_at_strike
 
 from prometheus.data.engine import DataEngine
 from prometheus.data.store import DataStore
@@ -670,6 +670,39 @@ class Prometheus:
         _regime_transitions = []
 
         # ================================================================
+        # LOAD LEARNED SIGNAL WEIGHTS (from regression training)
+        # Falls back to hardcoded baseline if no weights file exists.
+        # ================================================================
+        _learned_weights = None
+        try:
+            import json as _json
+            _weights_path = Path(__file__).parent / "config" / "regression_weights.json"
+            if _weights_path.exists():
+                with open(_weights_path, "r") as _f:
+                    _wdata = _json.load(_f)
+                _nw = _wdata.get("normalized_weights", {})
+                # Scale normalized (0-1) weights to confluence range (0.5-1.5)
+                _max_baseline = 1.5
+                _learned_weights = {k: v * _max_baseline for k, v in _nw.items()}
+                logger.info(f"Loaded learned signal weights from {_weights_path}")
+        except Exception:
+            pass  # Silently fall back to hardcoded
+
+        # Default hardcoded weights (used if no learned weights)
+        _default_weights = {
+            "signal_liqsweep": 1.5,
+            "signal_fvg": 1.5,
+            "signal_vp": 1.0,
+            "signal_ote": 1.0,
+            "signal_rsi_div": 1.5,
+            "signal_vol_surge": 0.5,
+            "signal_vol_confirm": 0.5,
+            "signal_vwap": 0.5,
+            "signal_bias": 0.5,
+        }
+        _w = _learned_weights if _learned_weights else _default_weights
+
+        # ================================================================
         # SHARED HELPERS (used by both trend and mean-reversion paths)
         # ================================================================
 
@@ -773,7 +806,7 @@ class Prometheus:
             }
 
         def _price_options(current, direction, atr, data_so_far):
-            """Black-Scholes pricing. Returns (premium, delta, lot_size, strike, sigma) or None."""
+            """Black-Scholes pricing with IV skew. Returns (premium, delta, lot_size, strike, sigma) or None."""
             lot_size = get_lot_size(symbol)
             strike = get_atm_strike(current, symbol)
 
@@ -787,11 +820,14 @@ class Prometheus:
 
             daily_vol = atr / current
             if primary_interval == "day":
-                sigma = daily_vol * np.sqrt(252)
+                atm_sigma = daily_vol * np.sqrt(252)
             else:
-                sigma = daily_vol * np.sqrt(26 * 252)
-            sigma = max(sigma, 0.10)
-            sigma = min(sigma, 0.60)
+                atm_sigma = daily_vol * np.sqrt(26 * 252)
+            atm_sigma = max(atm_sigma, 0.10)
+            atm_sigma = min(atm_sigma, 0.60)
+
+            # Apply IV skew adjustment for strike distance from spot
+            sigma = get_implied_vol_at_strike(current, strike, atm_sigma)
 
             r = 0.07
             opt_type = OptionType.CALL if direction == "bullish" else OptionType.PUT
@@ -828,7 +864,7 @@ class Prometheus:
 
         def _build_signal(direction, premium, premium_sl, premium_target,
                           total_quantity, reasons, time_stop_bars, be_ratio, strategy_prefix="pro",
-                          signal_features=None):
+                          signal_features=None, signal_spot=0.0, atr_at_signal=0.0):
             """Build the final signal dict."""
             sig = {
                 "symbol": symbol,
@@ -843,6 +879,8 @@ class Prometheus:
                 "max_bars": time_stop_bars,
                 "bar_interval": primary_interval,
                 "breakeven_ratio": be_ratio,
+                "signal_spot": signal_spot,
+                "atr_at_signal": atr_at_signal,
             }
             # Attach signal features for regression training
             if signal_features:
@@ -858,57 +896,57 @@ class Prometheus:
             """Trend-following signal: directional confluence → BS pricing → sizing."""
             ind = indicators
 
-            # --- Confluence scoring ---
+            # --- Confluence scoring (using learned or default weights) ---
             bull_score = 0
             bear_score = 0
             bull_reasons = []
             bear_reasons = []
 
             if ind["sweep_direction"] == "bullish":
-                bull_score += 1.5; bull_reasons.append("LiqSweep")
+                bull_score += _w["signal_liqsweep"]; bull_reasons.append("LiqSweep")
             elif ind["sweep_direction"] == "bearish":
-                bear_score += 1.5; bear_reasons.append("LiqSweep")
+                bear_score += _w["signal_liqsweep"]; bear_reasons.append("LiqSweep")
 
             if ind["fvg_direction"] == "bullish":
-                bull_score += 1.5; bull_reasons.append("FVG")
+                bull_score += _w["signal_fvg"]; bull_reasons.append("FVG")
             elif ind["fvg_direction"] == "bearish":
-                bear_score += 1.5; bear_reasons.append("FVG")
+                bear_score += _w["signal_fvg"]; bear_reasons.append("FVG")
 
             if ind["vp_direction"] == "bullish":
-                bull_score += 1.0; bull_reasons.append("VP")
+                bull_score += _w["signal_vp"]; bull_reasons.append("VP")
             elif ind["vp_direction"] == "bearish":
-                bear_score += 1.0; bear_reasons.append("VP")
+                bear_score += _w["signal_vp"]; bear_reasons.append("VP")
 
             if ind["ote_direction"] == "bullish":
-                bull_score += 1.0; bull_reasons.append("OTE")
+                bull_score += _w["signal_ote"]; bull_reasons.append("OTE")
             elif ind["ote_direction"] == "bearish":
-                bear_score += 1.0; bear_reasons.append("OTE")
+                bear_score += _w["signal_ote"]; bear_reasons.append("OTE")
 
             if ind["div_direction"] == "bullish":
-                bull_score += 1.5; bull_reasons.append("RSI_Div")
+                bull_score += _w["signal_rsi_div"]; bull_reasons.append("RSI_Div")
             elif ind["div_direction"] == "bearish":
-                bear_score += 1.5; bear_reasons.append("RSI_Div")
+                bear_score += _w["signal_rsi_div"]; bear_reasons.append("RSI_Div")
 
             if ind["volume_surge"]:
                 if bull_score > bear_score:
-                    bull_score += 0.5; bull_reasons.append("VolSurge")
+                    bull_score += _w["signal_vol_surge"]; bull_reasons.append("VolSurge")
                 elif bear_score > bull_score:
-                    bear_score += 0.5; bear_reasons.append("VolSurge")
+                    bear_score += _w["signal_vol_surge"]; bear_reasons.append("VolSurge")
 
             if ind["vol_confirm_dir"] == "bullish":
-                bull_score += 0.5; bull_reasons.append("Acc")
+                bull_score += _w["signal_vol_confirm"]; bull_reasons.append("Acc")
             elif ind["vol_confirm_dir"] == "bearish":
-                bear_score += 0.5; bear_reasons.append("Dist")
+                bear_score += _w["signal_vol_confirm"]; bear_reasons.append("Dist")
 
             if ind["vwap_direction"] == "bullish":
-                bull_score += 0.5; bull_reasons.append("VWAP")
+                bull_score += _w["signal_vwap"]; bull_reasons.append("VWAP")
             else:
-                bear_score += 0.5; bear_reasons.append("VWAP")
+                bear_score += _w["signal_vwap"]; bear_reasons.append("VWAP")
 
             if bias == "bullish":
-                bull_score += 0.5
+                bull_score += _w["signal_bias"]
             elif bias == "bearish":
-                bear_score += 0.5
+                bear_score += _w["signal_bias"]
 
             # --- Directional decision ---
             net_bull = bull_score - bear_score
@@ -1031,7 +1069,8 @@ class Prometheus:
 
             sig = _build_signal(direction, premium, premium_sl, premium_target,
                                 total_quantity, reasons, time_stop_bars, be_ratio, "pro",
-                                signal_features=signal_features)
+                                signal_features=signal_features,
+                                signal_spot=current, atr_at_signal=atr)
             sig["delta"] = delta
             return sig
 
@@ -1189,7 +1228,8 @@ class Prometheus:
             mr_be = overrides.get("mr_breakeven_ratio", 0.3)
 
             sig = _build_signal(direction, premium, premium_sl, premium_target,
-                                total_quantity, reasons, time_stop_bars, mr_be, "mr")
+                                total_quantity, reasons, time_stop_bars, mr_be, "mr",
+                                signal_spot=current, atr_at_signal=atr)
             sig["delta"] = delta
             return sig
 
@@ -1293,6 +1333,9 @@ class Prometheus:
         param_overrides: dict = None,
         verbose: bool = True,
         parrondo: bool = False,
+        entry_timing: bool = False,
+        entry_pullback_atr: float = 0.3,
+        entry_max_wait_bars: int = 2,
     ):
         """
         Run a backtest on an arbitrary date-sliced DataFrame.
@@ -1354,6 +1397,9 @@ class Prometheus:
         engine = BacktestEngine(
             initial_capital=self.initial_capital,
             cost_config=cost_cfg,
+            entry_timing=entry_timing,
+            entry_pullback_atr=entry_pullback_atr,
+            entry_max_wait_bars=entry_max_wait_bars,
         )
 
         result = engine.run(
@@ -1420,6 +1466,9 @@ class Prometheus:
         parrondo: bool = False,
         regime_overrides: Optional[Dict] = None,
         mr_min_score: float = 2.5,
+        entry_timing: bool = False,
+        entry_pullback_atr: float = 0.3,
+        entry_max_wait_bars: int = 2,
     ):
         """Run backtest on historical data using professional signal stack."""
         self.dashboard.show_header()
@@ -1567,6 +1616,24 @@ class Prometheus:
                 parrondo=True,
             )
 
+        # Load learned signal weights for inline signal generator (scan/signal modes)
+        _inline_learned_weights = None
+        try:
+            import json as _json2
+            _wpath2 = Path(__file__).parent / "config" / "regression_weights.json"
+            if _wpath2.exists():
+                with open(_wpath2, "r") as _f2:
+                    _wd2 = _json2.load(_f2)
+                _nw2 = _wd2.get("normalized_weights", {})
+                _inline_learned_weights = {k: v * 1.5 for k, v in _nw2.items()}
+        except Exception:
+            pass
+        _iw = _inline_learned_weights or {
+            "signal_liqsweep": 1.5, "signal_fvg": 1.5, "signal_vp": 1.0,
+            "signal_ote": 1.0, "signal_rsi_div": 1.5, "signal_vol_surge": 0.5,
+            "signal_vol_confirm": 0.5, "signal_vwap": 0.5, "signal_bias": 0.5,
+        }
+
         def _inline_signal_generator(data_so_far: pd.DataFrame) -> Optional[Dict]:
             """
             Professional signal generator v4 — Smart Exits approach.
@@ -1577,6 +1644,8 @@ class Prometheus:
 
             ENTRY: min 2.5 confluence (trending) / 3.5 (sideways)
             EXIT: Trailing stop at 0.7:1 R:R, adaptive R:R (1.5-3.0 based on score)
+
+            Uses learned regression weights from config if available.
             """
             if len(data_so_far) < 50:
                 return None
@@ -1708,85 +1777,77 @@ class Prometheus:
                     vol_confirm_dir = "bearish"
 
             # ================================================================
-            # CONFLUENCE SCORING
+            # CONFLUENCE SCORING (using learned or default weights)
             # ================================================================
             bull_score = 0
             bear_score = 0
             bull_reasons = []
             bear_reasons = []
 
-            # Liquidity Sweep — 1.5 weight
             if sweep_direction == "bullish":
-                bull_score += 1.5
+                bull_score += _iw["signal_liqsweep"]
                 bull_reasons.append("LiqSweep")
             elif sweep_direction == "bearish":
-                bear_score += 1.5
+                bear_score += _iw["signal_liqsweep"]
                 bear_reasons.append("LiqSweep")
 
-            # FVG — 1.5 weight
             if fvg_direction == "bullish":
-                bull_score += 1.5
+                bull_score += _iw["signal_fvg"]
                 bull_reasons.append("FVG")
             elif fvg_direction == "bearish":
-                bear_score += 1.5
+                bear_score += _iw["signal_fvg"]
                 bear_reasons.append("FVG")
 
-            # Volume Profile — 1.0 weight
             if vp_direction == "bullish":
-                bull_score += 1.0
+                bull_score += _iw["signal_vp"]
                 bull_reasons.append("VP")
             elif vp_direction == "bearish":
-                bear_score += 1.0
+                bear_score += _iw["signal_vp"]
                 bear_reasons.append("VP")
 
-            # Fibonacci OTE — 1.0 weight
             if ote_direction == "bullish":
-                bull_score += 1.0
+                bull_score += _iw["signal_ote"]
                 bull_reasons.append("OTE")
             elif ote_direction == "bearish":
-                bear_score += 1.0
+                bear_score += _iw["signal_ote"]
                 bear_reasons.append("OTE")
 
-            # RSI Divergence — 1.5 weight
             if div_direction == "bullish":
-                bull_score += 1.5
+                bull_score += _iw["signal_rsi_div"]
                 bull_reasons.append("RSI_Div")
             elif div_direction == "bearish":
-                bear_score += 1.5
+                bear_score += _iw["signal_rsi_div"]
                 bear_reasons.append("RSI_Div")
 
-            # Volume surge — 0.5 bonus to leading side
             if volume_surge:
                 if bull_score > bear_score:
-                    bull_score += 0.5
+                    bull_score += _iw["signal_vol_surge"]
                     bull_reasons.append("VolSurge")
                 elif bear_score > bull_score:
-                    bear_score += 0.5
+                    bear_score += _iw["signal_vol_surge"]
                     bear_reasons.append("VolSurge")
 
-            # Volume Acc/Dist — 0.5 boost
             if vol_confirm_dir == "bullish":
-                bull_score += 0.5
+                bull_score += _iw["signal_vol_confirm"]
                 bull_reasons.append("Acc")
             elif vol_confirm_dir == "bearish":
-                bear_score += 0.5
+                bear_score += _iw["signal_vol_confirm"]
                 bear_reasons.append("Dist")
 
-            # VWAP position — 0.5 bonus
             if vwap_direction == "bullish":
-                bull_score += 0.5
+                bull_score += _iw["signal_vwap"]
                 bull_reasons.append("VWAP")
             else:
-                bear_score += 0.5
+                bear_score += _iw["signal_vwap"]
                 bear_reasons.append("VWAP")
 
             # (Confirmation candle is now a hard filter, not scoring)
 
-            # Hourly bias agreement — 0.5 bonus (NOT hard filter)
+            # Hourly bias agreement — bonus (NOT hard filter)
             if bias == "bullish":
-                bull_score += 0.5
+                bull_score += _iw["signal_bias"]
             elif bias == "bearish":
-                bear_score += 0.5
+                bear_score += _iw["signal_bias"]
 
             # ================================================================
             # DIRECTIONAL DECISION
@@ -1978,6 +2039,8 @@ class Prometheus:
                 "delta": delta,
                 "max_bars": time_stop_bars,
                 "bar_interval": primary_interval,
+                "signal_spot": current,
+                "atr_at_signal": atr,
             }
 
         # Select signal generator: Parrondo (factory) or original (inline)
@@ -1992,6 +2055,9 @@ class Prometheus:
         engine = BacktestEngine(
             initial_capital=self.initial_capital,
             cost_config=cost_cfg,
+            entry_timing=entry_timing,
+            entry_pullback_atr=entry_pullback_atr,
+            entry_max_wait_bars=entry_max_wait_bars,
         )
 
         logger.info(f"Running backtest on {len(data_primary)} bars of {primary_interval} data..."
@@ -2050,6 +2116,24 @@ class Prometheus:
                 wr = s["wins"] / s["count"] * 100 if s["count"] > 0 else 0
                 print(f"  {r}: {s['count']} trades, {wr:.0f}% WR, PnL Rs {s['total_pnl']:+,.0f}")
 
+        # Entry timing analysis
+        if entry_timing and hasattr(engine, 'entry_timing_stats'):
+            stats = engine.entry_timing_stats
+            total_signals = stats.get("signals_generated", 0)
+            filled_pullback = stats.get("filled_at_pullback", 0)
+            filled_open = stats.get("filled_at_open", 0)
+            expired = stats.get("expired_no_fill", 0)
+            total_filled = filled_pullback + filled_open
+            fill_rate = total_filled / total_signals * 100 if total_signals > 0 else 0
+            print(f"\n--- Entry Timing Analysis ---")
+            print(f"  Signals generated: {total_signals}")
+            print(f"  Filled at pullback limit: {filled_pullback}")
+            print(f"  Filled at gap open: {filled_open}")
+            print(f"  Expired (no fill): {expired}")
+            print(f"  Fill rate: {fill_rate:.1f}%")
+            print(f"  Pullback ATR fraction: {entry_pullback_atr}")
+            print(f"  Max wait bars: {entry_max_wait_bars}")
+
         # Parrondo regime transition analysis
         if parrondo and hasattr(pro_signal_generator, 'regime_transitions'):
             transitions = pro_signal_generator.regime_transitions
@@ -2085,6 +2169,9 @@ class Prometheus:
         test_start: str = "2021-01-01",
         strategy: str = "trend",
         parrondo: bool = False,
+        entry_timing: bool = False,
+        entry_pullback_atr: float = 0.3,
+        entry_max_wait_bars: int = 2,
     ):
         """
         Walk-forward validation: train on historical, test on unseen data.
@@ -2134,6 +2221,9 @@ class Prometheus:
         result_train, engine_train = self._run_backtest_on_slice(
             data_train, symbol, f"WF_train_{symbol.replace(' ', '_')}",
             parrondo=parrondo,
+            entry_timing=entry_timing,
+            entry_pullback_atr=entry_pullback_atr,
+            entry_max_wait_bars=entry_max_wait_bars,
         )
 
         # ── OUT-OF-SAMPLE ──
@@ -2143,6 +2233,9 @@ class Prometheus:
         result_test, engine_test = self._run_backtest_on_slice(
             data_test, symbol, f"WF_test_{symbol.replace(' ', '_')}",
             parrondo=parrondo,
+            entry_timing=entry_timing,
+            entry_pullback_atr=entry_pullback_atr,
+            entry_max_wait_bars=entry_max_wait_bars,
         )
 
         # ── COMPARISON ──
@@ -2774,6 +2867,24 @@ def main():
         default=False,
         help="Enable Parrondo regime-switching: per-bar regime detection with mean-reversion in sideways markets",
     )
+    parser.add_argument(
+        "--entry-timing",
+        action="store_true",
+        default=False,
+        help="Enable next-bar limit order entry timing: waits for pullback before entering",
+    )
+    parser.add_argument(
+        "--entry-pullback-atr",
+        type=float,
+        default=0.3,
+        help="Fraction of ATR for pullback limit order (default: 0.3)",
+    )
+    parser.add_argument(
+        "--entry-max-wait",
+        type=int,
+        default=2,
+        help="Max bars to wait for pullback fill (default: 2)",
+    )
 
     args = parser.parse_args()
 
@@ -2803,6 +2914,9 @@ def main():
             days=args.days,
             strategy=args.strategy,
             parrondo=args.parrondo,
+            entry_timing=args.entry_timing,
+            entry_pullback_atr=args.entry_pullback_atr,
+            entry_max_wait_bars=args.entry_max_wait,
         )
 
     elif args.mode == "signal":
@@ -2818,6 +2932,9 @@ def main():
             test_start=args.test_start,
             strategy=args.strategy,
             parrondo=args.parrondo,
+            entry_timing=args.entry_timing,
+            entry_pullback_atr=args.entry_pullback_atr,
+            entry_max_wait_bars=args.entry_max_wait,
         )
 
     elif args.mode == "sensitivity":

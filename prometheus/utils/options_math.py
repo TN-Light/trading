@@ -244,6 +244,45 @@ def calculate_payoff(
     return total_payoff
 
 
+def get_implied_vol_at_strike(
+    spot: float,
+    strike: float,
+    atm_sigma: float,
+    skew_slope: float = -0.10,
+) -> float:
+    """
+    Estimate implied volatility at a given strike using linear skew model.
+
+    Volatility smile approximation:
+        sigma(K) = atm_sigma - skew_slope * (K/S - 1)
+
+    For ATM (K ≈ S), returns atm_sigma unchanged.
+    For OTM puts (K < S), skew adds vol (smile effect).
+    For OTM calls (K > S), skew slightly reduces vol.
+
+    Args:
+        spot: Current spot price
+        strike: Option strike price
+        atm_sigma: ATM implied volatility (annualized decimal, e.g. 0.20)
+        skew_slope: Skew slope (negative = typical equity skew).
+                    Default -0.10 calibrated for Indian indices.
+
+    Returns:
+        Adjusted implied volatility at the given strike.
+    """
+    if spot <= 0:
+        return atm_sigma
+
+    moneyness = (strike / spot) - 1.0  # 0 at ATM, negative for OTM puts, positive for OTM calls
+    sigma_adj = atm_sigma - skew_slope * moneyness
+
+    # Clamp to reasonable range
+    sigma_adj = max(sigma_adj, 0.05)
+    sigma_adj = min(sigma_adj, 1.0)
+
+    return sigma_adj
+
+
 def breakeven_points(
     spot_range: np.ndarray,
     payoff: np.ndarray
