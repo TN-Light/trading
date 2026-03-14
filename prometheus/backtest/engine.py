@@ -336,6 +336,7 @@ class BacktestEngine:
         peak_capital = capital
         self.trades = []
         self.equity_curve = [capital]
+        self._warmup_bars = warmup_bars
 
         position = None  # Current open position
         daily_pnl = 0.0
@@ -498,9 +499,9 @@ class BacktestEngine:
             premium_entry = signal.get("entry_price", bar["close"] * 0.012)
             slippage = premium_entry * self.cost_model.slippage_pct
             if signal.get("direction") == "bullish":
-                premium_entry += slippage
+                premium_entry += slippage  # Buying call — pay more
             else:
-                premium_entry -= slippage
+                premium_entry += slippage  # Buying put — also pay more (you're buying)
 
             pos = {
                 "entry_time": timestamp,
@@ -851,9 +852,12 @@ class BacktestEngine:
                 premium_close = current_premium - delta * index_move_close + gamma_close - theta_decay
 
             # Update delta for next bar (delta drift / charm approximation)
-            # As underlying moves, delta shifts: ITM options → delta increases, OTM → decreases
+            # Call: underlying up → delta increases (moves ITM)
+            # Put:  underlying up → delta decreases (moves OTM)
             if spot_price > 0:
                 delta_shift = gamma * index_move_close  # approximate charm
+                if position["direction"] == "bearish":
+                    delta_shift = -delta_shift  # put delta moves opposite to calls
                 new_delta = delta + delta_shift
                 new_delta = max(0.05, min(0.95, new_delta))  # clamp to valid range
                 position["delta"] = new_delta
@@ -878,8 +882,8 @@ class BacktestEngine:
                 return True, target, "target"
 
             # TRAILING STOP with BREAKEVEN TRAP + PROFIT RUNNER
-            # 4-stage system: breakeven → trail → lock → runner
-            # Breakeven trap caps losses; runner stages let big winners fly
+            # 5-stage system: breakeven → lock 20% → lock 50% → lock 70% → dynamic trail
+            # Stages 0-3 use fixed R-multiple ratchets; stage 4 trails the high-water mark
             risk_distance = entry_premium - sl if sl > 0 else entry_premium * 0.3
 
             if not position.get("breakeven_set", False):
@@ -906,12 +910,28 @@ class BacktestEngine:
                     position["stop_loss"] = new_sl
                     position["trailing_stage2"] = True
             elif not position.get("trailing_stage3", False):
-                # STAGE 3 — RUNNER: at 3.0:1 R:R, lock 70% (let it fly to target)
+                # STAGE 3 — RUNNER START: at 3.0:1 R:R, lock 70% and begin dynamic trail
                 trail_trigger_3 = entry_premium + risk_distance * 3.0
                 if premium_high >= trail_trigger_3:
                     new_sl = entry_premium + risk_distance * 0.70
                     position["stop_loss"] = new_sl
                     position["trailing_stage3"] = True
+                    position["premium_hwm"] = premium_high  # track high-water mark
+            else:
+                # STAGE 4 — DYNAMIC TRAIL: ratchet stop with high-water mark
+                # Trail offset = 30% of distance from entry to peak (keeps 70% of the move)
+                hwm = position.get("premium_hwm", premium_high)
+                if premium_high > hwm:
+                    hwm = premium_high
+                    position["premium_hwm"] = hwm
+                # Floor: never go below stage 3 level (entry + 0.70R)
+                floor_sl = entry_premium + risk_distance * 0.70
+                # Dynamic: trail 30% below the high-water mark
+                trail_offset = (hwm - entry_premium) * 0.30
+                dynamic_sl = hwm - trail_offset
+                new_sl = max(floor_sl, dynamic_sl)
+                if new_sl > position["stop_loss"]:
+                    position["stop_loss"] = new_sl
 
             # Update running premium for next bar
             position["current_premium"] = premium_close
@@ -1070,16 +1090,20 @@ class BacktestEngine:
         monthly_returns = {}
         if "timestamp" in data.columns and len(self.equity_curve) > 1:
             try:
-                eq_series = pd.Series(
-                    self.equity_curve[:len(data)],
-                    index=pd.to_datetime(data["timestamp"].iloc[:len(self.equity_curve[:len(data)])])
-                )
-                monthly_eq = eq_series.resample("M").last().dropna()
-                for i in range(1, len(monthly_eq)):
-                    key = monthly_eq.index[i].strftime("%Y-%m")
-                    monthly_returns[key] = round(
-                        (monthly_eq.iloc[i] / monthly_eq.iloc[i - 1] - 1) * 100, 2
-                    )
+                # equity_curve[0] = initial capital (before warmup)
+                # equity_curve[1:] corresponds to bars warmup_bars through len(data)-1
+                wb = getattr(self, '_warmup_bars', 30)
+                ec_trading = self.equity_curve[1:]  # skip initial capital entry
+                n_ec = len(ec_trading)
+                ts_trading = pd.to_datetime(data["timestamp"].iloc[wb:wb + n_ec])
+                if len(ts_trading) == n_ec:
+                    eq_series = pd.Series(ec_trading, index=ts_trading)
+                    monthly_eq = eq_series.resample("M").last().dropna()
+                    for i in range(1, len(monthly_eq)):
+                        key = monthly_eq.index[i].strftime("%Y-%m")
+                        monthly_returns[key] = round(
+                            (monthly_eq.iloc[i] / monthly_eq.iloc[i - 1] - 1) * 100, 2
+                        )
             except Exception:
                 pass
 

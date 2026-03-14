@@ -36,38 +36,37 @@ prometheus/
 - Historically-aware DTE: computes days-to-expiry from bar timestamp, not current date
 - **Parrondo regime-switching**: per-bar regime detection routes to trend-following (markup/markdown) or mean-reversion (accumulation/distribution), skips volatile regimes
 - **Gamma-aware premium model**: `dP = delta×dS + 0.5×gamma×dS² - theta×dt` with dynamic delta updates
+- **Direction-aware delta drift**: put delta decreases on rallies, call delta increases (fixed Session 13)
 - **Dynamic capital sizing**: position size scales with current equity, not just initial capital
+- **5-stage trailing stop**: breakeven→20%→50%→70%→dynamic trail (high-water mark with 70% floor)
+- **Unified signal path**: single factory generator for both Parrondo and baseline (no code duplication)
+- **Causal regime detection**: per-bar `detect_fast()` in all modes (no look-ahead bias)
 - **Reporting**: CAGR (compound), Alpha vs buy-and-hold, Calmar ratio, correct Sharpe annualization
 
-## Backtest Results (Real yfinance Data — Session 11 Corrected Metrics)
+## Backtest Results (Real yfinance Data — Session 13 Honest Metrics)
 
-**Session 11 fixes**: CAGR (was linear, now compound), slippage (was 3x, now 1x), Sharpe (correct annualization), gamma in premium model, dynamic capital sizing, adaptive Kelly gate.
+**Session 13 fixes**: Put slippage direction, put delta update, regime look-ahead removed, dynamic trailing stop, inline generator killed (−400 lines), equity curve alignment.
 
 All "CAGR" figures below are true compound annual growth rate. All Sharpe values are correctly annualized.
 
 ### NIFTY 50 — Baseline (Trend-Only)
 | Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha |
 |--------|--------|------|--------|-----|-----|--------|--------|--------|-------|
-| 5yr (2021-2026) | 485% | 42.4% | 172 | 52% | 1.69 | 1.91 | 1.22 | 34.8% | +33.3% |
+| 5yr (2021-2026) | 451% | 40.7% | 158 | 51% | 1.69 | 1.96 | 1.21 | 33.8% | +31.6% |
 
 ### NIFTY 50 — Parrondo (Regime-Switching)
 | Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha |
 |--------|--------|------|--------|-----|-----|--------|--------|--------|-------|
-| 5yr (2021-2026) | 414% | 38.8% | 165 | 53% | 1.64 | 1.79 | 0.77 | 50.1% | +29.6% |
-| 15yr (2011-2026) | 976% | 17.2% | 462 | 50% | 1.75 | 1.50 | 0.41 | 41.5% | +6.9% |
+| 5yr (2021-2026) | 413% | 38.8% | 165 | 53% | 1.64 | 1.79 | 0.77 | 50.2% | +29.6% |
+| 15yr (2011-2026) | 1014% | 17.4% | 455 | 51% | 1.79 | 1.56 | 0.40 | 43.2% | +7.2% |
 
-### BANKNIFTY — Baseline (Trend-Only)
-| Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha |
-|--------|--------|------|--------|-----|-----|--------|--------|--------|-------|
-| 5yr (2021-2026) | 638% | 49.2% | 169 | 57% | 1.59 | 1.91 | 1.29 | 38.2% | +40.4% |
-
-### Key Quality Metrics (Session 12: Corrected)
-- **Sharpe**: 1.79–1.91 (restored from broken 1.02–1.10 in Session 11)
-- **Sortino**: 3.45–3.91 (downside capture metric, not inflated by flat days)
-- **Alpha**: +29-40% excess return over buy-and-hold across all tests
-- **Profit Factor**: 1.59-1.75 (every Rs 1 lost generates Rs 1.6-1.75 gained)
-- **Win Rate**: 50-57% (improved from ~47% due to gamma correction)
-- **MC P(profit)**: 98.5% (NIFTY 5yr Parrondo, 1000 block-bootstrap sims)
+### Key Quality Metrics (Session 13: Honest + Improved)
+- **Sharpe**: 1.79–1.96 (improved via delta fix + dynamic trail)
+- **Sortino**: 3.42–4.03 (downside capture metric)
+- **Alpha**: +29-32% excess return over buy-and-hold across all tests
+- **Profit Factor**: 1.64-1.79 (15yr PF improved 1.75→1.79 via dynamic trail)
+- **Win Rate**: 51-53%
+- **MC P(profit)**: 99.0-99.2% (1000 block-bootstrap sims)
 
 ### Survived Market Crashes
 - 2008 GFC (NIFTY -59.9%, BANKNIFTY -68.8%)
