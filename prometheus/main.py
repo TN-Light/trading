@@ -41,7 +41,7 @@ from prometheus.config import load_config, get, get_credential, get_risk_limits,
 from prometheus.utils.logger import logger, setup_logging
 from prometheus.utils.indian_market import (
     is_market_open, is_trading_day, days_to_expiry,
-    get_lot_size, get_atm_strike, get_expiry_date, IST
+    get_lot_size, get_atm_strike, get_expiry_date, get_strike_interval, IST
 )
 from prometheus.utils.options_math import iv_percentile, iv_rank, black_scholes_price, calculate_greeks, OptionType, get_implied_vol_at_strike
 
@@ -52,7 +52,7 @@ from prometheus.signals.technical import (
     calculate_vwap, calculate_volume_profile, detect_liquidity_sweeps,
     detect_fair_value_gaps, fibonacci_ote_levels, calculate_rsi,
     detect_rsi_divergence, calculate_atr, calculate_supertrend,
-    TechnicalSignal
+    calculate_ema, TechnicalSignal
 )
 from prometheus.signals.oi_analyzer import OIAnalyzer
 from prometheus.signals.regime_detector import RegimeDetector, RegimeState, MarketRegime
@@ -808,7 +808,17 @@ class Prometheus:
         def _price_options(current, direction, atr, data_so_far):
             """Black-Scholes pricing with IV skew. Returns (premium, delta, lot_size, strike, sigma, expiry_str) or None."""
             lot_size = get_lot_size(symbol)
-            strike = get_atm_strike(current, symbol)
+            interval = get_strike_interval(symbol)
+            atm_strike = get_atm_strike(current, symbol)
+
+            # OTM for small accounts: lower premium, better capital efficiency
+            if capital < 50000:
+                if direction == "bullish":
+                    strike = atm_strike + interval  # 1-strike OTM CE
+                else:
+                    strike = atm_strike - interval  # 1-strike OTM PE
+            else:
+                strike = atm_strike
 
             bar_date = pd.Timestamp(data_so_far["timestamp"].iloc[-1])
             try:
@@ -858,15 +868,8 @@ class Prometheus:
             else:
                 risk_pct = 0.02
 
-            # Drawdown-adjusted risk: scale risk linearly with DD
-            # At 0% DD → full risk, at 30% DD → 0% risk (floor at 25% of base)
-            # Uses current equity from capital_tracker (updated by engine after each trade)
-            if capital_tracker:
-                current_eq = capital_tracker.get("capital", capital)
-                peak_eq = capital_tracker.get("peak", capital)
-                dd = (peak_eq - current_eq) / peak_eq if peak_eq > 0 else 0
-                dd_scalar = max(0.25, 1.0 - dd / 0.30)
-                risk_pct *= dd_scalar
+            # DD throttle removed from signal generator — engine handles it in
+            # _apply_risk_overlays() to avoid double-compounding the DD scalar.
 
             risk_per_trade = cap * risk_pct
             loss_per_lot = (premium - premium_sl) * lot_size
@@ -1008,7 +1011,24 @@ class Prometheus:
                 sl_index_move = atr * sl_atr_mult
 
             sl_premium_drop = delta * sl_index_move
-            premium_sl = max(premium - sl_premium_drop, premium * 0.35)
+
+            # For small accounts (<30K): cap absolute loss per trade
+            # Max loss = Rs 150 per trade → SL = premium - (max_loss / lot_size)
+            if capital < 30000:
+                max_loss_per_trade = 150  # Rs 150 hard cap
+                max_premium_drop = max_loss_per_trade / lot_size
+                sl_premium_drop = min(sl_premium_drop, max_premium_drop)
+                # No premium floor — let tight SL work
+                premium_sl = premium - sl_premium_drop
+                premium_sl = max(premium_sl, 0.50)  # absolute minimum Rs 0.50
+            elif capital < 50000:
+                max_loss_per_trade = 300
+                max_premium_drop = max_loss_per_trade / lot_size
+                sl_premium_drop = min(sl_premium_drop, max_premium_drop)
+                premium_sl = premium - sl_premium_drop
+                premium_sl = max(premium_sl, premium * 0.25)
+            else:
+                premium_sl = max(premium - sl_premium_drop, premium * 0.35)
 
             risk_check = premium - premium_sl
             if risk_check <= 0:
@@ -1018,8 +1038,10 @@ class Prometheus:
             o_target_atr = overrides.get("target_atr_mult", None)
             if o_target_atr is not None:
                 base_target = o_target_atr
+            elif capital < 30000:
+                base_target = 5.0   # Very high target — let trailing stop manage exit
             elif capital < 50000:
-                base_target = 3.0
+                base_target = 4.0
             elif capital < 100000:
                 base_target = 2.5
             else:
@@ -1035,7 +1057,10 @@ class Prometheus:
             target_index_move = atr * target_multiplier
             premium_target = premium + delta * target_index_move
 
-            if capital < 50000:
+            # Min R:R — higher for small accounts (tight SL = need high reward)
+            if capital < 30000:
+                min_rr = 3.5  # Rs 150 loss → need Rs 525+ target
+            elif capital < 50000:
                 min_rr = 2.5
             elif capital < 100000:
                 min_rr = 2.0
@@ -1258,6 +1283,122 @@ class Prometheus:
             sig["delta"] = delta
             return sig
 
+        def _generate_expiry_spread_signal(data_so_far, recent_window, current, prev_bar, atr):
+            """
+            Expiry debit spread signal — fires on DTE 0-2 days.
+
+            Uses EMA 8/21 crossover for direction.
+            Generates defined-risk debit spread: Buy ATM + Sell 1-strike OTM.
+            Max cost: 15% of capital.
+            """
+            lot_size = get_lot_size(symbol)
+            bar_date = pd.Timestamp(data_so_far["timestamp"].iloc[-1])
+            try:
+                dte = days_to_expiry(symbol, from_date=bar_date.date())
+            except Exception:
+                return None
+
+            if dte > 2:
+                return None
+
+            # EMA 8/21 crossover for direction
+            close_series = recent_window["close"]
+            if len(close_series) < 21:
+                return None
+            ema8 = calculate_ema(close_series, 8)
+            ema21 = calculate_ema(close_series, 21)
+            if ema8.empty or ema21.empty:
+                return None
+
+            ema8_now = float(ema8.iloc[-1])
+            ema21_now = float(ema21.iloc[-1])
+
+            if ema8_now > ema21_now * 1.001:
+                direction = "bullish"
+            elif ema8_now < ema21_now * 0.999:
+                direction = "bearish"
+            else:
+                return None
+
+            # Price the spread: Buy ATM, Sell 1-strike OTM
+            interval = get_strike_interval(symbol)
+            atm_strike = get_atm_strike(current, symbol)
+
+            if direction == "bullish":
+                buy_strike = atm_strike  # Buy ATM CE
+                sell_strike = atm_strike + interval  # Sell OTM CE
+            else:
+                buy_strike = atm_strike  # Buy ATM PE
+                sell_strike = atm_strike - interval  # Sell OTM PE
+
+            T = max(dte, 1) / 365.0
+            daily_vol = atr / current
+            if primary_interval == "day":
+                atm_sigma = daily_vol * np.sqrt(252)
+            else:
+                atm_sigma = daily_vol * np.sqrt(26 * 252)
+            atm_sigma = max(atm_sigma, 0.10)
+            atm_sigma = min(atm_sigma, 0.60)
+
+            r = 0.07
+            opt_type = OptionType.CALL if direction == "bullish" else OptionType.PUT
+
+            buy_premium = black_scholes_price(current, buy_strike, T, r, atm_sigma, opt_type)
+            sell_premium = black_scholes_price(current, sell_strike, T, r, atm_sigma, opt_type)
+            buy_premium = max(buy_premium, current * 0.002)
+            sell_premium = max(sell_premium, 0)
+
+            # Net debit = what we pay
+            net_debit = buy_premium - sell_premium
+            if net_debit <= 0:
+                return None
+
+            # Max profit = strike width - net debit (for debit spread)
+            max_profit = interval - net_debit
+            if max_profit <= 0:
+                return None
+
+            # R:R must be at least 1.5:1
+            rr = max_profit / net_debit
+            if rr < 1.5:
+                return None
+
+            # Max cost check: 15% of capital
+            spread_cost = net_debit * lot_size
+            if spread_cost > capital * 0.15:
+                return None
+
+            # Position sizing: 1 lot for spreads (defined risk)
+            total_quantity = lot_size
+
+            # SL: lose max 80% of debit (don't hold to total loss)
+            premium_sl = net_debit * 0.20  # exit when premium drops to 20% of debit
+            # Target: 80% of max profit
+            premium_target = net_debit + max_profit * 0.80
+
+            greeks = calculate_greeks(current, buy_strike, T, r, atm_sigma, opt_type)
+            delta = abs(greeks.get("delta", 0.5))
+
+            # Time stop: exit 1 bar before expiry if on daily, or 10 bars on 15min
+            time_stop = 1 if primary_interval == "day" else 10
+
+            try:
+                expiry_date = get_expiry_date(symbol, from_date=bar_date.date())
+                expiry_str = expiry_date.strftime("%Y-%m-%d")
+            except Exception:
+                expiry_str = ""
+
+            sig = _build_signal(
+                direction, net_debit, premium_sl, premium_target,
+                total_quantity, [f"Spread_DTE{dte}"], time_stop, 0.3,
+                strategy_prefix="expiry",
+                signal_features=None,
+                signal_spot=current,
+                atr_at_signal=atr,
+                option_expiry_date=expiry_str)
+            sig["delta"] = delta
+            return sig
+
         # ================================================================
         # MAIN SIGNAL GENERATOR CLOSURE
         # ================================================================
@@ -1304,7 +1445,10 @@ class Prometheus:
                 # ROUTE based on detected regime
                 if regime_value == "volatile":
                     # Capital preservation — skip trading in volatile regime
-                    return None
+                    # But still try expiry spread (defined risk, works in all regimes)
+                    return _generate_expiry_spread_signal(
+                        data_so_far, recent_window, current, prev_bar, atr
+                    )
                 elif regime_value in ("accumulation", "distribution"):
                     # MEAN-REVERSION mode
                     mr_signal = _generate_mean_reversion_signal(
@@ -1313,7 +1457,12 @@ class Prometheus:
                     )
                     if mr_signal:
                         return mr_signal
-                    # Fallback: try trend with higher confluence if MR doesn't fire
+                    # Fallback: try expiry spread, then trend with higher confluence
+                    expiry_sig = _generate_expiry_spread_signal(
+                        data_so_far, recent_window, current, prev_bar, atr
+                    )
+                    if expiry_sig:
+                        return expiry_sig
                     conf_sideways = overrides.get("confluence_sideways", 3.5)
                     return _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
@@ -1322,24 +1471,39 @@ class Prometheus:
                 else:
                     # TREND mode (markup, markdown, unknown)
                     conf_trending = overrides.get("confluence_trending", 2.5)
-                    return _generate_trend_signal(
+                    trend_sig = _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
                         atr, bias, conf_trending, indicators, regime_name=regime_value
+                    )
+                    if trend_sig:
+                        return trend_sig
+                    # Fallback: try expiry spread when trend doesn't fire
+                    return _generate_expiry_spread_signal(
+                        data_so_far, recent_window, current, prev_bar, atr
                     )
             else:
                 # NON-PARRONDO: per-bar regime for confluence threshold only
                 conf_trending = overrides.get("confluence_trending", 2.5)
                 conf_sideways = overrides.get("confluence_sideways", 3.5)
                 if regime_value == "volatile":
-                    return None  # still skip volatile
+                    # Try expiry spread even in volatile (defined risk)
+                    return _generate_expiry_spread_signal(
+                        data_so_far, recent_window, current, prev_bar, atr
+                    )
                 elif regime_value in ("accumulation", "distribution", "unknown"):
                     min_confluence = conf_sideways
                 else:
                     min_confluence = conf_trending
 
-                return _generate_trend_signal(
+                trend_sig = _generate_trend_signal(
                     data_so_far, recent_window, current, prev_bar,
                     atr, bias, min_confluence, indicators, regime_name=regime_value
+                )
+                if trend_sig:
+                    return trend_sig
+                # Fallback: try expiry spread
+                return _generate_expiry_spread_signal(
+                    data_so_far, recent_window, current, prev_bar, atr
                 )
 
         # Attach transition log to the closure for post-backtest analysis
@@ -1423,6 +1587,8 @@ class Prometheus:
 
         # Run backtest
         cost_cfg = get("backtest.costs", {})
+        # Cap positions by capital: <30K can only afford 1 position at a time
+        max_pos = 1 if self.initial_capital < 30000 else 2
         engine = BacktestEngine(
             initial_capital=self.initial_capital,
             cost_config=cost_cfg,
@@ -1430,6 +1596,7 @@ class Prometheus:
             entry_pullback_atr=entry_pullback_atr,
             entry_max_wait_bars=entry_max_wait_bars,
             capital_tracker=capital_tracker,
+            max_positions=max_pos,
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,
@@ -1660,6 +1827,7 @@ class Prometheus:
 
         # Run backtest on primary timeframe data
         cost_cfg = get("backtest.costs", {})
+        max_pos = 1 if self.initial_capital < 30000 else 2
         engine = BacktestEngine(
             initial_capital=self.initial_capital,
             cost_config=cost_cfg,
@@ -1667,6 +1835,7 @@ class Prometheus:
             entry_pullback_atr=entry_pullback_atr,
             entry_max_wait_bars=entry_max_wait_bars,
             capital_tracker=capital_tracker,
+            max_positions=max_pos,
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,

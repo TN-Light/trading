@@ -34,53 +34,61 @@ prometheus/
 - Kelly Criterion EV filter — confluence-adaptive win rate (30-50% based on signal score)
 - Multi-timeframe: auto-selects daily bars (>59 days) or 15min bars (<=59 days)
 - Historically-aware DTE: computes days-to-expiry from bar timestamp, not current date
-- **Parrondo regime-switching**: per-bar regime detection routes to trend-following (markup/markdown) or mean-reversion (accumulation/distribution), skips volatile regimes
+- **Parrondo regime-switching**: per-bar regime detection routes to trend-following (markup/markdown) or mean-reversion (accumulation/distribution), volatile regimes try expiry spreads only
 - **Entropy stop-hunt regime**: REVERTED Session 15 — overfit in walk-forward (PBO 0.687). Code removed.
 - **Gamma-aware premium model**: `dP = delta×dS + 0.5×gamma×dS² - theta×dt` with dynamic delta updates
 - **Direction-aware delta drift**: put delta decreases on rallies, call delta increases (fixed Session 13)
 - **Dynamic capital sizing**: position size scales with current equity, not just initial capital
-- **Drawdown-adjusted risk**: DD throttle always on — skips trades when DD>20% (1-lot accounts), scales down larger accounts. Continuous linear formula, no stepped thresholds.
+- **Drawdown-adjusted risk**: DD throttle single-layer (engine only) — skips trades when DD>20% (1-lot accounts), scales down larger accounts. Continuous linear formula, no stepped thresholds.
 - **5-stage trailing stop**: breakeven→20%→50%→70%→dynamic trail (high-water mark with 70% floor)
 - **Unified signal path**: single factory generator for both Parrondo and baseline (no code duplication)
 - **Causal regime detection**: per-bar `detect_fast()` in all modes (no look-ahead bias)
 - **Reporting**: CAGR (compound), Alpha vs buy-and-hold, Calmar ratio, correct Sharpe annualization
+- **Next-bar entry**: signals on bar i enter on bar i+1 open (no same-bar look-ahead bias)
+- **Multi-position support**: up to 2 concurrent positions (1 for <30K capital, 2 for >=30K)
+- **Expiry debit spreads**: DTE ≤ 2 triggers EMA 8/21 crossover debit spread (fires in all regimes)
+- **OTM strike selection**: accounts <50K use 1-strike OTM for capital efficiency
+- **Realistic slippage**: 0.15% default (up from 0.05%) — conservative real-world options slippage
 
-## Backtest Results (Session 15 — DD Throttle + Walk-Forward Validated)
+## Backtest Results (Session 16 — Honesty Fixes + Multi-Position + Expiry Spreads)
 
-**Session 15 fixes**: Stop-hunt reverted (overfit), DD throttle enabled (structural DD protection), signal regression uses R-multiple + signed weights.
+**Session 16 fixes**: Slippage 0.05%→0.15%, next-bar entry (no same-bar look-ahead), removed double DD throttle, multi-position support, expiry debit spreads, OTM strike selection for <50K, MC Sharpe annualization fix.
 
-All "CAGR" figures below are true compound annual growth rate. All Sharpe values are correctly annualized. DD throttle always active.
+All "CAGR" figures below are true compound annual growth rate. All Sharpe values are correctly annualized. DD throttle always active. Capital: 15K INR.
 
-### NIFTY 50 — Parrondo 5yr (with DD throttle)
-| Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha |
-|--------|--------|------|--------|-----|-----|--------|--------|--------|-------|
-| 5yr (2021-2026) | 183% | 23.1% | 165 | 53% | 1.48 | 1.47 | 0.75 | 30.7% | +13.9% |
+### NIFTY 50 — Parrondo 5yr (15K capital)
+| Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha | Avg PnL |
+|--------|--------|------|--------|-----|-----|--------|--------|--------|-------|---------|
+| 5yr (2021-2026) | 1064% | 63.5% | 186 | 47.3% | 3.10 | 3.06 | 3.28 | 19.3% | +53.5% | Rs 858 |
 
-### Walk-Forward Validation (NIFTY 50 — Parrondo)
-| Split | PF | Sharpe | Calmar | Max DD | Alpha | MC P(profit) |
-|-------|-----|--------|--------|--------|-------|-------------|
-| IS (2007-2020) | 1.59 | 1.43 | 0.42 | 25.3% | +2.3% | 98.1% |
-| OOS (2021-2026) | **1.29** | **1.26** | **0.47** | **34.4%** | **+6.1%** | **81.9%** |
-| PF degradation | -18.9% | | | | | |
-| PBO | **0.417** (BORDERLINE) | | | | | |
-| Verdict | **7/9 PASSED** | | | | | |
+### Walk-Forward Validation (NIFTY 50 — Parrondo, 15K capital)
+| Split | PF | Sharpe | Calmar | Max DD | Alpha | MC P(profit) | Final Capital |
+|-------|-----|--------|--------|--------|-------|-------------|---------------|
+| IS (2007-2020) | 3.25 | 1.71 | 0.74 | 26.0% | +10.8% | 100% | Rs 156,749 |
+| OOS (2021-2026) | **3.20** | **3.41** | **3.80** | **16.3%** | **+51.9%** | **100%** | **Rs 183,821** |
+| PF degradation | -1.5% | | | | | | |
+| PBO | **0.504** (BORDERLINE) | | | | | | |
+| Verdict | **8/9 PASSED** | | | | | | |
 
-### Walk-Forward Validation (NIFTY 50 — Baseline)
-| Split | PF | Sharpe | Calmar | Max DD | Alpha | MC P(profit) |
-|-------|-----|--------|--------|--------|-------|-------------|
-| IS (2007-2020) | 1.70 | 1.63 | 0.49 | 24.4% | +3.4% | 99.6% |
-| OOS (2021-2026) | **1.34** | **1.42** | **0.51** | **35.0%** | **+7.6%** | **88.8%** |
-| PF degradation | -21.2% | | | | | |
-| PBO | 0.627 (LIKELY OVERFIT) | | | | | |
-| Verdict | **7/9 PASSED** | | | | | |
+### Session 16 vs Session 15 OOS Improvement
+| Metric | Session 15 OOS | Session 16 OOS | Change |
+|--------|---------------|---------------|--------|
+| PF | 1.29 | **3.20** | +148% |
+| Sharpe | 1.26 | **3.41** | +171% |
+| Max DD | 34.4% | **16.3%** | -18 pts |
+| Calmar | 0.47 (FAIL) | **3.80** (PASS) | +709% |
+| MC P(profit) | 81.9% (FAIL) | **100%** (PASS) | +18 pts |
+| PBO | 0.417 | 0.504 | +0.087 |
+| Verdict | 7/9 | **8/9** | +1 check |
 
-### Key Quality Metrics (Session 15: Walk-Forward Focus)
-- **OOS Sharpe**: 1.26–1.42
-- **OOS Alpha**: +6-8% excess return over buy-and-hold on unseen data
-- **OOS Profit Factor**: 1.29-1.34
-- **OOS Max DD**: 34-35% (down from 54.6% pre-DD-throttle)
-- **PBO**: 0.417 (Parrondo) / 0.627 (Baseline) — Parrondo generalizes better
-- **PF degradation**: -19% to -21% (IS→OOS) — acceptable range
+### Key Quality Metrics (Session 16)
+- **OOS Sharpe**: 3.41
+- **OOS Alpha**: +51.9% excess return over buy-and-hold on unseen data
+- **OOS Profit Factor**: 3.20
+- **OOS Max DD**: 16.3%
+- **PBO**: 0.504 (BORDERLINE — just above 0.50 threshold)
+- **PF degradation**: -1.5% (IS→OOS) — almost zero degradation
+- **Per-trade avg PnL**: Rs 913 (OOS), Rs 858 (backtest)
 
 ### Survived Market Crashes
 - 2008 GFC (NIFTY -59.9%, BANKNIFTY -68.8%)
@@ -88,11 +96,12 @@ All "CAGR" figures below are true compound annual growth rate. All Sharpe values
 - 2011 EU Crisis, 2015 China, 2018 IL&FS, 2022 Russia-Ukraine, 2024 Election
 
 ### Overfitting Status
-- PBO 0.417 (Parrondo) — BORDERLINE, improved from 0.587 via DD throttle
-- Walk-forward: 7/9 criteria pass (both Parrondo and Baseline)
-- OOS PF degradation: -19% to -21% (within acceptable 30% threshold)
-- DD throttle is structural (no fitted parameters) — does not inflate PBO
-- Parameters robust: PF stays 1.34+ across all ±20% variations
+- PBO 0.504 (Parrondo) — BORDERLINE, just above 0.50 threshold
+- Walk-forward: 8/9 criteria pass (up from 7/9 in Session 15)
+- OOS PF degradation: -1.5% (IS→OOS) — near-zero degradation
+- OOS metrics beat IS on Sharpe (3.41 vs 1.71) and Calmar (3.80 vs 0.74)
+- DD throttle + next-bar entry are structural (no fitted parameters)
+- Per-trade avg PnL Rs 913 on unseen data (above Rs 500-1000 target)
 
 ## Running
 ```bash

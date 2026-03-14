@@ -145,7 +145,7 @@ class ZerodhaCostModel:
         self.gst_pct = cfg.get("gst", 18.0) / 100
         self.sebi_charges_pct = cfg.get("sebi_charges", 0.0001) / 100
         self.stamp_duty_pct = cfg.get("stamp_duty", 0.003) / 100
-        self.slippage_pct = cfg.get("slippage_pct", 0.05) / 100
+        self.slippage_pct = cfg.get("slippage_pct", 0.15) / 100  # realistic options slippage
 
     def calculate_costs(
         self,
@@ -215,6 +215,7 @@ class BacktestEngine:
         entry_pullback_atr: float = 0.3,
         entry_max_wait_bars: int = 2,
         capital_tracker: Dict = None,
+        max_positions: int = 2,
         # ── Institutional risk overlays ──
         vol_target: float = 0.0,       # Target annualized vol (e.g. 0.15 = 15%). 0 = disabled
         dd_throttle: bool = False,      # Reduce size during drawdowns
@@ -227,6 +228,7 @@ class BacktestEngine:
         self.entry_timing = entry_timing
         self.entry_pullback_atr = entry_pullback_atr
         self.entry_max_wait_bars = entry_max_wait_bars
+        self.max_positions = max_positions
         self.entry_timing_stats = {
             "signals_generated": 0,
             "filled_at_pullback": 0,
@@ -341,7 +343,7 @@ class BacktestEngine:
         self.equity_curve = [capital]
         self._warmup_bars = warmup_bars
 
-        position = None  # Current open position
+        positions = []  # Multi-position: list of open positions
         daily_pnl = 0.0
         daily_trades = 0
         last_date = None
@@ -366,42 +368,46 @@ class BacktestEngine:
             # Check daily loss limit (fixed 3% of initial capital)
             daily_loss_limit = self.initial_capital * 0.03
             if daily_pnl < -daily_loss_limit:
-                if position:
-                    # Force close on daily loss limit
-                    if position.get("instrument_type") == "options":
-                        force_exit_price = position.get("current_premium", position["entry_price"])
+                # Force close ALL positions on daily loss limit
+                for pos in positions:
+                    if pos.get("instrument_type") == "options":
+                        force_exit_price = pos.get("current_premium", pos["entry_price"])
                     else:
                         force_exit_price = current_bar["close"]
                     capital, trade = self._close_position(
-                        position, force_exit_price, current_time, capital, "daily_loss_limit"
+                        pos, force_exit_price, current_time, capital, "daily_loss_limit"
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
                     self._sync_capital(capital)
-                    position = None
+                positions = []
                 # Cancel any pending signal on daily loss limit
                 pending_signal = None
                 pending_bars_waited = 0
                 self.equity_curve.append(capital)
                 continue
 
-            # If we have a position, check exit conditions
-            if position:
+            # Check exit conditions for ALL open positions
+            closed_indices = []
+            for pidx, pos in enumerate(positions):
                 exit_triggered, exit_price, exit_reason = self._check_exit(
-                    position, current_bar
+                    pos, current_bar
                 )
                 if exit_triggered:
                     capital, trade = self._close_position(
-                        position, exit_price, current_time, capital, exit_reason
+                        pos, exit_price, current_time, capital, exit_reason
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
                     daily_trades += 1
                     self._sync_capital(capital)
-                    position = None
+                    closed_indices.append(pidx)
+            # Remove closed positions (reverse order to preserve indices)
+            for pidx in reversed(closed_indices):
+                positions.pop(pidx)
 
-            # If no position, check for new signal (or fill pending)
-            if position is None and daily_trades < 6:
+            # If room for more positions, check for new signal (or fill pending)
+            if len(positions) < self.max_positions and daily_trades < 6:
                 if self.entry_timing:
                     # ── ENTRY TIMING MODE: next-bar limit order ──
 
@@ -411,7 +417,7 @@ class BacktestEngine:
                             pending_signal, current_bar, current_time
                         )
                         if filled:
-                            position = fill_result
+                            positions.append(fill_result)
                             pending_signal = None
                             pending_bars_waited = 0
                         else:
@@ -421,8 +427,8 @@ class BacktestEngine:
                                 pending_signal = None
                                 pending_bars_waited = 0
 
-                    # B) No pending and no position → generate new signal → store as pending
-                    if pending_signal is None and position is None:
+                    # B) No pending → generate new signal → store as pending
+                    if pending_signal is None and len(positions) < self.max_positions:
                         data_so_far = data.iloc[:i + 1]
                         signal = signal_generator(data_so_far)
                         if signal:
@@ -432,25 +438,36 @@ class BacktestEngine:
                             pending_signal = signal
                             pending_bars_waited = 0
                 else:
-                    # ── ORIGINAL MODE (no change) ──
-                    data_so_far = data.iloc[:i + 1]
-                    signal = signal_generator(data_so_far)
-                    if signal:
-                        signal = self._apply_risk_overlays(signal, data_so_far, capital)
-                    if signal:
-                        position = self._open_position(signal, current_bar, current_time)
+                    # ── ORIGINAL MODE: next-bar open entry (no look-ahead) ──
+                    # A) Fill pending signal at this bar's open
+                    if pending_signal is not None:
+                        new_pos = self._open_position_at_open(
+                            pending_signal, current_bar, current_time
+                        )
+                        positions.append(new_pos)
+                        pending_signal = None
+                        pending_bars_waited = 0
 
-            # Update equity curve
+                    # B) Generate new signal → store as pending for next bar
+                    if pending_signal is None and len(positions) < self.max_positions:
+                        data_so_far = data.iloc[:i + 1]
+                        signal = signal_generator(data_so_far)
+                        if signal:
+                            signal = self._apply_risk_overlays(signal, data_so_far, capital)
+                        if signal:
+                            pending_signal = signal
+                            pending_bars_waited = 0
+
+            # Update equity curve — sum unrealized across all positions
             unrealized = 0
-            if position:
-                if position.get("instrument_type") == "options":
-                    # Options: unrealized based on current premium vs entry premium
-                    unrealized = (position["current_premium"] - position["entry_price"]) * position["quantity"]
+            for pos in positions:
+                if pos.get("instrument_type") == "options":
+                    unrealized += (pos["current_premium"] - pos["entry_price"]) * pos["quantity"]
                 else:
-                    if position["direction"] == "bullish":
-                        unrealized = (current_bar["close"] - position["entry_price"]) * position["quantity"]
+                    if pos["direction"] == "bullish":
+                        unrealized += (current_bar["close"] - pos["entry_price"]) * pos["quantity"]
                     else:
-                        unrealized = (position["entry_price"] - current_bar["close"]) * position["quantity"]
+                        unrealized += (pos["entry_price"] - current_bar["close"]) * pos["quantity"]
 
             self.equity_curve.append(capital + unrealized)
 
@@ -458,14 +475,14 @@ class BacktestEngine:
             if capital > peak_capital:
                 peak_capital = capital
 
-        # Close any remaining position at last bar
-        if position:
-            if position.get("instrument_type") == "options":
-                exit_price = position.get("current_premium", position["entry_price"])
+        # Close any remaining positions at last bar
+        for pos in positions:
+            if pos.get("instrument_type") == "options":
+                exit_price = pos.get("current_premium", pos["entry_price"])
             else:
                 exit_price = data.iloc[-1]["close"]
             capital, trade = self._close_position(
-                position, exit_price,
+                pos, exit_price,
                 str(data.iloc[-1].get("timestamp", len(data))),
                 capital, "end_of_data"
             )
@@ -474,6 +491,32 @@ class BacktestEngine:
 
         # Calculate metrics
         return self._calculate_metrics(strategy_name, data, capital)
+
+    def _open_position_at_open(self, signal: Dict, bar: pd.Series, timestamp: str) -> Dict:
+        """Open position at bar's open price (next-bar entry, no look-ahead).
+
+        Re-prices option premium using delta approximation from signal spot to bar open.
+        """
+        is_options = signal.get("instrument_type") == "options"
+        if is_options:
+            delta = signal.get("delta", 0.5)
+            signal_spot = signal.get("signal_spot", 0)
+            bar_open = bar["open"]
+            original_premium = signal.get("entry_price", 0)
+
+            if signal_spot > 0 and original_premium > 0:
+                spot_diff = bar_open - signal_spot
+                if signal.get("direction") == "bullish":
+                    adjusted_premium = original_premium + delta * spot_diff
+                else:
+                    adjusted_premium = original_premium - delta * spot_diff
+                adjusted_premium = max(adjusted_premium, original_premium * 0.5)
+                adjusted_premium = max(adjusted_premium, 1.0)
+                adjusted_signal = signal.copy()
+                adjusted_signal["entry_price"] = adjusted_premium
+                return self._open_position(adjusted_signal, bar, timestamp)
+
+        return self._open_position(signal, bar, timestamp)
 
     def _open_position(self, signal: Dict, bar: pd.Series, timestamp: str) -> Dict:
         """Simulate opening a position with slippage."""
@@ -1202,7 +1245,8 @@ class BacktestEngine:
             # Per-simulation Sharpe (simple daily-approximated)
             returns = np.diff(equity_arr) / equity_arr[:-1]
             if len(returns) > 1 and returns.std() > 0:
-                sharpes.append(np.mean(returns) / returns.std() * np.sqrt(min(252, n_trades)))
+                # Annualize using trades-per-year (not min(252, n_trades))
+                sharpes.append(np.mean(returns) / returns.std() * np.sqrt(252))
             else:
                 sharpes.append(0)
 
