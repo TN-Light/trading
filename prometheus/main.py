@@ -827,9 +827,10 @@ class Prometheus:
             return lots * lot_size
 
         def _build_signal(direction, premium, premium_sl, premium_target,
-                          total_quantity, reasons, time_stop_bars, be_ratio, strategy_prefix="pro"):
+                          total_quantity, reasons, time_stop_bars, be_ratio, strategy_prefix="pro",
+                          signal_features=None):
             """Build the final signal dict."""
-            return {
+            sig = {
                 "symbol": symbol,
                 "direction": direction,
                 "entry_price": premium,
@@ -843,13 +844,17 @@ class Prometheus:
                 "bar_interval": primary_interval,
                 "breakeven_ratio": be_ratio,
             }
+            # Attach signal features for regression training
+            if signal_features:
+                sig.update(signal_features)
+            return sig
 
         # ================================================================
         # TREND SIGNAL GENERATION (existing logic)
         # ================================================================
 
         def _generate_trend_signal(data_so_far, recent_window, current, prev_bar,
-                                   atr, bias, min_confluence, indicators):
+                                   atr, bias, min_confluence, indicators, regime_name="unknown"):
             """Trend-following signal: directional confluence → BS pricing → sizing."""
             ind = indicators
 
@@ -1007,8 +1012,26 @@ class Prometheus:
 
             be_ratio = overrides.get("breakeven_ratio", 0.4)
 
+            # --- Signal features for regression training ---
+            signal_features = {
+                "signal_liqsweep": ind["sweep_direction"] == direction,
+                "signal_fvg": ind["fvg_direction"] == direction,
+                "signal_vp": ind["vp_direction"] == direction,
+                "signal_ote": ind["ote_direction"] == direction,
+                "signal_rsi_div": ind["div_direction"] == direction,
+                "signal_vol_surge": bool(ind["volume_surge"]),
+                "signal_vol_confirm": ind["vol_confirm_dir"] == direction,
+                "signal_vwap": ind["vwap_direction"] == direction,
+                "signal_bias": bias == direction,
+                "bull_score": float(bull_score),
+                "bear_score": float(bear_score),
+                "atr_at_entry": float(atr),
+                "regime_at_entry": regime_name,
+            }
+
             sig = _build_signal(direction, premium, premium_sl, premium_target,
-                                total_quantity, reasons, time_stop_bars, be_ratio, "pro")
+                                total_quantity, reasons, time_stop_bars, be_ratio, "pro",
+                                signal_features=signal_features)
             sig["delta"] = delta
             return sig
 
@@ -1229,14 +1252,14 @@ class Prometheus:
                     conf_sideways = overrides.get("confluence_sideways", 3.5)
                     return _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
-                        atr, bias, conf_sideways, indicators
+                        atr, bias, conf_sideways, indicators, regime_name=regime_value
                     )
                 else:
                     # TREND mode (markup, markdown, unknown)
                     conf_trending = overrides.get("confluence_trending", 2.5)
                     return _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
-                        atr, bias, conf_trending, indicators
+                        atr, bias, conf_trending, indicators, regime_name=regime_value
                     )
             else:
                 # STATIC REGIME (original behavior — backward compatible)
@@ -1251,9 +1274,10 @@ class Prometheus:
                 else:
                     min_confluence = conf_trending
 
+                regime_name_static = regime_state.regime.value if regime_state else "unknown"
                 return _generate_trend_signal(
                     data_so_far, recent_window, current, prev_bar,
-                    atr, bias, min_confluence, indicators
+                    atr, bias, min_confluence, indicators, regime_name=regime_name_static
                 )
 
         # Attach transition log to the closure for post-backtest analysis

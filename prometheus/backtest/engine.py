@@ -327,6 +327,24 @@ class BacktestEngine:
         """Simulate opening a position with slippage."""
         is_options = signal.get("instrument_type") == "options"
 
+        # Extract signal features for regression training (if present)
+        signal_meta = {
+            "signal_liqsweep": signal.get("signal_liqsweep", False),
+            "signal_fvg": signal.get("signal_fvg", False),
+            "signal_vp": signal.get("signal_vp", False),
+            "signal_ote": signal.get("signal_ote", False),
+            "signal_rsi_div": signal.get("signal_rsi_div", False),
+            "signal_vol_surge": signal.get("signal_vol_surge", False),
+            "signal_vol_confirm": signal.get("signal_vol_confirm", False),
+            "signal_vwap": signal.get("signal_vwap", False),
+            "signal_bias": signal.get("signal_bias", False),
+            "bull_score": signal.get("bull_score", 0.0),
+            "bear_score": signal.get("bear_score", 0.0),
+            "atr_at_entry": signal.get("atr_at_entry", 0.0),
+            "regime_at_entry": signal.get("regime_at_entry", "unknown"),
+            "option_expiry_date": signal.get("option_expiry_date", ""),
+        }
+
         if is_options:
             # For options: entry_price is the premium, track it separately
             premium_entry = signal.get("entry_price", bar["close"] * 0.012)
@@ -336,7 +354,7 @@ class BacktestEngine:
             else:
                 premium_entry -= slippage
 
-            return {
+            pos = {
                 "entry_time": timestamp,
                 "symbol": signal.get("symbol", "NIFTY"),
                 "direction": signal.get("direction", "bullish"),
@@ -353,6 +371,8 @@ class BacktestEngine:
                 "bar_interval": signal.get("bar_interval", "day"),
                 "breakeven_ratio": signal.get("breakeven_ratio", 0.4),
             }
+            pos.update(signal_meta)
+            return pos
         else:
             entry_price = signal.get("entry_price", bar["close"])
             slippage = entry_price * self.cost_model.slippage_pct
@@ -423,9 +443,20 @@ class BacktestEngine:
                 net_pnl=round(net_pnl, 2),
                 strategy=position["strategy"],
                 exit_reason=reason,
-                option_expiry_date=position.get("option_expiry_date", ""),
+                signal_liqsweep=position.get("signal_liqsweep", False),
+                signal_fvg=position.get("signal_fvg", False),
+                signal_vp=position.get("signal_vp", False),
+                signal_ote=position.get("signal_ote", False),
+                signal_rsi_div=position.get("signal_rsi_div", False),
+                signal_vol_surge=position.get("signal_vol_surge", False),
+                signal_vol_confirm=position.get("signal_vol_confirm", False),
+                signal_vwap=position.get("signal_vwap", False),
+                signal_bias=position.get("signal_bias", False),
+                bull_score=float(position.get("bull_score", 0.0)),
+                bear_score=float(position.get("bear_score", 0.0)),
                 atr_at_entry=float(position.get("atr_at_entry", 0.0)),
                 regime_at_entry=position.get("regime_at_entry", "unknown"),
+                option_expiry_date=position.get("option_expiry_date", ""),
             )
             return capital, trade
 
@@ -465,9 +496,20 @@ class BacktestEngine:
             net_pnl=round(net_pnl, 2),
             strategy=position["strategy"],
             exit_reason=reason,
-            option_expiry_date=position.get("option_expiry_date", ""),
+            signal_liqsweep=position.get("signal_liqsweep", False),
+            signal_fvg=position.get("signal_fvg", False),
+            signal_vp=position.get("signal_vp", False),
+            signal_ote=position.get("signal_ote", False),
+            signal_rsi_div=position.get("signal_rsi_div", False),
+            signal_vol_surge=position.get("signal_vol_surge", False),
+            signal_vol_confirm=position.get("signal_vol_confirm", False),
+            signal_vwap=position.get("signal_vwap", False),
+            signal_bias=position.get("signal_bias", False),
+            bull_score=float(position.get("bull_score", 0.0)),
+            bear_score=float(position.get("bear_score", 0.0)),
             atr_at_entry=float(position.get("atr_at_entry", 0.0)),
             regime_at_entry=position.get("regime_at_entry", "unknown"),
+            option_expiry_date=position.get("option_expiry_date", ""),
         )
 
         return capital, trade
