@@ -25,7 +25,7 @@ import os
 import time
 import signal as sig
 import argparse
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as dtime, timedelta
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -141,8 +141,10 @@ class Prometheus:
         self.dashboard = CLIDashboard()
         tg_cfg = get("interface.telegram", {})
         self.telegram = TelegramBot(
-            bot_token=tg_cfg.get("bot_token", ""),
-            chat_id=tg_cfg.get("chat_id", ""),
+            bot_token=get_credential("telegram.bot_token") or tg_cfg.get("bot_token", ""),
+            chat_id=get_credential("telegram.chat_id") or tg_cfg.get("chat_id", ""),
+            proxy=tg_cfg.get("proxy", ""),
+            api_base_url=tg_cfg.get("api_base_url", ""),
         )
 
         # AI (lazy load)
@@ -436,13 +438,20 @@ class Prometheus:
     # ─────────────────────────────────────────────────────────────────────
     def run_signal_mode(self, interval_seconds: int = 300):
         """
-        Signal mode — continuously analyze and display signals.
-        Does NOT place orders. User trades manually.
+        Signal mode — smart daily-bar signal scanner.
+
+        Since the system trades daily bars (next-bar entry), the primary signal
+        scan runs after market close (3:35 PM IST) when the daily candle is complete.
+        During market hours, runs periodic regime checks every `interval_seconds`.
+        Telegram commands (/scan, /status, etc.) work anytime.
         """
         self.running = True
         self.dashboard.show_header()
+        self._setup_telegram_commands()
         self.telegram.alert_system_start()
         logger.info("Starting SIGNAL mode...")
+
+        _did_post_close_scan = False  # Track if today's post-close scan ran
 
         while self.running:
             try:
@@ -453,50 +462,82 @@ class Prometheus:
                     time.sleep(60)
                     continue
 
-                if not is_market_open(now):
+                current_time = now.time()
+
+                # Reset post-close flag at market open
+                if current_time < dtime(9, 15):
+                    _did_post_close_scan = False
                     self.dashboard.show_status_line(
-                        "Market closed. Next session: 9:15 AM IST"
+                        "Pre-market. Scan at 3:35 PM after daily candle closes."
                     )
                     time.sleep(60)
                     continue
 
-                # Run analysis on all symbols
-                for symbol in self.symbols:
-                    signal = self.analyze(symbol)
-                    if signal:
-                        self.dashboard.show_signal(signal.to_dict())
+                # ── PRIMARY SCAN: After market close (3:35-4:00 PM) ──
+                # Daily candle is complete → signals are valid for next-day entry
+                if dtime(15, 35) <= current_time <= dtime(16, 0) and not _did_post_close_scan:
+                    logger.info("Daily candle closed — running primary signal scan...")
+                    self.telegram.send_message(
+                        "\U0001f50d <b>POST-CLOSE SCAN</b>\n"
+                        "Daily candle complete. Scanning for tomorrow's signals..."
+                    )
 
-                        if signal.action != "HOLD":
-                            self.telegram.alert_new_signal(signal.to_dict())
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal:
+                            self.dashboard.show_signal(signal.to_dict())
 
-                        # Show regime
-                        data = self.data.fetch_historical(symbol, days=60, interval="day")
-                        if not data.empty:
-                            regime = self.regime_detector.detect(data)
-                            selection = self.selector.select(regime)
-                            self.dashboard.show_regime({
-                                "regime": regime.regime.value,
-                                "confidence": regime.confidence,
-                                "volatility_state": regime.volatility_regime,
-                                "trend_strength": regime.trend_strength,
-                                "recommended_strategy": selection["strategy"],
-                            })
+                            if signal.action != "HOLD":
+                                self.telegram.alert_new_signal(signal.to_dict())
 
-                # Show risk status
-                portfolio_state = self.risk.get_portfolio_state()
-                self.dashboard.show_risk_status({
-                    "daily_pnl": portfolio_state.realized_pnl_today,
-                    "daily_limit": self.risk.max_daily_loss,
-                    "weekly_pnl": portfolio_state.realized_pnl_week,
-                    "weekly_limit": self.risk.max_weekly_loss,
-                    "consecutive_losses": portfolio_state.consecutive_losses,
-                    "system_halted": self.risk._halted,
-                })
+                            # Show regime
+                            data = self.data.fetch_historical(symbol, days=60, interval="day")
+                            if not data.empty:
+                                regime = self.regime_detector.detect(data)
+                                selection = self.selector.select(regime)
+                                self.dashboard.show_regime({
+                                    "regime": regime.regime.value,
+                                    "confidence": regime.confidence,
+                                    "volatility_state": regime.volatility_regime,
+                                    "trend_strength": regime.trend_strength,
+                                    "recommended_strategy": selection["strategy"],
+                                })
 
+                    # Show risk status
+                    portfolio_state = self.risk.get_portfolio_state()
+                    self.dashboard.show_risk_status({
+                        "daily_pnl": portfolio_state.realized_pnl_today,
+                        "daily_limit": self.risk.max_daily_loss,
+                        "weekly_pnl": portfolio_state.realized_pnl_week,
+                        "weekly_limit": self.risk.max_weekly_loss,
+                        "consecutive_losses": portfolio_state.consecutive_losses,
+                        "system_halted": self.risk._halted,
+                    })
+
+                    _did_post_close_scan = True
+                    logger.info("Post-close scan complete.")
+                    self.telegram.send_message(
+                        "\u2705 <b>SCAN COMPLETE</b>\n"
+                        "All signals for tomorrow sent above (if any).\n"
+                        "Next scan: tomorrow 3:35 PM after daily candle."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # ── DURING MARKET HOURS: lightweight status ──
+                if is_market_open(now):
+                    self.dashboard.show_status_line(
+                        f"Market open. Daily scan at 3:35 PM. "
+                        f"Use /scan in Telegram for on-demand scan."
+                    )
+                    time.sleep(interval_seconds)
+                    continue
+
+                # ── OUTSIDE HOURS ──
                 self.dashboard.show_status_line(
-                    f"Next scan in {interval_seconds}s. Press Ctrl+C to stop."
+                    "Market closed. Next scan: trading day 3:35 PM IST."
                 )
-                time.sleep(interval_seconds)
+                time.sleep(60)
 
             except KeyboardInterrupt:
                 self.running = False
@@ -517,6 +558,7 @@ class Prometheus:
         """
         self.running = True
         self.dashboard.show_header()
+        self._setup_telegram_commands()
         self.telegram.alert_system_start()
         logger.info("Starting PAPER TRADING mode...")
 
@@ -2584,12 +2626,11 @@ class Prometheus:
 
             print(f" {signal.action} ({adj_confidence:.0%})")
 
-            # Telegram alert for strong non-HOLD signals
-            if signal.action != "HOLD" and adj_confidence >= 0.50:
-                self.telegram.alert_new_signal(signal.to_dict())
-
-        # Display ranked table
+        # Display ranked table (CLI)
         self.dashboard.show_scanner_table(scan_results)
+
+        # Send scanner summary to Telegram (replaces individual signal alerts)
+        self.telegram.alert_scanner_summary(scan_results)
 
         # Show detailed cards for top actionable signals
         actionable = [r for r in scan_results
@@ -2733,9 +2774,173 @@ class Prometheus:
             "equity": state.capital,
         })
 
+    # ─────────────────────────────────────────────────────────────────────
+    # TELEGRAM COMMAND HANDLERS
+    # ─────────────────────────────────────────────────────────────────────
+    def _setup_telegram_commands(self):
+        """Register Telegram bot command handlers and start listening."""
+        tg = self.telegram
+
+        tg.register_command("help", self._tg_cmd_help)
+        tg.register_command("scan", self._tg_cmd_scan)
+        tg.register_command("status", self._tg_cmd_status)
+        tg.register_command("pnl", self._tg_cmd_pnl)
+        tg.register_command("regime", self._tg_cmd_regime)
+        tg.register_command("start", self._tg_cmd_help)  # Telegram auto-sends /start
+
+        tg.start_listening()
+
+    def _tg_cmd_help(self, args: str = "") -> str:
+        """Handle /help command."""
+        return (
+            "\U0001f4d6 <b>PROMETHEUS Commands</b>\n\n"
+            "/scan — Run multi-index scanner\n"
+            "/status — System status & open positions\n"
+            "/pnl — Today's P&L summary\n"
+            "/regime — Current regime for all indices\n"
+            "/help — Show this help message\n\n"
+            "<i>Signals are sent automatically during market hours.</i>"
+        )
+
+    def _tg_cmd_scan(self, args: str = "") -> str:
+        """Handle /scan command — run multi-index scanner and send results."""
+        self.telegram.send_message("\U0001f50e Scanning all indices... please wait.")
+
+        # Regime multipliers (same as run_scan)
+        REGIME_MULTIPLIER = {
+            "markup": 1.00, "markdown": 0.95, "accumulation": 0.75,
+            "distribution": 0.70, "volatile": 0.55, "unknown": 0.40,
+        }
+        SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
+
+        scan_results = []
+        for symbol in self.symbols:
+            try:
+                signal = self.analyze(symbol)
+                if not signal:
+                    continue
+
+                data = self.data.fetch_historical(symbol, days=60, interval="day")
+                regime_str = "unknown"
+                if not data.empty:
+                    regime = self.regime_detector.detect(data)
+                    regime_str = regime.regime.value
+
+                raw_confidence = signal.confidence
+                regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
+                adj_confidence = raw_confidence * regime_mult
+
+                sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
+
+                scan_results.append({
+                    "symbol": symbol,
+                    "action": signal.action,
+                    "raw_confidence": raw_confidence,
+                    "adj_confidence": adj_confidence,
+                    "regime": regime_str,
+                    "signal_count": sig_count,
+                    "entry_price": signal.entry_price,
+                    "stop_loss": signal.stop_loss,
+                    "target": signal.target,
+                    "risk_reward": signal.risk_reward,
+                    "reasoning": signal.reasoning,
+                    "executable": symbol not in SIGNAL_ONLY,
+                })
+            except Exception as e:
+                logger.debug(f"Scan failed for {symbol}: {e}")
+
+        # Send formatted summary (handles empty case too)
+        self.telegram.alert_scanner_summary(scan_results)
+        return None  # already sent via alert_scanner_summary
+
+    def _tg_cmd_status(self, args: str = "") -> str:
+        """Handle /status command."""
+        state = self.risk.get_portfolio_state()
+        positions = self.broker.get_positions() if hasattr(self.broker, "get_positions") else []
+
+        mode_str = self.mode.upper()
+        n_pos = len(positions)
+        halted = "\U0001f6d1 HALTED" if self.risk._halted else "\u2705 ACTIVE"
+
+        text = (
+            f"\U0001f4ca <b>SYSTEM STATUS</b>\n\n"
+            f"Mode: <b>{mode_str}</b>\n"
+            f"Status: {halted}\n"
+            f"Capital: Rs {state.capital:,.0f}\n"
+            f"Open Positions: {n_pos}\n"
+            f"Symbols: {', '.join(self.symbols)}\n"
+        )
+
+        if positions:
+            text += "\n<b>Open Positions:</b>\n"
+            for p in positions:
+                pnl = getattr(p, "unrealized_pnl", 0)
+                pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+                text += (
+                    f"  {pnl_emoji} {p.tradingsymbol} "
+                    f"qty={p.quantity} "
+                    f"P&L=Rs {pnl:+,.0f}\n"
+                )
+
+        return text
+
+    def _tg_cmd_pnl(self, args: str = "") -> str:
+        """Handle /pnl command."""
+        state = self.risk.get_portfolio_state()
+        pnl = state.realized_pnl_today
+        emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
+
+        return (
+            f"{emoji} <b>TODAY'S P&L</b>\n\n"
+            f"Realized P&L: Rs {pnl:+,.0f}\n"
+            f"Trades today: {state.trades_today}\n"
+            f"Consecutive losses: {state.consecutive_losses}\n"
+            f"Capital: Rs {state.capital:,.0f}\n"
+            f"Daily limit: Rs {self.risk.max_daily_loss:,.0f}\n"
+            f"Used: {abs(pnl)/self.risk.max_daily_loss*100:.0f}%"
+        )
+
+    def _tg_cmd_regime(self, args: str = "") -> str:
+        """Handle /regime command — show current regime for all indices."""
+        lines = ["\U0001f30d <b>REGIME STATUS</b>\n"]
+
+        for symbol in self.symbols:
+            try:
+                data = self.data.fetch_historical(symbol, days=60, interval="day")
+                if data.empty:
+                    lines.append(f"  {symbol}: no data")
+                    continue
+
+                regime = self.regime_detector.detect(data)
+                r_val = regime.regime.value
+                r_conf = regime.confidence
+                trend = regime.trend_strength
+
+                from prometheus.interface.telegram_bot import REGIME_QUALITY
+                quality, wr = REGIME_QUALITY.get(r_val, ("???", ""))
+
+                # Direction arrow
+                if trend > 0.2:
+                    arrow = "\u2b06\ufe0f"
+                elif trend < -0.2:
+                    arrow = "\u2b07\ufe0f"
+                else:
+                    arrow = "\u27a1\ufe0f"
+
+                lines.append(
+                    f"  {arrow} <b>{symbol}</b>\n"
+                    f"     {r_val.upper()} ({r_conf:.0%}) | {quality} ({wr})\n"
+                    f"     Trend: {trend:+.2f}"
+                )
+            except Exception as e:
+                lines.append(f"  {symbol}: error — {str(e)[:50]}")
+
+        return "\n".join(lines)
+
     def stop(self):
         """Stop the system gracefully."""
         self.running = False
+        self.telegram.stop_listening()
         logger.info("PROMETHEUS shutting down...")
 
 

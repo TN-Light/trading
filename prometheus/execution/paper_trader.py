@@ -17,6 +17,7 @@ from prometheus.execution.broker import (
     ProductType, OrderStatus
 )
 from prometheus.data.store import DataStore
+from prometheus.backtest.engine import ZerodhaCostModel
 from prometheus.utils.logger import logger
 
 
@@ -29,6 +30,7 @@ class PaperTrader(BrokerBase):
     - Position tracking with real-time P&L
     - Margin tracking (virtual)
     - Stop-loss and target order management
+    - Realistic Zerodha cost model (brokerage, STT, GST, stamp duty, etc.)
     """
 
     def __init__(self, initial_capital: float = 200000):
@@ -41,8 +43,10 @@ class PaperTrader(BrokerBase):
         self.store = DataStore()
         self._connected = True
         self._price_feed: Dict[str, float] = {}  # simulated price feed
+        self.cost_model = ZerodhaCostModel()  # Realistic Zerodha fees
+        self.total_costs = 0.0  # Running total of all fees paid
 
-        logger.info(f"Paper Trader initialized with Rs {initial_capital:,.0f}")
+        logger.info(f"Paper Trader initialized with Rs {initial_capital:,.0f} (realistic costs enabled)")
 
     def connect(self) -> bool:
         """Paper trader is always connected."""
@@ -85,8 +89,8 @@ class PaperTrader(BrokerBase):
             if current_price <= 0:
                 current_price = order.price
 
-            # Simulate slippage (0.05%)
-            slippage = current_price * 0.0005
+            # Simulate slippage (0.15% — realistic options slippage, matches backtest)
+            slippage = current_price * 0.0015
             if order.side == OrderSide.BUY:
                 fill_price = current_price + slippage
             else:
@@ -160,16 +164,19 @@ class PaperTrader(BrokerBase):
         return [p for p in self.positions.values() if p.quantity != 0]
 
     def get_margins(self) -> Dict:
-        """Get virtual margins."""
+        """Get virtual margins (includes realistic costs)."""
         total_unrealized = sum(p.unrealized_pnl for p in self.positions.values())
+        realized = sum(t.get("net_pnl", 0) for t in self.trade_history)
         return {
             "available_cash": round(self.available_cash, 2),
             "available_margin": round(self.available_cash + total_unrealized, 2),
             "used_margin": round(self.used_margin, 2),
             "total_collateral": 0,
             "total_pnl": round(total_unrealized, 2),
-            "equity": round(self.initial_capital + total_unrealized +
-                           sum(t.get("net_pnl", 0) for t in self.trade_history), 2),
+            "equity": round(self.initial_capital + total_unrealized + realized, 2),
+            "total_costs": round(self.total_costs, 2),
+            "realized_pnl": round(realized, 2),
+            "gross_pnl": round(sum(t.get("gross_pnl", 0) for t in self.trade_history), 2),
         }
 
     def get_ltp(self, tradingsymbol: str, exchange: str = "NFO") -> float:
@@ -208,8 +215,17 @@ class PaperTrader(BrokerBase):
                 pos.average_price = total_value / pos.quantity if pos.quantity > 0 else 0
             else:
                 # Closing short
-                realized_pnl = (pos.average_price - fill_price) * min(fill_qty, abs(pos.quantity))
-                self.available_cash += realized_pnl
+                close_qty = min(fill_qty, abs(pos.quantity))
+                realized_pnl = (pos.average_price - fill_price) * close_qty
+
+                # Calculate realistic trading costs
+                buy_value = fill_price * close_qty
+                sell_value = pos.average_price * close_qty
+                costs = self.cost_model.calculate_costs(buy_value, sell_value, "options")
+                net_pnl = realized_pnl - costs["total"]
+                self.total_costs += costs["total"]
+
+                self.available_cash += net_pnl
                 pos.quantity += fill_qty
                 if pos.quantity > 0:
                     pos.average_price = fill_price
@@ -220,7 +236,9 @@ class PaperTrader(BrokerBase):
                     "side": "COVER",
                     "quantity": fill_qty,
                     "price": fill_price,
-                    "net_pnl": round(realized_pnl, 2),
+                    "gross_pnl": round(realized_pnl, 2),
+                    "costs": costs,
+                    "net_pnl": round(net_pnl, 2),
                 })
 
             # Deduct cost
@@ -236,9 +254,18 @@ class PaperTrader(BrokerBase):
                 pos.average_price = total_value / abs(pos.quantity) if pos.quantity != 0 else 0
             else:
                 # Closing long
-                realized_pnl = (fill_price - pos.average_price) * min(fill_qty, pos.quantity)
-                self.available_cash += realized_pnl + (pos.average_price * min(fill_qty, pos.quantity))
-                self.used_margin -= pos.average_price * min(fill_qty, pos.quantity)
+                close_qty = min(fill_qty, pos.quantity)
+                realized_pnl = (fill_price - pos.average_price) * close_qty
+
+                # Calculate realistic trading costs
+                buy_value = pos.average_price * close_qty
+                sell_value = fill_price * close_qty
+                costs = self.cost_model.calculate_costs(buy_value, sell_value, "options")
+                net_pnl = realized_pnl - costs["total"]
+                self.total_costs += costs["total"]
+
+                self.available_cash += net_pnl + (pos.average_price * close_qty)
+                self.used_margin -= pos.average_price * close_qty
                 pos.quantity -= fill_qty
                 if pos.quantity < 0:
                     pos.average_price = fill_price
@@ -249,7 +276,9 @@ class PaperTrader(BrokerBase):
                     "side": "SELL",
                     "quantity": fill_qty,
                     "price": fill_price,
-                    "net_pnl": round(realized_pnl, 2),
+                    "gross_pnl": round(realized_pnl, 2),
+                    "costs": costs,
+                    "net_pnl": round(net_pnl, 2),
                 })
 
             # Credit premium for option selling

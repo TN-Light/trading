@@ -154,9 +154,15 @@ class ZerodhaCostModel:
         instrument_type: str = "options"
     ) -> Dict:
         """Calculate all trading costs for a round-trip trade."""
-        # Brokerage: Rs 20 per order OR 0.03% of trade value, whichever is lower
-        leg1_brok = min(self.brokerage_per_order, buy_value * 0.0003)
-        leg2_brok = min(self.brokerage_per_order, sell_value * 0.0003)
+        # Brokerage: Flat Rs 20 per executed order for F&O (options/futures)
+        # The 0.03% cap only applies to equity cash/intraday, NOT F&O
+        if instrument_type in ("options", "futures"):
+            leg1_brok = self.brokerage_per_order  # Rs 20 flat
+            leg2_brok = self.brokerage_per_order  # Rs 20 flat
+        else:
+            # Equity: Rs 20 or 0.03%, whichever is lower
+            leg1_brok = min(self.brokerage_per_order, buy_value * 0.0003)
+            leg2_brok = min(self.brokerage_per_order, sell_value * 0.0003)
         brokerage = leg1_brok + leg2_brok
 
         # STT (Securities Transaction Tax) — only on sell side

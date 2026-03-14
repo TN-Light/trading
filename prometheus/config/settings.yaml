@@ -243,6 +243,8 @@ interface:
     enabled: true
     bot_token: ""                 # set in credentials.yaml
     chat_id: ""                   # your chat ID
+    proxy: ""                     # SOCKS5/HTTP proxy e.g. "socks5://host:port"
+    api_base_url: "https://tg-relay.venkatabhilash432004.workers.dev"
     alert_on:
       - "new_signal"
       - "order_placed"
