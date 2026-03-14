@@ -61,7 +61,7 @@ class SignalRegressionTrainer:
 
         Returns:
             X: Design matrix (features), shape (N, n_features)
-            y_pnl: P&L target (continuous), shape (N,)
+            y_pnl: R-multiple target (risk-normalized P&L), shape (N,)
             y_win: Win/loss target (binary), shape (N,)
         """
         data = []
@@ -74,6 +74,12 @@ class SignalRegressionTrainer:
             # One-hot encode regime
             regime_accum = 1.0 if trade.regime_at_entry == "accumulation" else 0.0
             regime_dist = 1.0 if trade.regime_at_entry == "distribution" else 0.0
+
+            # Compute R-multiple: P&L / risk (much better target than raw PnL)
+            risk = abs(trade.entry_price - getattr(trade, 'stop_loss', 0)) * getattr(trade, 'quantity', 1)
+            if risk <= 0:
+                risk = abs(trade.entry_price) * 0.3 * getattr(trade, 'quantity', 1)  # fallback 30% SL
+            r_multiple = trade.net_pnl / max(risk, 1.0)
 
             row = {
                 # Signal features (binary or 0-1)
@@ -94,6 +100,7 @@ class SignalRegressionTrainer:
 
                 # Targets
                 "net_pnl": float(trade.net_pnl),
+                "r_multiple": r_multiple,
                 "is_win": 1.0 if trade.net_pnl > 0 else 0.0,
             }
             data.append(row)
@@ -107,7 +114,7 @@ class SignalRegressionTrainer:
         # Design matrix and targets
         feature_cols = self.feature_names + self.context_features
         X = df[feature_cols].fillna(0)
-        y_pnl = df["net_pnl"]
+        y_pnl = df["r_multiple"]  # Use R-multiple instead of raw PnL
         y_win = df["is_win"]
 
         logger.info(f"Extracted {len(X)} trades with signal features for regression training")
@@ -179,14 +186,21 @@ class SignalRegressionTrainer:
         coef = self.model.coef_
         self.weights = dict(zip(self.feature_names, coef[: len(self.feature_names)]))
 
-        # Normalize weights to be comparable to confluence points (0.5-1.5 range typically)
-        min_coef = np.min(np.abs(coef[coef != 0])) if np.any(coef != 0) else 1.0
-        max_coef = np.max(np.abs(coef)) if np.any(coef != 0) else 1.0
-        scale_factor = 1.0 / max(max_coef, 0.01)
+        # Normalize weights PRESERVING SIGN — signals with negative coefficients
+        # are associated with worse outcomes and should reduce confluence, not boost it.
+        # Map to [-1.0, 1.0] range, then shift to [0.0, 1.5] for confluence scoring:
+        #   positive coef → higher weight (boosts confluence)
+        #   negative coef → lower/zero weight (reduces confluence)
+        #   zero coef → baseline weight
+        max_abs = np.max(np.abs(coef)) if np.any(coef != 0) else 1.0
 
         normalized_weights = {}
         for name, coef_val in self.weights.items():
-            normalized_weights[name] = abs(coef_val) * scale_factor
+            # Signed normalization: [-1, 1] → [0, 1.5]
+            # Positive signals map to 0.75-1.5, negative to 0-0.75
+            signed_norm = coef_val / max(max_abs, 0.01)  # in [-1, 1]
+            weight = 0.75 + signed_norm * 0.75            # in [0, 1.5]
+            normalized_weights[name] = round(max(weight, 0.0), 4)
 
         logger.info(f"Learned weights (normalized): {normalized_weights}")
 

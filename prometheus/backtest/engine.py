@@ -249,10 +249,12 @@ class BacktestEngine:
         }
 
     def _sync_capital(self, capital: float):
-        """Keep current_capital and external tracker in sync."""
+        """Keep current_capital and external tracker in sync (including peak for DD sizing)."""
         self.current_capital = capital
         if self._capital_tracker is not None:
             self._capital_tracker["capital"] = capital
+            if capital > self._capital_tracker.get("peak", capital):
+                self._capital_tracker["peak"] = capital
 
     def _apply_risk_overlays(self, signal: Dict, data_so_far: pd.DataFrame, capital: float) -> Optional[Dict]:
         """
@@ -291,20 +293,21 @@ class BacktestEngine:
                         self.risk_overlay_stats["vol_scaled"] += 1
 
         # ── 3. Drawdown Throttle ──
-        # During extreme drawdowns only — soft touch to avoid over-filtering
+        # Continuous linear scaling: at 0% DD → full size, at 30% DD → 25% size
+        # For small accounts (1-lot floor): skip trade entirely when DD > 20%
         if self.dd_throttle and len(self.equity_curve) > 1:
             peak = max(self.equity_curve)
             current_eq = self.equity_curve[-1]
             dd_pct = (peak - current_eq) / peak if peak > 0 else 0
 
-            if dd_pct > 0.40:
-                dd_scalar = 0.50   # 50% size at >40% DD (crisis mode only)
+            # Hard skip for small accounts: can't reduce below 1 lot, so skip instead
+            if dd_pct > 0.20 and qty <= 1:
                 self.risk_overlay_stats["dd_throttled"] += 1
-            elif dd_pct > 0.30:
-                dd_scalar = 0.75   # 75% size at >30% DD
+                return None
+
+            dd_scalar = max(0.25, 1.0 - dd_pct / 0.30)
+            if dd_scalar < 1.0:
                 self.risk_overlay_stats["dd_throttled"] += 1
-            else:
-                dd_scalar = 1.0
             qty = max(1, int(qty * dd_scalar))
 
         # Apply modified quantity

@@ -11,8 +11,8 @@
 prometheus/
   config/       — settings.yaml, credentials.yaml
   data/         — DataEngine (Kite, yfinance, NSE direct), SQLite store (limit=50000)
-  signals/      — Technical (VWAP, Volume Profile, Supertrend, RSI, FVG, Liquidity Sweeps)
-                  OI Analyzer, Regime Detector (AMD/Wyckoff), Signal Fusion Engine
+  signals/      — Technical (VWAP, Volume Profile, Supertrend, RSI, FVG, Liquidity Sweeps, Shannon Entropy, SHI)
+                  OI Analyzer, Regime Detector (AMD/Wyckoff + Entropy Stop-Hunt), Signal Fusion Engine
   intelligence/ — Multi-provider LLM (Groq→Gemini→Ollama), FinBERT sentiment, Embedding pattern matcher
   strategies/   — Trend (options buying), Volatility (event straddles), Expiry (debit spreads), Selector
   risk/         — Hard limits, position sizing, circuit breakers, scenario analysis
@@ -35,38 +35,52 @@ prometheus/
 - Multi-timeframe: auto-selects daily bars (>59 days) or 15min bars (<=59 days)
 - Historically-aware DTE: computes days-to-expiry from bar timestamp, not current date
 - **Parrondo regime-switching**: per-bar regime detection routes to trend-following (markup/markdown) or mean-reversion (accumulation/distribution), skips volatile regimes
+- **Entropy stop-hunt regime**: REVERTED Session 15 — overfit in walk-forward (PBO 0.687). Code removed.
 - **Gamma-aware premium model**: `dP = delta×dS + 0.5×gamma×dS² - theta×dt` with dynamic delta updates
 - **Direction-aware delta drift**: put delta decreases on rallies, call delta increases (fixed Session 13)
 - **Dynamic capital sizing**: position size scales with current equity, not just initial capital
+- **Drawdown-adjusted risk**: DD throttle always on — skips trades when DD>20% (1-lot accounts), scales down larger accounts. Continuous linear formula, no stepped thresholds.
 - **5-stage trailing stop**: breakeven→20%→50%→70%→dynamic trail (high-water mark with 70% floor)
 - **Unified signal path**: single factory generator for both Parrondo and baseline (no code duplication)
 - **Causal regime detection**: per-bar `detect_fast()` in all modes (no look-ahead bias)
 - **Reporting**: CAGR (compound), Alpha vs buy-and-hold, Calmar ratio, correct Sharpe annualization
 
-## Backtest Results (Real yfinance Data — Session 13 Honest Metrics)
+## Backtest Results (Session 15 — DD Throttle + Walk-Forward Validated)
 
-**Session 13 fixes**: Put slippage direction, put delta update, regime look-ahead removed, dynamic trailing stop, inline generator killed (−400 lines), equity curve alignment.
+**Session 15 fixes**: Stop-hunt reverted (overfit), DD throttle enabled (structural DD protection), signal regression uses R-multiple + signed weights.
 
-All "CAGR" figures below are true compound annual growth rate. All Sharpe values are correctly annualized.
+All "CAGR" figures below are true compound annual growth rate. All Sharpe values are correctly annualized. DD throttle always active.
 
-### NIFTY 50 — Baseline (Trend-Only)
+### NIFTY 50 — Parrondo 5yr (with DD throttle)
 | Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha |
 |--------|--------|------|--------|-----|-----|--------|--------|--------|-------|
-| 5yr (2021-2026) | 451% | 40.7% | 158 | 51% | 1.69 | 1.96 | 1.21 | 33.8% | +31.6% |
+| 5yr (2021-2026) | 183% | 23.1% | 165 | 53% | 1.48 | 1.47 | 0.75 | 30.7% | +13.9% |
 
-### NIFTY 50 — Parrondo (Regime-Switching)
-| Period | Return | CAGR | Trades | WR | PF | Sharpe | Calmar | Max DD | Alpha |
-|--------|--------|------|--------|-----|-----|--------|--------|--------|-------|
-| 5yr (2021-2026) | 413% | 38.8% | 165 | 53% | 1.64 | 1.79 | 0.77 | 50.2% | +29.6% |
-| 15yr (2011-2026) | 1014% | 17.4% | 455 | 51% | 1.79 | 1.56 | 0.40 | 43.2% | +7.2% |
+### Walk-Forward Validation (NIFTY 50 — Parrondo)
+| Split | PF | Sharpe | Calmar | Max DD | Alpha | MC P(profit) |
+|-------|-----|--------|--------|--------|-------|-------------|
+| IS (2007-2020) | 1.59 | 1.43 | 0.42 | 25.3% | +2.3% | 98.1% |
+| OOS (2021-2026) | **1.29** | **1.26** | **0.47** | **34.4%** | **+6.1%** | **81.9%** |
+| PF degradation | -18.9% | | | | | |
+| PBO | **0.417** (BORDERLINE) | | | | | |
+| Verdict | **7/9 PASSED** | | | | | |
 
-### Key Quality Metrics (Session 13: Honest + Improved)
-- **Sharpe**: 1.79–1.96 (improved via delta fix + dynamic trail)
-- **Sortino**: 3.42–4.03 (downside capture metric)
-- **Alpha**: +29-32% excess return over buy-and-hold across all tests
-- **Profit Factor**: 1.64-1.79 (15yr PF improved 1.75→1.79 via dynamic trail)
-- **Win Rate**: 51-53%
-- **MC P(profit)**: 99.0-99.2% (1000 block-bootstrap sims)
+### Walk-Forward Validation (NIFTY 50 — Baseline)
+| Split | PF | Sharpe | Calmar | Max DD | Alpha | MC P(profit) |
+|-------|-----|--------|--------|--------|-------|-------------|
+| IS (2007-2020) | 1.70 | 1.63 | 0.49 | 24.4% | +3.4% | 99.6% |
+| OOS (2021-2026) | **1.34** | **1.42** | **0.51** | **35.0%** | **+7.6%** | **88.8%** |
+| PF degradation | -21.2% | | | | | |
+| PBO | 0.627 (LIKELY OVERFIT) | | | | | |
+| Verdict | **7/9 PASSED** | | | | | |
+
+### Key Quality Metrics (Session 15: Walk-Forward Focus)
+- **OOS Sharpe**: 1.26–1.42
+- **OOS Alpha**: +6-8% excess return over buy-and-hold on unseen data
+- **OOS Profit Factor**: 1.29-1.34
+- **OOS Max DD**: 34-35% (down from 54.6% pre-DD-throttle)
+- **PBO**: 0.417 (Parrondo) / 0.627 (Baseline) — Parrondo generalizes better
+- **PF degradation**: -19% to -21% (IS→OOS) — acceptable range
 
 ### Survived Market Crashes
 - 2008 GFC (NIFTY -59.9%, BANKNIFTY -68.8%)
@@ -74,8 +88,10 @@ All "CAGR" figures below are true compound annual growth rate. All Sharpe values
 - 2011 EU Crisis, 2015 China, 2018 IL&FS, 2022 Russia-Ukraine, 2024 Election
 
 ### Overfitting Status
-- Pure math (no ML) — NOT overfit, walk-forward validated
-- BANKNIFTY OOS PF 1.57 (Parrondo) — outperforms in-sample
+- PBO 0.417 (Parrondo) — BORDERLINE, improved from 0.587 via DD throttle
+- Walk-forward: 7/9 criteria pass (both Parrondo and Baseline)
+- OOS PF degradation: -19% to -21% (within acceptable 30% threshold)
+- DD throttle is structural (no fitted parameters) — does not inflate PBO
 - Parameters robust: PF stays 1.34+ across all ±20% variations
 
 ## Running

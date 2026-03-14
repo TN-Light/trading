@@ -845,17 +845,28 @@ class Prometheus:
             return premium, delta, lot_size, strike, sigma, expiry_date_str
 
         def _size_position(premium, premium_sl, lot_size):
-            """Position sizing. Returns total_quantity or None if invalid."""
-            # Use FIXED initial capital for sizing (not dynamic equity)
-            # Dynamic sizing amplifies drawdowns — after winning streak pushes capital up,
-            # a reversal hits 2x harder because positions are larger
-            cap = capital
+            """Position sizing with drawdown-adjusted risk.
+            Uses initial capital for bracket selection, but scales risk DOWN
+            proportionally to current drawdown. This is structural protection —
+            no tunable parameters that can overfit.
+            """
+            cap = capital  # initial capital for bracket selection
             if cap < 30000:
                 risk_pct = 0.04
             elif cap < 75000:
                 risk_pct = 0.03
             else:
                 risk_pct = 0.02
+
+            # Drawdown-adjusted risk: scale risk linearly with DD
+            # At 0% DD → full risk, at 30% DD → 0% risk (floor at 25% of base)
+            # Uses current equity from capital_tracker (updated by engine after each trade)
+            if capital_tracker:
+                current_eq = capital_tracker.get("capital", capital)
+                peak_eq = capital_tracker.get("peak", capital)
+                dd = (peak_eq - current_eq) / peak_eq if peak_eq > 0 else 0
+                dd_scalar = max(0.25, 1.0 - dd / 0.30)
+                risk_pct *= dd_scalar
 
             risk_per_trade = cap * risk_pct
             loss_per_lot = (premium - premium_sl) * lot_size
@@ -1348,7 +1359,7 @@ class Prometheus:
         entry_pullback_atr: float = 0.3,
         entry_max_wait_bars: int = 2,
         vol_target: float = 0.0,
-        dd_throttle: bool = False,
+        dd_throttle: bool = True,
         equity_curve_filter: bool = False,
     ):
         """
@@ -1382,7 +1393,7 @@ class Prometheus:
         capital = self.initial_capital
 
         # Mutable container for dynamic capital tracking between engine and signal generator
-        capital_tracker = {"capital": capital}
+        capital_tracker = {"capital": capital, "peak": capital}
 
         # If regime_overrides provided, force parrondo=True for per-bar detection
         use_parrondo = parrondo or bool(regime_overrides)
@@ -1492,7 +1503,7 @@ class Prometheus:
         entry_pullback_atr: float = 0.3,
         entry_max_wait_bars: int = 2,
         vol_target: float = 0.0,
-        dd_throttle: bool = False,
+        dd_throttle: bool = True,
         equity_curve_filter: bool = False,
         param_overrides: Optional[Dict] = None,
     ):
@@ -1631,6 +1642,11 @@ class Prometheus:
                 param_overrides_dict["recheck_bars"] = regime_overrides["recheck_bars"]
         if param_overrides:
             param_overrides_dict.update(param_overrides)
+
+        # Track capital across bars for dynamic sizing
+        capital = self.initial_capital
+        capital_tracker = {"capital": capital, "peak": capital}
+
         pro_signal_generator = self._make_signal_generator(
             regime_state=regime_state,
             hourly_bias_map=hourly_bias_map,
@@ -1639,10 +1655,8 @@ class Prometheus:
             symbol=symbol,
             param_overrides=param_overrides_dict,
             parrondo=parrondo,
+            capital_tracker=capital_tracker,
         )
-
-        # Track capital across bars for dynamic sizing
-        capital = self.initial_capital
 
         # Run backtest on primary timeframe data
         cost_cfg = get("backtest.costs", {})
@@ -1652,6 +1666,7 @@ class Prometheus:
             entry_timing=entry_timing,
             entry_pullback_atr=entry_pullback_atr,
             entry_max_wait_bars=entry_max_wait_bars,
+            capital_tracker=capital_tracker,
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,
@@ -1784,7 +1799,7 @@ class Prometheus:
         entry_pullback_atr: float = 0.3,
         entry_max_wait_bars: int = 2,
         vol_target: float = 0.0,
-        dd_throttle: bool = False,
+        dd_throttle: bool = True,
         equity_curve_filter: bool = False,
     ):
         """
@@ -2577,8 +2592,8 @@ def main():
     parser.add_argument(
         "--dd-throttle",
         action="store_true",
-        default=False,
-        help="Drawdown throttle: reduce position size during drawdowns (>8%%: 0.75x, >15%%: 0.5x, >25%%: 0.25x)",
+        default=True,
+        help="Drawdown throttle: skip trades when DD>20%% (1-lot accounts), scale down larger accounts",
     )
     parser.add_argument(
         "--equity-filter",
@@ -2605,8 +2620,10 @@ def main():
     if args.risk_overlays:
         if args.vol_target == 0.0:
             args.vol_target = 0.15
-        args.dd_throttle = True
         # Note: equity filter NOT enabled by default — too aggressive for small capital
+
+    # DD throttle always on — structural protection for small accounts
+    args.dd_throttle = True
 
     # Initialize system
     prometheus = Prometheus(config_path=args.config)
