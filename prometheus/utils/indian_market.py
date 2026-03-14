@@ -30,6 +30,10 @@ LOT_SIZES = {
     "NIFTY": 25,
     "BANKNIFTY": 15,
     "FINNIFTY": 25,
+    "SENSEX": 10,
+    "NIFTY IT": 25,
+    "NIFTY MIDCAP SELECT": 50,
+    "NIFTY NEXT 50": 25,
     # Stock F&O lot sizes — add as needed
     "RELIANCE": 250,
     "TCS": 150,
@@ -53,6 +57,10 @@ STRIKE_INTERVALS = {
     "NIFTY": 50,
     "BANKNIFTY": 100,
     "FINNIFTY": 50,
+    "SENSEX": 100,
+    "NIFTY IT": 50,
+    "NIFTY MIDCAP SELECT": 25,
+    "NIFTY NEXT 50": 50,
 }
 
 # ---------------------------------------------------------------------------

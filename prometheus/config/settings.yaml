@@ -28,6 +28,9 @@ market:
     - "NIFTY 50"
     - "NIFTY BANK"
     - "NIFTY FIN SERVICE"
+    - "NIFTY IT"
+    - "NIFTY MIDCAP SELECT"
+    - "SENSEX"
   trading_hours:
     start: "09:15"
     end: "15:30"

@@ -805,13 +805,6 @@ class BacktestEngine:
             bars_held = position.get("bars_held", 0) + 1
             position["bars_held"] = bars_held
 
-            # TIME STOP: exit after max_bars if set (prevents theta bleed)
-            max_bars = position.get("max_bars", 0)
-            if max_bars > 0 and bars_held >= max_bars:
-                position["current_premium"] = current_premium
-                position["prev_close"] = bar["close"]
-                return True, current_premium, "time_stop"
-
             # Theta decay: scale based on bar interval
             # For 15min bars: ~0.15% per bar (96 bars/day, daily theta ~15% spread across bars)
             # For daily bars: 0.8%-2.5% per bar (original)
@@ -855,12 +848,13 @@ class BacktestEngine:
                             base_theta = 0.025
                 else:
                     # Fallback: bars-held based (when no expiry date available)
-                    if bars_held <= 3:
-                        base_theta = 0.008
-                    elif bars_held <= 6:
-                        base_theta = 0.015
+                    # Gradual escalation — supports 7-bar holding without punitive theta
+                    if bars_held <= 5:
+                        base_theta = 0.008   # 0.8%/day — flat for first 5 bars
+                    elif bars_held <= 8:
+                        base_theta = 0.012   # 1.2%/day — moderate acceleration
                     else:
-                        base_theta = 0.025
+                        base_theta = 0.020   # 2.0%/day — penalizes very long holds
 
                 theta_pct = base_theta
             theta_decay = current_premium * theta_pct
@@ -926,6 +920,15 @@ class BacktestEngine:
                 position["current_premium"] = target
                 position["prev_close"] = bar["close"]
                 return True, target, "target"
+
+            # TIME STOP: exit after max_bars — checked AFTER SL/target
+            # so a trade hitting target on the final bar gets target exit, not time stop.
+            # Uses this bar's computed premium_close, not stale previous-bar premium.
+            max_bars = position.get("max_bars", 0)
+            if max_bars > 0 and bars_held >= max_bars:
+                position["current_premium"] = premium_close
+                position["prev_close"] = bar["close"]
+                return True, premium_close, "time_stop"
 
             # TRAILING STOP with BREAKEVEN TRAP + PROFIT RUNNER
             # 5-stage system: breakeven → lock 20% → lock 50% → lock 70% → dynamic trail

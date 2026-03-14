@@ -1092,11 +1092,11 @@ class Prometheus:
             if o_time_stop is not None:
                 time_stop_bars = o_time_stop
             elif primary_interval == "day":
-                time_stop_bars = 5 if capital < 50000 else (4 if capital < 100000 else 3)
+                time_stop_bars = 7 if capital < 50000 else (6 if capital < 100000 else 5)
             else:
-                time_stop_bars = 16 if capital < 50000 else (12 if capital < 100000 else 10)
+                time_stop_bars = 22 if capital < 50000 else (18 if capital < 100000 else 14)
 
-            be_ratio = overrides.get("breakeven_ratio", 0.4)
+            be_ratio = overrides.get("breakeven_ratio", 0.6)
 
             # --- Signal features for regression training ---
             signal_features = {
@@ -1274,7 +1274,7 @@ class Prometheus:
             else:
                 time_stop_bars = 8
 
-            mr_be = overrides.get("mr_breakeven_ratio", 0.3)
+            mr_be = overrides.get("mr_breakeven_ratio", 0.4)
 
             sig = _build_signal(direction, premium, premium_sl, premium_target,
                                 total_quantity, reasons, time_stop_bars, mr_be, "mr",
@@ -1470,7 +1470,7 @@ class Prometheus:
                     )
                 else:
                     # TREND mode (markup, markdown, unknown)
-                    conf_trending = overrides.get("confluence_trending", 2.5)
+                    conf_trending = overrides.get("confluence_trending", 3.0)
                     trend_sig = _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
                         atr, bias, conf_trending, indicators, regime_name=regime_value
@@ -1483,7 +1483,7 @@ class Prometheus:
                     )
             else:
                 # NON-PARRONDO: per-bar regime for confluence threshold only
-                conf_trending = overrides.get("confluence_trending", 2.5)
+                conf_trending = overrides.get("confluence_trending", 3.0)
                 conf_sideways = overrides.get("confluence_sideways", 3.5)
                 if regime_value == "volatile":
                     # Try expiry spread even in volatile (defined risk)
@@ -2423,11 +2423,11 @@ class Prometheus:
 
         # Define param grid
         param_grid = [
-            ("confluence_trending", [2.0, 2.5, 3.0]),
+            ("confluence_trending", [2.5, 3.0, 3.5]),
             ("target_atr_mult",     [2.5, 3.0, 3.5]),
-            ("time_stop_bars",      [3, 5, 7]),
+            ("time_stop_bars",      [5, 7, 9]),
             ("kelly_wr",            [0.30, 0.35, 0.40]),
-            ("breakeven_ratio",     [0.3, 0.4, 0.5]),
+            ("breakeven_ratio",     [0.4, 0.6, 0.8]),
         ]
 
         # Baseline run (all defaults)
@@ -2461,11 +2461,11 @@ class Prometheus:
         print("=" * 70)
 
         defaults = {
-            "confluence_trending": 2.5,
+            "confluence_trending": 3.0,
             "target_atr_mult": 3.0,
-            "time_stop_bars": 5,
+            "time_stop_bars": 7,
             "kelly_wr": 0.35,
-            "breakeven_ratio": 0.4,
+            "breakeven_ratio": 0.6,
         }
 
         min_pf = baseline.profit_factor
@@ -2516,45 +2516,120 @@ class Prometheus:
     # MODE: ONE-TIME SCAN
     # ─────────────────────────────────────────────────────────────────────
     def run_scan(self):
-        """Run a single scan and display results."""
+        """Run a multi-index scan, rank by regime-adjusted confidence."""
         self.dashboard.show_header()
         print(f"\nScanning {len(self.symbols)} symbols at {datetime.now().strftime('%H:%M:%S')}...\n")
 
+        # Regime quality multipliers from backtest WR data:
+        # markup 62% WR, markdown 58%, accum/distrib moderate, unknown 26%
+        REGIME_MULTIPLIER = {
+            "markup":       1.00,
+            "markdown":     0.95,
+            "accumulation": 0.75,
+            "distribution": 0.70,
+            "volatile":     0.55,
+            "unknown":      0.40,
+        }
+
+        # Non-executable symbols (signal-only, can't trade via Kite)
+        SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
+
+        scan_results = []
+
         for symbol in self.symbols:
-            print(f"{'─' * 50}")
+            print(f"  Analyzing {symbol}...", end="", flush=True)
             signal = self.analyze(symbol)
 
-            if signal:
-                self.dashboard.show_signal(signal.to_dict())
+            if not signal:
+                print(" no data")
+                continue
 
-                if signal.action != "HOLD":
-                    self.telegram.alert_new_signal(signal.to_dict())
+            # Get regime for this symbol
+            data = self.data.fetch_historical(symbol, days=60, interval="day")
+            regime_str = "unknown"
+            regime_conf = 0.0
+            if not data.empty:
+                regime = self.regime_detector.detect(data)
+                regime_str = regime.regime.value
+                regime_conf = regime.confidence
 
-                # Show regime
-                data = self.data.fetch_historical(symbol, days=60, interval="day")
-                if not data.empty:
-                    regime = self.regime_detector.detect(data)
-                    selection = self.selector.select(regime)
-                    self.dashboard.show_regime({
-                        "regime": regime.regime.value,
-                        "confidence": regime.confidence,
-                        "volatility_state": regime.volatility_regime,
-                        "trend_strength": regime.trend_strength,
-                        "recommended_strategy": selection["strategy"],
-                    })
-            else:
-                print(f"  {symbol}: No data or analysis failed")
+            # Count contributing signals
+            sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
 
-            print()
+            # Raw confluence from fusion engine
+            raw_confidence = signal.confidence
+
+            # Regime-adjusted confidence
+            regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
+            adj_confidence = raw_confidence * regime_mult
+
+            executable = symbol not in SIGNAL_ONLY
+
+            scan_results.append({
+                "symbol": symbol,
+                "action": signal.action,
+                "direction": signal.direction,
+                "raw_confidence": raw_confidence,
+                "adj_confidence": adj_confidence,
+                "regime": regime_str,
+                "regime_confidence": regime_conf,
+                "signal_count": sig_count,
+                "entry_price": signal.entry_price,
+                "stop_loss": signal.stop_loss,
+                "target": signal.target,
+                "risk_reward": signal.risk_reward,
+                "reasoning": signal.reasoning,
+                "executable": executable,
+            })
+
+            print(f" {signal.action} ({adj_confidence:.0%})")
+
+            # Telegram alert for strong non-HOLD signals
+            if signal.action != "HOLD" and adj_confidence >= 0.50:
+                self.telegram.alert_new_signal(signal.to_dict())
+
+        # Display ranked table
+        self.dashboard.show_scanner_table(scan_results)
+
+        # Show detailed cards for top actionable signals
+        actionable = [r for r in scan_results
+                      if r["action"] != "HOLD" and r["adj_confidence"] >= 0.50]
+        actionable.sort(key=lambda x: x["adj_confidence"], reverse=True)
+
+        if actionable:
+            print(f"\n{'─' * 60}")
+            print(f"  TOP SIGNALS (Adj Confidence >= 50%)")
+            print(f"{'─' * 60}")
+            for r in actionable[:5]:
+                self.dashboard.show_signal({
+                    "action": r["action"],
+                    "symbol": r["symbol"],
+                    "confidence": r["adj_confidence"],
+                    "entry_price": r["entry_price"],
+                    "stop_loss": r["stop_loss"],
+                    "target": r["target"],
+                    "risk_reward": r["risk_reward"],
+                    "regime": r["regime"],
+                    "reasoning": r["reasoning"],
+                })
+                # Warning for weak regimes
+                regime = r["regime"]
+                if regime == "unknown":
+                    print("    [!!] UNKNOWN regime — 26% historical WR. Consider skipping.")
+                elif regime == "volatile":
+                    print("    [!] VOLATILE regime — lower conviction. Tighter sizing recommended.")
+                elif not r["executable"]:
+                    print(f"    [i] {r['symbol']} — signal only (not executable via Kite)")
+                print()
 
         # VIX
         vix = self.data.get_vix()
         if vix:
-            print(f"India VIX: {vix:.2f}")
+            print(f"\nIndia VIX: {vix:.2f}")
             if vix > 20:
-                print("  ⚠ High fear — consider hedging or reducing position sizes")
+                print("  HIGH fear — consider hedging or reducing position sizes")
             elif vix < 12:
-                print("  ⚠ Low vol — options are cheap, good for buying straddles")
+                print("  LOW vol — options are cheap, good for buying")
 
     # ─────────────────────────────────────────────────────────────────────
     # SETUP WIZARD

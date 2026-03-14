@@ -332,3 +332,112 @@ class CLIDashboard:
             self.console.print(f"[dim]{datetime.now().strftime('%H:%M:%S')}[/dim] {text}")
         else:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] {text}")
+
+    def show_scanner_table(self, scan_results: list):
+        """Display ranked multi-index scanner results with regime-adjusted confidence."""
+        if not scan_results:
+            if self.console:
+                self.console.print("[dim]No signals found across any index[/dim]")
+            else:
+                print("No signals found across any index")
+            return
+
+        # Sort by adjusted confidence (highest first)
+        scan_results.sort(key=lambda x: x.get("adj_confidence", 0), reverse=True)
+
+        # Regime quality tiers from backtest data
+        REGIME_QUALITY = {
+            "markup": ("HIGH", "green"),
+            "markdown": ("HIGH", "green"),
+            "accumulation": ("MED", "yellow"),
+            "distribution": ("MED", "yellow"),
+            "volatile": ("LOW", "magenta"),
+            "unknown": ("WEAK", "red"),
+        }
+
+        if not self.console:
+            print(f"\n{'=' * 80}")
+            print("  PROMETHEUS — Multi-Index Scanner (Ranked by Confidence)")
+            print(f"{'=' * 80}")
+            print(f"  {'Symbol':<20} {'Action':<10} {'Confluence':>10} {'Regime':<14} "
+                  f"{'Quality':>8} {'Signals':>8} {'Adj Conf':>9}")
+            print(f"  {'-' * 75}")
+            for r in scan_results:
+                regime = r.get("regime", "unknown")
+                quality, _ = REGIME_QUALITY.get(regime, ("???", "dim"))
+                warn = " << CAUTION" if quality in ("WEAK", "LOW") else ""
+                print(f"  {r['symbol']:<20} {r['action']:<10} {r['raw_confidence']:>9.0%} "
+                      f"{regime:<14} {quality:>8} {r['signal_count']:>5}/10 "
+                      f"{r['adj_confidence']:>8.0%}{warn}")
+            print(f"{'=' * 80}")
+            return
+
+        table = Table(
+            title="[bold cyan]Multi-Index Scanner[/bold cyan] (Ranked by Confidence)",
+            box=box.ROUNDED,
+            border_style="cyan",
+            show_lines=True,
+        )
+        table.add_column("#", style="dim", width=3, justify="right")
+        table.add_column("Symbol", style="bold", min_width=18)
+        table.add_column("Action", min_width=10)
+        table.add_column("Confluence", justify="right", min_width=10)
+        table.add_column("Regime", min_width=14)
+        table.add_column("Quality", justify="center", min_width=8)
+        table.add_column("Signals", justify="right", min_width=7)
+        table.add_column("Adj Conf", justify="right", min_width=9)
+        table.add_column("Alert", min_width=12)
+
+        for i, r in enumerate(scan_results, 1):
+            action = r.get("action", "HOLD")
+            regime = r.get("regime", "unknown")
+            quality, q_color = REGIME_QUALITY.get(regime, ("???", "dim"))
+            raw_conf = r.get("raw_confidence", 0)
+            adj_conf = r.get("adj_confidence", 0)
+            sig_count = r.get("signal_count", 0)
+
+            # Action color
+            a_color = "green" if "CE" in action else "red" if "PE" in action else "yellow"
+
+            # Confidence bar (visual)
+            bar_len = int(adj_conf * 10)
+            conf_bar = "█" * bar_len + "░" * (10 - bar_len)
+
+            # Alert column
+            alert = ""
+            if quality == "WEAK":
+                alert = "[bold red]!! AVOID !![/bold red]"
+            elif quality == "LOW":
+                alert = "[magenta]CAUTION[/magenta]"
+            elif adj_conf >= 0.75:
+                alert = "[bold green]STRONG[/bold green]"
+            elif action == "HOLD":
+                alert = "[dim]no setup[/dim]"
+
+            # Executable flag
+            executable = "" if r.get("executable", True) else " [dim](signal only)[/dim]"
+
+            table.add_row(
+                str(i),
+                f"{r['symbol']}{executable}",
+                f"[{a_color}]{action}[/{a_color}]",
+                f"{raw_conf:.0%} {conf_bar}",
+                f"[{q_color}]{regime.upper()}[/{q_color}]",
+                f"[{q_color}]{quality}[/{q_color}]",
+                f"{sig_count}/10",
+                f"[bold]{adj_conf:.0%}[/bold]",
+                alert,
+            )
+
+        self.console.print()
+        self.console.print(table)
+
+        # Legend
+        self.console.print(
+            "\n[dim]Quality: HIGH = markup/markdown (58-62% WR) | "
+            "MED = accum/distrib | LOW = volatile | WEAK = unknown (26% WR)[/dim]"
+        )
+        self.console.print(
+            "[dim]Adj Conf = Confluence x Regime Multiplier. "
+            "Ranked highest-first. HOLD signals excluded from ranking.[/dim]"
+        )
