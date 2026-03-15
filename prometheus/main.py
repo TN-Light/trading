@@ -126,16 +126,25 @@ class Prometheus:
 
         # Execution
         mode = get("system.mode", "paper")
-        if mode in ("paper", "backtest", "signal"):
+        if mode in ("paper", "backtest", "signal", "dry_run"):
             self.broker = PaperTrader(self.initial_capital)
-        else:
+        elif mode in ("semi_auto", "full_auto"):
             from prometheus.execution.kite_executor import KiteExecutor
             self.broker = KiteExecutor(
-                api_key=get("broker.api_key", ""),
-                api_secret=get("broker.api_secret", ""),
-                access_token=get("broker.access_token", ""),
+                api_key=get_credential("broker.api_key") or get("broker.api_key", ""),
+                api_secret=get_credential("broker.api_secret") or get("broker.api_secret", ""),
+                access_token=get_credential("broker.access_token") or get("broker.access_token", ""),
             )
+            if not self.broker.connect():
+                logger.error("KiteExecutor connection failed! Falling back to PaperTrader.")
+                self.broker = PaperTrader(self.initial_capital)
+                mode = "dry_run"
+        else:
+            self.broker = PaperTrader(self.initial_capital)
         self.order_manager = OrderManager(self.broker, self.risk, mode)
+
+        # Position monitor (initialized on demand by semi_auto/full_auto/dry_run)
+        self.position_monitor = None
 
         # Interface
         self.dashboard = CLIDashboard()
@@ -554,7 +563,13 @@ class Prometheus:
     def run_paper_mode(self, interval_seconds: int = 300):
         """
         Paper trading — simulates real trading with virtual money.
-        Places paper orders, tracks P&L, tests the full pipeline.
+
+        Uses smart 3:35 PM scan timing (daily candle must be complete for
+        valid daily-bar signals).  When a signal fires, it auto-executes
+        paper trades through the full pipeline: signal → strategy refinement
+        → risk check → paper order placement → P&L tracking.
+
+        Telegram commands (/scan, /status, etc.) work anytime.
         """
         self.running = True
         self.dashboard.show_header()
@@ -562,68 +577,182 @@ class Prometheus:
         self.telegram.alert_system_start()
         logger.info("Starting PAPER TRADING mode...")
 
+        _did_midday_scan = False           # Track if today's mid-day scan ran
+        _did_post_close_scan = False      # Track if today's post-close scan ran
+        _did_send_daily_summary = False   # Avoid spamming daily summary
+        _today_traded_symbols = set()     # Dedup: one trade per symbol per day
+
         while self.running:
             try:
                 now = datetime.now()
 
                 if not is_trading_day(now.date()):
-                    self.dashboard.show_status_line("Market holiday.")
+                    self.dashboard.show_status_line("Market holiday. Waiting...")
                     time.sleep(60)
                     continue
 
-                if not is_market_open(now):
-                    # End of day summary
+                current_time = now.time()
+
+                # Reset flags at pre-market
+                if current_time < dtime(9, 15):
+                    _did_midday_scan = False
+                    _did_post_close_scan = False
+                    _did_send_daily_summary = False
+                    _today_traded_symbols.clear()
+                    self.dashboard.show_status_line(
+                        "Pre-market. Scans at 1:00 PM (early) & 3:35 PM (primary)."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # ── MID-DAY EARLY SCAN: 1:00 PM ──
+                # Daily candle ~75% formed. Only fire for VERY strong signals.
+                # Higher confidence threshold filters out noise from incomplete candle.
+                if dtime(13, 0) <= current_time <= dtime(13, 15) and not _did_midday_scan:
+                    logger.info("Mid-day scan — looking for high-confluence signals...")
+                    _mid_found = 0
+
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal and signal.action != "HOLD":
+                            # Stricter filter: confidence >= 0.80 AND 4+ contributing signals
+                            n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
+                            if signal.confidence >= 0.80 and n_signals >= 4:
+                                _mid_found += 1
+                                self.dashboard.show_signal(signal.to_dict())
+                                self.telegram.send_message(
+                                    "\U0001f525 <b>EARLY SIGNAL (1 PM scan)</b>\n"
+                                    f"High-confluence ({signal.confidence:.0%}, "
+                                    f"{n_signals} indicators) on <b>{symbol}</b>"
+                                )
+                                self.telegram.alert_new_signal(signal.to_dict())
+
+                                if symbol not in _today_traded_symbols:
+                                    refined = self.refine_with_strategy(signal)
+                                    position = self.order_manager.execute_signal(
+                                        refined, confirm=False
+                                    )
+                                    if position:
+                                        _today_traded_symbols.add(symbol)
+                                        self.dashboard.show_status_line(
+                                            f"Paper trade opened (early): {position.position_id}"
+                                        )
+
+                    _did_midday_scan = True
+                    if _mid_found == 0:
+                        logger.info("Mid-day scan: no high-confluence signals. Will check again at 3:35 PM.")
+                    time.sleep(60)
+                    continue
+
+                # ── PRIMARY SCAN: After market close (3:35-4:00 PM) ──
+                # Daily candle is complete → signals are valid for next-day entry
+                if dtime(15, 35) <= current_time <= dtime(16, 0) and not _did_post_close_scan:
+                    logger.info("Daily candle closed — running paper trade scan...")
+                    self.telegram.send_message(
+                        "\U0001f50d <b>POST-CLOSE SCAN (Paper)</b>\n"
+                        "Daily candle complete. Scanning & auto-executing paper trades..."
+                    )
+
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal:
+                            self.dashboard.show_signal(signal.to_dict())
+
+                            if signal.action != "HOLD" and symbol not in _today_traded_symbols:
+                                self.telegram.alert_new_signal(signal.to_dict())
+
+                                # Refine through strategy module for strike/premium/sizing
+                                refined = self.refine_with_strategy(signal)
+
+                                # Execute in paper mode
+                                position = self.order_manager.execute_signal(
+                                    refined, confirm=False
+                                )
+
+                                if position:
+                                    _today_traded_symbols.add(symbol)
+                                    self.dashboard.show_status_line(
+                                        f"Paper trade opened: {position.position_id}"
+                                    )
+
+                            # Show regime
+                            data = self.data.fetch_historical(symbol, days=60, interval="day")
+                            if not data.empty:
+                                regime = self.regime_detector.detect(data)
+                                selection = self.selector.select(regime)
+                                self.dashboard.show_regime({
+                                    "regime": regime.regime.value,
+                                    "confidence": regime.confidence,
+                                    "volatility_state": regime.volatility_regime,
+                                    "trend_strength": regime.trend_strength,
+                                    "recommended_strategy": selection["strategy"],
+                                })
+
+                    # Show risk status
+                    portfolio_state = self.risk.get_portfolio_state()
+                    self.dashboard.show_risk_status({
+                        "daily_pnl": portfolio_state.realized_pnl_today,
+                        "daily_limit": self.risk.max_daily_loss,
+                        "weekly_pnl": portfolio_state.realized_pnl_week,
+                        "weekly_limit": self.risk.max_weekly_loss,
+                        "consecutive_losses": portfolio_state.consecutive_losses,
+                        "system_halted": self.risk._halted,
+                    })
+
+                    # Show portfolio
+                    portfolio_value = self.broker.get_portfolio_value() if hasattr(self.broker, "get_portfolio_value") else self.capital
+                    self.dashboard.show_portfolio_summary({
+                        "initial_capital": self.initial_capital,
+                        "equity": portfolio_value,
+                        "daily_pnl": self.risk._daily_pnl,
+                        "open_positions": len(self.broker.get_positions()),
+                        "margin_used_pct": 0,
+                    })
+
+                    _did_post_close_scan = True
+                    logger.info("Post-close paper scan complete.")
+                    self.telegram.send_message(
+                        "\u2705 <b>PAPER SCAN COMPLETE</b>\n"
+                        "All paper trades executed above (if any).\n"
+                        "Next scan: tomorrow 1:00 PM (early) & 3:35 PM (primary)."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # ── DURING MARKET HOURS: lightweight status ──
+                if is_market_open(now):
+                    # Show open positions if any
+                    positions = self.broker.get_positions()
+                    if positions:
+                        pos_data = [{
+                            "symbol": p.tradingsymbol,
+                            "quantity": p.quantity,
+                            "entry": p.average_price,
+                            "ltp": p.last_price,
+                            "pnl": p.unrealized_pnl,
+                            "sl": 0,
+                            "target": 0,
+                            "strategy": "paper",
+                        } for p in positions]
+                        self.dashboard.show_positions(pos_data)
+
+                    self.dashboard.show_status_line(
+                        f"Market open. Scans: 1 PM (early) & 3:35 PM (primary). "
+                        f"Open positions: {len(positions)}. "
+                        f"/scan in Telegram for on-demand."
+                    )
+                    time.sleep(interval_seconds)
+                    continue
+
+                # ── AFTER HOURS: send daily summary once ──
+                if not _did_send_daily_summary and current_time >= dtime(16, 0):
                     self._send_daily_summary()
-                    self.dashboard.show_status_line("Market closed.")
-                    time.sleep(60)
-                    continue
+                    _did_send_daily_summary = True
 
-                # Analyze and execute
-                for symbol in self.symbols:
-                    signal = self.analyze(symbol)
-                    if signal and signal.action != "HOLD":
-                        self.dashboard.show_signal(signal.to_dict())
-                        self.telegram.alert_new_signal(signal.to_dict())
-
-                        # Refine through strategy module for strike/premium/sizing
-                        refined = self.refine_with_strategy(signal)
-
-                        # Execute in paper mode
-                        position = self.order_manager.execute_signal(
-                            refined, confirm=False
-                        )
-
-                        if position:
-                            self.dashboard.show_status_line(
-                                f"Paper trade opened: {position.position_id}"
-                            )
-
-                # Update portfolio display
-                portfolio_value = self.broker.get_portfolio_value() if hasattr(self.broker, "get_portfolio_value") else self.capital
-                self.dashboard.show_portfolio_summary({
-                    "initial_capital": self.initial_capital,
-                    "equity": portfolio_value,
-                    "daily_pnl": self.risk._daily_pnl,
-                    "open_positions": len(self.broker.get_positions()),
-                    "margin_used_pct": 0,
-                })
-
-                # Show positions
-                positions = self.broker.get_positions()
-                if positions:
-                    pos_data = [{
-                        "symbol": p.tradingsymbol,
-                        "quantity": p.quantity,
-                        "entry": p.average_price,
-                        "ltp": p.last_price,
-                        "pnl": p.unrealized_pnl,
-                        "sl": 0,
-                        "target": 0,
-                        "strategy": "paper",
-                    } for p in positions]
-                    self.dashboard.show_positions(pos_data)
-
-                time.sleep(interval_seconds)
+                self.dashboard.show_status_line(
+                    "Market closed. Next: trading day 1:00 PM & 3:35 PM IST."
+                )
+                time.sleep(60)
 
             except KeyboardInterrupt:
                 self.running = False
@@ -633,6 +762,386 @@ class Prometheus:
                 break
             except Exception as e:
                 logger.error(f"Paper mode error: {e}")
+                self.telegram.alert_system_error(str(e))
+                time.sleep(30)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # POSITION MONITOR HELPERS (shared by semi_auto, full_auto, dry_run)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _start_position_monitor(self):
+        """Initialize and start the PositionMonitor thread."""
+        from prometheus.execution.position_monitor import PositionMonitor
+        pm_cfg = get("position_monitor", {})
+        self.position_monitor = PositionMonitor(
+            broker=self.broker,
+            poll_interval=pm_cfg.get("poll_interval_seconds", 15),
+            on_exit=self._handle_position_exit,
+            on_trailing_update=self._handle_trailing_update,
+            on_state_changed=self._handle_state_persist,
+        )
+        self.position_monitor.start()
+
+    def _handle_position_exit(self, position_id: str, exit_price: float, reason: str):
+        """Callback when PositionMonitor triggers an exit."""
+        pnl = self.order_manager.close_position(position_id, reason)
+        if self.position_monitor:
+            self.position_monitor.remove_position(position_id)
+        self.store.close_position_state(position_id, pnl or 0)
+
+        reason_labels = {
+            "stop_loss": "SL Hit",
+            "target": "Target Hit",
+            "time_stop": "Time Stop",
+        }
+        label = reason_labels.get(reason, reason)
+        pnl_text = f"Rs {pnl:+,.0f}" if pnl is not None else "unknown"
+        self.telegram.send_message(
+            f"\U0001f6a8 <b>POSITION CLOSED — {label}</b>\n\n"
+            f"ID: <code>{position_id}</code>\n"
+            f"Exit price: {exit_price:.2f}\n"
+            f"P&L: {pnl_text}"
+        )
+
+    def _handle_trailing_update(self, state, old_sl: float):
+        """Callback when trailing stop advances a stage."""
+        self.telegram.send_message(
+            f"\U0001f4c8 <b>TRAILING STOP UPDATE</b>\n\n"
+            f"<code>{state.tradingsymbol}</code>\n"
+            f"Stage: <b>{state.current_stage()}</b>\n"
+            f"SL: {old_sl:.2f} \u2192 {state.current_sl:.2f}"
+        )
+
+    def _handle_state_persist(self, state):
+        """Callback to persist trailing state to SQLite."""
+        self.store.save_position_state(state.to_dict())
+
+    def _restore_persisted_positions(self):
+        """Restore open positions from SQLite after crash/restart."""
+        saved = self.store.load_open_positions()
+        if not saved or not self.position_monitor:
+            return
+        from prometheus.execution.position_monitor import TrailingState
+        states = []
+        for row in saved:
+            states.append(TrailingState(
+                position_id=row["position_id"],
+                tradingsymbol=row["tradingsymbol"],
+                symbol=row["symbol"],
+                entry_premium=row["entry_premium"],
+                initial_sl=row["initial_sl"],
+                current_sl=row["current_sl"],
+                target=row["target"],
+                direction=row["direction"],
+                strategy=row.get("strategy", ""),
+                entry_time=row.get("entry_time", ""),
+                sl_order_id=row.get("sl_order_id", ""),
+                breakeven_set=bool(row.get("breakeven_set", 0)),
+                trailing_activated=bool(row.get("trailing_activated", 0)),
+                trailing_stage2=bool(row.get("trailing_stage2", 0)),
+                trailing_stage3=bool(row.get("trailing_stage3", 0)),
+                premium_hwm=row.get("premium_hwm", 0),
+                entry_bar_count=row.get("entry_bar_count", 0),
+                max_bars=row.get("max_bars", 7),
+                breakeven_ratio=row.get("breakeven_ratio", 0.6),
+                risk_distance=row.get("risk_distance", 0),
+            ))
+        self.position_monitor.restore_positions(states)
+        if states:
+            self.telegram.send_message(
+                f"\U0001f504 Restored {len(states)} open position(s) from last session."
+            )
+
+    def _register_position_with_monitor(self, position):
+        """After a trade executes, register it with the PositionMonitor."""
+        if not self.position_monitor or not position:
+            return
+        state = self.order_manager.create_trailing_state(position.position_id)
+        if state:
+            self.position_monitor.add_position(state)
+            self._handle_state_persist(state)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # FULL AUTO MODE
+    # ─────────────────────────────────────────────────────────────────────
+
+    def run_full_auto_mode(self, interval_seconds: int = 300):
+        """
+        Full auto: scan → execute → monitor → trail → exit.
+
+        Same scan timing as paper mode (1 PM early + 3:35 PM primary).
+        PositionMonitor runs continuously for 5-stage trailing stop.
+        State persisted to SQLite for crash recovery.
+        """
+        self.running = True
+        self.dashboard.show_header()
+        self._setup_telegram_commands()
+        self.telegram.alert_system_start()
+
+        # Start position monitor + restore any persisted positions
+        self._start_position_monitor()
+        self._restore_persisted_positions()
+
+        is_dry_run = isinstance(self.broker, PaperTrader)
+        mode_label = "DRY RUN" if is_dry_run else "FULL AUTO"
+        logger.info(f"Starting {mode_label} mode...")
+        self.telegram.send_message(
+            f"\U0001f916 <b>{mode_label} MODE STARTED</b>\n"
+            f"Capital: Rs {self.capital:,.0f}\n"
+            f"Trailing: 5-stage | Monitor: every 15s\n"
+            f"Scans: 1:00 PM (early) + 3:35 PM (primary)"
+        )
+
+        _did_midday_scan = False
+        _did_post_close_scan = False
+        _did_send_daily_summary = False
+        _today_traded_symbols = set()
+
+        while self.running:
+            try:
+                now = datetime.now()
+
+                if not is_trading_day(now.date()):
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Market holiday. Waiting..."
+                    )
+                    time.sleep(60)
+                    continue
+
+                current_time = now.time()
+
+                # Reset flags at pre-market
+                if current_time < dtime(9, 15):
+                    _did_midday_scan = False
+                    _did_post_close_scan = False
+                    _did_send_daily_summary = False
+                    _today_traded_symbols.clear()
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Pre-market. Scans at 1:00 PM & 3:35 PM."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # ── MID-DAY EARLY SCAN: 1:00 PM ──
+                if dtime(13, 0) <= current_time <= dtime(13, 15) and not _did_midday_scan:
+                    logger.info(f"{mode_label}: Mid-day scan...")
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal and signal.action != "HOLD":
+                            n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
+                            if signal.confidence >= 0.80 and n_signals >= 4:
+                                if symbol not in _today_traded_symbols:
+                                    self.telegram.alert_new_signal(signal.to_dict())
+                                    refined = self.refine_with_strategy(signal)
+                                    position = self.order_manager.execute_signal(
+                                        refined, confirm=False
+                                    )
+                                    if position:
+                                        _today_traded_symbols.add(symbol)
+                                        self._register_position_with_monitor(position)
+                    _did_midday_scan = True
+                    time.sleep(60)
+                    continue
+
+                # ── PRIMARY SCAN: 3:35-4:00 PM ──
+                if dtime(15, 35) <= current_time <= dtime(16, 0) and not _did_post_close_scan:
+                    logger.info(f"{mode_label}: Post-close scan...")
+                    self.telegram.send_message(
+                        f"\U0001f50d <b>POST-CLOSE SCAN ({mode_label})</b>\n"
+                        "Daily candle complete. Scanning..."
+                    )
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal and signal.action != "HOLD" and symbol not in _today_traded_symbols:
+                            self.telegram.alert_new_signal(signal.to_dict())
+                            refined = self.refine_with_strategy(signal)
+                            position = self.order_manager.execute_signal(
+                                refined, confirm=False
+                            )
+                            if position:
+                                _today_traded_symbols.add(symbol)
+                                self._register_position_with_monitor(position)
+
+                    _did_post_close_scan = True
+                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    self.telegram.send_message(
+                        f"\u2705 <b>SCAN COMPLETE</b>\n"
+                        f"Active positions: {n_pos}\n"
+                        f"Next scan: tomorrow 1:00 PM & 3:35 PM."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # ── DURING MARKET HOURS: show status ──
+                if is_market_open(now):
+                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Market open. "
+                        f"Monitoring {n_pos} position(s). "
+                        f"Scans: 1 PM & 3:35 PM."
+                    )
+                    time.sleep(interval_seconds)
+                    continue
+
+                # ── AFTER HOURS ──
+                if not _did_send_daily_summary and current_time >= dtime(16, 0):
+                    self._send_daily_summary()
+                    _did_send_daily_summary = True
+
+                self.dashboard.show_status_line(
+                    f"{mode_label}: Market closed. Next: trading day 1 PM & 3:35 PM."
+                )
+                time.sleep(60)
+
+            except KeyboardInterrupt:
+                self.running = False
+                if self.position_monitor:
+                    self.position_monitor.stop()
+                total_pnl = self.order_manager.close_all_positions("session_end")
+                logger.info(f"{mode_label} stopped. Session P&L: Rs {total_pnl:+,.0f}")
+                break
+            except Exception as e:
+                logger.error(f"{mode_label} error: {e}")
+                self.telegram.alert_system_error(str(e))
+                time.sleep(30)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # SEMI AUTO MODE
+    # ─────────────────────────────────────────────────────────────────────
+
+    def run_semi_auto_mode(self, interval_seconds: int = 300):
+        """
+        Semi-auto: scan → signal → Telegram /confirm → execute.
+
+        Same scan timing as paper mode. User must /confirm each trade.
+        PositionMonitor runs for trailing stop management after entry.
+        """
+        self.running = True
+        self.dashboard.show_header()
+        self._setup_telegram_commands()
+        self.telegram.alert_system_start()
+
+        self._start_position_monitor()
+        self._restore_persisted_positions()
+
+        pm_cfg = get("position_monitor", {})
+        confirm_timeout = pm_cfg.get("confirmation_timeout", 1800)
+
+        logger.info("Starting SEMI-AUTO mode...")
+        self.telegram.send_message(
+            "\U0001f91d <b>SEMI-AUTO MODE STARTED</b>\n"
+            f"Capital: Rs {self.capital:,.0f}\n"
+            "You will be asked to /confirm or /reject each trade.\n"
+            f"Timeout: {confirm_timeout // 60} minutes per signal."
+        )
+
+        _did_midday_scan = False
+        _did_post_close_scan = False
+        _did_send_daily_summary = False
+        _today_traded_symbols = set()
+
+        while self.running:
+            try:
+                now = datetime.now()
+
+                if not is_trading_day(now.date()):
+                    self.dashboard.show_status_line("SEMI-AUTO: Market holiday. Waiting...")
+                    time.sleep(60)
+                    continue
+
+                current_time = now.time()
+
+                if current_time < dtime(9, 15):
+                    _did_midday_scan = False
+                    _did_post_close_scan = False
+                    _did_send_daily_summary = False
+                    _today_traded_symbols.clear()
+                    self.dashboard.show_status_line(
+                        "SEMI-AUTO: Pre-market. Scans at 1:00 PM & 3:35 PM."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # ── MID-DAY SCAN: 1:00 PM (stricter) ──
+                if dtime(13, 0) <= current_time <= dtime(13, 15) and not _did_midday_scan:
+                    logger.info("SEMI-AUTO: Mid-day scan...")
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal and signal.action != "HOLD":
+                            n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
+                            if signal.confidence >= 0.80 and n_signals >= 4 and symbol not in _today_traded_symbols:
+                                refined = self.refine_with_strategy(signal)
+                                confirmed = self.telegram.request_confirmation(
+                                    signal.to_dict(), timeout=confirm_timeout
+                                )
+                                if confirmed:
+                                    position = self.order_manager.execute_signal(
+                                        refined, confirm=False
+                                    )
+                                    if position:
+                                        _today_traded_symbols.add(symbol)
+                                        self._register_position_with_monitor(position)
+                                        self.telegram.send_message(
+                                            f"\u2705 Trade executed: {position.position_id}"
+                                        )
+                    _did_midday_scan = True
+                    time.sleep(60)
+                    continue
+
+                # ── PRIMARY SCAN: 3:35-4:00 PM ──
+                if dtime(15, 35) <= current_time <= dtime(16, 0) and not _did_post_close_scan:
+                    logger.info("SEMI-AUTO: Post-close scan...")
+                    for symbol in self.symbols:
+                        signal = self.analyze(symbol)
+                        if signal and signal.action != "HOLD" and symbol not in _today_traded_symbols:
+                            refined = self.refine_with_strategy(signal)
+                            confirmed = self.telegram.request_confirmation(
+                                signal.to_dict(), timeout=confirm_timeout
+                            )
+                            if confirmed:
+                                position = self.order_manager.execute_signal(
+                                    refined, confirm=False
+                                )
+                                if position:
+                                    _today_traded_symbols.add(symbol)
+                                    self._register_position_with_monitor(position)
+                                    self.telegram.send_message(
+                                        f"\u2705 Trade executed: {position.position_id}"
+                                    )
+                    _did_post_close_scan = True
+                    time.sleep(60)
+                    continue
+
+                # ── MARKET HOURS ──
+                if is_market_open(now):
+                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    self.dashboard.show_status_line(
+                        f"SEMI-AUTO: Monitoring {n_pos} position(s). "
+                        f"Scans: 1 PM & 3:35 PM."
+                    )
+                    time.sleep(interval_seconds)
+                    continue
+
+                # ── AFTER HOURS ──
+                if not _did_send_daily_summary and current_time >= dtime(16, 0):
+                    self._send_daily_summary()
+                    _did_send_daily_summary = True
+
+                self.dashboard.show_status_line(
+                    "SEMI-AUTO: Market closed. Next: trading day 1 PM & 3:35 PM."
+                )
+                time.sleep(60)
+
+            except KeyboardInterrupt:
+                self.running = False
+                if self.position_monitor:
+                    self.position_monitor.stop()
+                total_pnl = self.order_manager.close_all_positions("session_end")
+                logger.info(f"Semi-auto stopped. Session P&L: Rs {total_pnl:+,.0f}")
+                break
+            except Exception as e:
+                logger.error(f"Semi-auto error: {e}")
+                self.telegram.alert_system_error(str(e))
                 time.sleep(30)
 
     # ─────────────────────────────────────────────────────────────────────
@@ -2787,6 +3296,10 @@ class Prometheus:
         tg.register_command("pnl", self._tg_cmd_pnl)
         tg.register_command("regime", self._tg_cmd_regime)
         tg.register_command("start", self._tg_cmd_help)  # Telegram auto-sends /start
+        tg.register_command("confirm", lambda a: tg.handle_confirm())
+        tg.register_command("reject", lambda a: tg.handle_reject())
+        tg.register_command("positions", self._tg_cmd_positions)
+        tg.register_command("set_price", self._tg_cmd_set_price)
 
         tg.start_listening()
 
@@ -2937,6 +3450,42 @@ class Prometheus:
 
         return "\n".join(lines)
 
+    def _tg_cmd_positions(self, args: str = "") -> str:
+        """Handle /positions — show open positions with trailing stop state."""
+        if not self.position_monitor or self.position_monitor.active_count == 0:
+            return "No open positions being monitored."
+
+        lines = ["\U0001f4ca <b>OPEN POSITIONS</b>\n"]
+        for pid, state in self.position_monitor.get_positions().items():
+            pnl_pct = ((self.broker.get_ltp(state.tradingsymbol) - state.entry_premium)
+                       / state.entry_premium * 100) if state.entry_premium > 0 else 0
+            lines.append(
+                f"<code>{pid}</code>\n"
+                f"  {state.tradingsymbol}\n"
+                f"  Entry: {state.entry_premium:.2f} | SL: {state.current_sl:.2f}\n"
+                f"  Stage: {state.current_stage()} | Bars: {state.entry_bar_count}/{state.max_bars}\n"
+                f"  P&L: {pnl_pct:+.1f}%\n"
+            )
+        return "\n".join(lines)
+
+    def _tg_cmd_set_price(self, args: str = "") -> str:
+        """Handle /set_price — push synthetic LTP for dry-run testing.
+
+        Usage: /set_price NIFTY25D2622500CE 250
+        """
+        if not isinstance(self.broker, PaperTrader):
+            return "set_price only works in dry_run/paper mode."
+        parts = args.strip().split()
+        if len(parts) < 2:
+            return "Usage: /set_price <tradingsymbol> <price>"
+        tsym = parts[0]
+        try:
+            price = float(parts[1])
+        except ValueError:
+            return f"Invalid price: {parts[1]}"
+        self.broker.update_prices({tsym: price})
+        return f"Price set: {tsym} = {price:.2f}"
+
     def stop(self):
         """Stop the system gracefully."""
         self.running = False
@@ -2966,7 +3515,7 @@ def main():
 
     parser.add_argument(
         "mode",
-        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning"],
+        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning", "semi_auto", "full_auto", "dry_run"],
         help="Operating mode",
     )
     parser.add_argument(
@@ -3077,6 +3626,36 @@ def main():
     # Initialize system
     prometheus = Prometheus(config_path=args.config)
 
+    # Override mode from CLI (settings.yaml is default, CLI takes precedence)
+    if args.mode in ("semi_auto", "full_auto", "dry_run"):
+        cli_mode = args.mode
+        if cli_mode == "dry_run":
+            # Force PaperTrader for dry run
+            if not isinstance(prometheus.broker, PaperTrader):
+                prometheus.broker = PaperTrader(prometheus.initial_capital)
+                prometheus.order_manager = OrderManager(prometheus.broker, prometheus.risk, "dry_run")
+        elif cli_mode in ("semi_auto", "full_auto"):
+            # If settings.yaml says paper but CLI says live mode, switch broker
+            if isinstance(prometheus.broker, PaperTrader):
+                try:
+                    from prometheus.execution.kite_executor import KiteExecutor
+                    kite = KiteExecutor(
+                        api_key=get_credential("broker.api_key") or get("broker.api_key", ""),
+                        api_secret=get_credential("broker.api_secret") or get("broker.api_secret", ""),
+                        access_token=get_credential("broker.access_token") or get("broker.access_token", ""),
+                    )
+                    if kite.connect():
+                        prometheus.broker = kite
+                        prometheus.order_manager = OrderManager(prometheus.broker, prometheus.risk, cli_mode)
+                        logger.info(f"Switched to KiteExecutor for {cli_mode} mode")
+                    else:
+                        logger.warning("Kite connect failed. Running in dry_run mode (PaperTrader).")
+                        args.mode = "dry_run"
+                except Exception as e:
+                    logger.warning(f"KiteExecutor unavailable ({e}). Running in dry_run mode.")
+                    args.mode = "dry_run"
+        prometheus.mode = args.mode
+
     # Override symbols if specified
     if args.symbol:
         prometheus.symbols = [args.symbol]
@@ -3123,6 +3702,16 @@ def main():
 
     elif args.mode == "paper":
         prometheus.run_paper_mode(interval_seconds=args.interval)
+
+    elif args.mode == "semi_auto":
+        prometheus.run_semi_auto_mode(interval_seconds=args.interval)
+
+    elif args.mode == "full_auto":
+        prometheus.run_full_auto_mode(interval_seconds=args.interval)
+
+    elif args.mode == "dry_run":
+        # Same as full_auto but forces PaperTrader (already done in __init__)
+        prometheus.run_full_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "walkforward":
         prometheus.run_walkforward(

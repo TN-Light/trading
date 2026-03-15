@@ -37,6 +37,12 @@ class ManagedPosition:
     status: str = "open"      # open, partial, closed
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
+    # Live trailing stop support
+    tradingsymbol: str = ""
+    entry_premium: float = 0.0
+    sl_order_id: str = ""
+    max_bars: int = 7
+    breakeven_ratio: float = 0.6
 
 
 class OrderManager:
@@ -210,6 +216,22 @@ class OrderManager:
             if sl_order:
                 managed.exit_orders.append(sl_order)
 
+        # Populate live trailing stop fields
+        managed.tradingsymbol = tradingsymbol
+        managed.entry_premium = entry_order.average_price
+        if managed.exit_orders:
+            managed.sl_order_id = managed.exit_orders[0].order_id
+
+        # Record entry in risk manager (fixes position/trade tracking)
+        self.risk.record_trade_entry({
+            "symbol": symbol,
+            "instrument": tradingsymbol,
+            "direction": signal.get("direction", ""),
+            "entry_price": entry_order.average_price,
+            "quantity": total_qty,
+            "cost": entry_order.average_price * total_qty,
+        })
+
         # Log to database
         self.store.log_trade({
             "symbol": tradingsymbol,
@@ -357,31 +379,27 @@ class OrderManager:
                     total += pnl
         return total
 
-    def update_trailing_stops(self, price_feed: Dict[str, float]):
-        """Update trailing stops for all managed positions."""
-        for pid, managed in self.managed_positions.items():
-            if managed.status == "closed":
-                continue
-
-            for entry_order in managed.entry_orders:
-                if entry_order.status != OrderStatus.COMPLETE:
-                    continue
-
-                current = price_feed.get(entry_order.tradingsymbol, 0)
-                if current <= 0:
-                    continue
-
-                entry = entry_order.average_price
-                sl = managed.stop_loss
-
-                if managed.direction == "bullish" and sl > 0:
-                    # Trail stop up when price moves in our favor
-                    profit_pct = (current - entry) / entry
-                    if profit_pct > 0.50:
-                        new_sl = max(sl, entry * 1.20)
-                        if new_sl > sl:
-                            managed.stop_loss = new_sl
-                            logger.info(f"Trailing stop updated: {pid} SL -> {new_sl:.2f}")
+    def create_trailing_state(self, position_id: str):
+        """Build a TrailingState from a ManagedPosition for the PositionMonitor."""
+        from prometheus.execution.position_monitor import TrailingState
+        managed = self.managed_positions.get(position_id)
+        if not managed or managed.status == "closed":
+            return None
+        return TrailingState(
+            position_id=position_id,
+            tradingsymbol=managed.tradingsymbol,
+            symbol=managed.symbol,
+            entry_premium=managed.entry_premium,
+            initial_sl=managed.stop_loss,
+            current_sl=managed.stop_loss,
+            target=managed.target,
+            direction=managed.direction,
+            strategy=managed.strategy,
+            entry_time=managed.entry_time,
+            sl_order_id=managed.sl_order_id,
+            max_bars=managed.max_bars,
+            breakeven_ratio=managed.breakeven_ratio,
+        )
 
     def _place_stop_loss(
         self,

@@ -65,9 +65,15 @@ class TelegramBot:
         self._listening = False
         self._proxy_config = proxy  # User-configured proxy
         self._base_url = api_base_url.rstrip("/") if api_base_url else "https://api.telegram.org"
+        self._last_reconnect_attempt = 0  # Cooldown for reconnection retries
 
         # Command handlers: command_name -> callable(args_str) -> response_str
         self._command_handlers: Dict[str, Callable] = {}
+
+        # Semi-auto confirmation flow
+        self._pending_confirmation: Optional[Dict] = None
+        self._confirmation_event = threading.Event()
+        self._confirmation_result: Optional[bool] = None
 
         if bot_token and chat_id:
             self._init_bot()
@@ -160,8 +166,29 @@ class TelegramBot:
     # Core messaging
     # -----------------------------------------------------------------------
 
+    def reconnect(self):
+        """Retry connecting to Telegram (useful when network changes).
+        Retries at most once every 5 minutes to avoid spamming.
+        """
+        if self._enabled:
+            return True
+        now = time.time()
+        if now - self._last_reconnect_attempt < 300:  # 5-minute cooldown
+            return False
+        self._last_reconnect_attempt = now
+        if self.bot_token and self.chat_id:
+            logger.info("Telegram: retrying connection...")
+            self._init_bot()
+            if self._enabled:
+                logger.info("Telegram: reconnected successfully!")
+            return self._enabled
+        return False
+
     def send_message(self, text: str, parse_mode: str = "HTML"):
         """Send a text message via Telegram."""
+        if not self._enabled:
+            # Try reconnecting (network may have recovered)
+            self.reconnect()
         if not self._enabled:
             logger.debug(f"[TG not active] Would send: {text[:50]}...")
             return False
@@ -182,6 +209,51 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
             return False
+
+    def request_confirmation(self, signal: Dict, timeout: int = 1800) -> bool:
+        """
+        Send signal details and wait for /confirm or /reject (semi-auto mode).
+
+        Blocks until user responds or timeout. Returns True if confirmed.
+        """
+        self._confirmation_event.clear()
+        self._confirmation_result = None
+        self._pending_confirmation = signal
+
+        self.alert_new_signal(signal)
+        mins = timeout // 60
+        self.send_message(
+            "\u2753 <b>CONFIRM THIS TRADE?</b>\n\n"
+            "Reply /confirm to execute\n"
+            "Reply /reject to skip\n"
+            f"Auto-expires in {mins} minutes."
+        )
+
+        self._confirmation_event.wait(timeout=timeout)
+
+        result = self._confirmation_result
+        self._pending_confirmation = None
+
+        if result is None:
+            self.send_message("\u23f0 Signal expired (no response). Skipping.")
+            return False
+        return result
+
+    def handle_confirm(self) -> str:
+        """Called by /confirm command handler."""
+        if self._pending_confirmation:
+            self._confirmation_result = True
+            self._confirmation_event.set()
+            return "\u2705 Trade CONFIRMED. Executing..."
+        return "No pending trade to confirm."
+
+    def handle_reject(self) -> str:
+        """Called by /reject command handler."""
+        if self._pending_confirmation:
+            self._confirmation_result = False
+            self._confirmation_event.set()
+            return "\u274c Trade REJECTED. Skipping."
+        return "No pending trade to reject."
 
     # -----------------------------------------------------------------------
     # Command listener (inbound)

@@ -255,6 +255,15 @@ interface:
       - "daily_summary"
 
 # ---------------------------------------------------------------------------
+# Position Monitoring (semi_auto / full_auto / dry_run)
+# ---------------------------------------------------------------------------
+position_monitor:
+  poll_interval_seconds: 15    # LTP poll frequency
+  time_stop_bars_daily: 7      # Max holding period (daily bars, <50K)
+  breakeven_ratio: 0.6         # R:R trigger for breakeven trap
+  confirmation_timeout: 1800   # semi_auto: seconds to wait for /confirm
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logging:
