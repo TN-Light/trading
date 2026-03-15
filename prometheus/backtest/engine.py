@@ -226,6 +226,12 @@ class BacktestEngine:
         vol_target: float = 0.0,       # Target annualized vol (e.g. 0.15 = 15%). 0 = disabled
         dd_throttle: bool = False,      # Reduce size during drawdowns
         equity_curve_filter: bool = False,  # Skip trades when equity < SMA
+        # ── Intraday session enforcement (opt-in, default off) ──
+        intraday_session: bool = False,
+        session_open_time: str = "09:45",      # Skip bars before this
+        session_no_entry_time: str = "14:30",   # No new entries after this
+        session_close_time: str = "15:15",      # Force square-off
+        max_intraday_trades_per_day: int = 4,
     ):
         self.initial_capital = initial_capital
         self.cost_model = ZerodhaCostModel(cost_config)
@@ -255,6 +261,16 @@ class BacktestEngine:
             "dd_throttled": 0,
             "equity_filtered": 0,
         }
+        # ── Intraday session ──
+        self.intraday_session = intraday_session
+        if intraday_session:
+            h, m = map(int, session_open_time.split(":"))
+            self._session_open_time = datetime.strptime(f"{h:02d}:{m:02d}", "%H:%M").time()
+            h, m = map(int, session_no_entry_time.split(":"))
+            self._session_no_entry_time = datetime.strptime(f"{h:02d}:{m:02d}", "%H:%M").time()
+            h, m = map(int, session_close_time.split(":"))
+            self._session_close_time = datetime.strptime(f"{h:02d}:{m:02d}", "%H:%M").time()
+        self._max_intraday_trades_per_day = max_intraday_trades_per_day
 
     def _sync_capital(self, capital: float):
         """Keep current_capital and external tracker in sync (including peak for DD sizing)."""
@@ -352,6 +368,7 @@ class BacktestEngine:
         positions = []  # Multi-position: list of open positions
         daily_pnl = 0.0
         daily_trades = 0
+        intraday_trades = 0  # Separate counter for intraday session mode
         last_date = None
 
         # Entry timing state
@@ -369,7 +386,53 @@ class BacktestEngine:
             if current_date != last_date:
                 daily_pnl = 0.0
                 daily_trades = 0
+                intraday_trades = 0
                 last_date = current_date
+
+            # ── INTRADAY SESSION ENFORCEMENT (only when intraday_session=True) ──
+            if self.intraday_session:
+                try:
+                    bar_time = pd.to_datetime(current_bar.get("timestamp")).time()
+                except Exception:
+                    bar_time = None
+
+                if bar_time is not None:
+                    # 1. Force close all positions at session end (15:15)
+                    if bar_time >= self._session_close_time:
+                        if positions:
+                            for pos in positions:
+                                if pos.get("instrument_type") == "options":
+                                    exit_p = pos.get("current_premium", pos["entry_price"])
+                                else:
+                                    exit_p = current_bar["close"]
+                                capital, trade = self._close_position(
+                                    pos, exit_p, current_time, capital, "intraday_square_off"
+                                )
+                                self.trades.append(trade)
+                                daily_pnl += trade.net_pnl
+                                self._sync_capital(capital)
+                            positions = []
+                            pending_signal = None
+                            pending_bars_waited = 0
+                        self.equity_curve.append(capital)
+                        continue
+
+                    # 2. Skip pre-open bars (before 9:45) — no entries, no exits
+                    if bar_time < self._session_open_time:
+                        self.equity_curve.append(capital)
+                        continue
+
+            # Determine if new entries are allowed (for intraday session gating)
+            can_enter_new = True
+            if self.intraday_session:
+                try:
+                    bar_time_check = pd.to_datetime(current_bar.get("timestamp")).time()
+                    if bar_time_check >= self._session_no_entry_time:
+                        can_enter_new = False
+                    if intraday_trades >= self._max_intraday_trades_per_day:
+                        can_enter_new = False
+                except Exception:
+                    pass
 
             # Check daily loss limit (fixed 3% of initial capital)
             daily_loss_limit = self.initial_capital * 0.03
@@ -413,7 +476,7 @@ class BacktestEngine:
                 positions.pop(pidx)
 
             # If room for more positions, check for new signal (or fill pending)
-            if len(positions) < self.max_positions and daily_trades < 6:
+            if len(positions) < self.max_positions and daily_trades < 6 and can_enter_new:
                 if self.entry_timing:
                     # ── ENTRY TIMING MODE: next-bar limit order ──
 
@@ -424,6 +487,7 @@ class BacktestEngine:
                         )
                         if filled:
                             positions.append(fill_result)
+                            intraday_trades += 1
                             pending_signal = None
                             pending_bars_waited = 0
                         else:
@@ -451,6 +515,7 @@ class BacktestEngine:
                             pending_signal, current_bar, current_time
                         )
                         positions.append(new_pos)
+                        intraday_trades += 1
                         pending_signal = None
                         pending_bars_waited = 0
 
@@ -815,7 +880,14 @@ class BacktestEngine:
             # For 15min bars: ~0.15% per bar (96 bars/day, daily theta ~15% spread across bars)
             # For daily bars: 0.8%-2.5% per bar (original)
             bar_interval = position.get("bar_interval", "day")
-            if bar_interval == "15minute":
+            if bar_interval == "5minute":
+                # 5min bars: 78 bars per trading day
+                # ATM weekly: ~2-3% daily theta / 78 bars ≈ 0.03% per bar
+                if bars_held <= 20:
+                    theta_pct = 0.0003  # 0.03% per 5min bar
+                else:
+                    theta_pct = 0.0006  # accelerates if held too long
+            elif bar_interval == "15minute":
                 # 15min bars: theta is tiny per bar but accumulates
                 # ATM weekly: ~2-3% daily theta / 26 trading bars per day ≈ 0.1% per bar
                 if bars_held <= 10:
@@ -1011,6 +1083,53 @@ class BacktestEngine:
                 return True, target, "target"
 
         return False, 0, ""
+
+    def calculate_intraday_metrics(self) -> Dict:
+        """Compute intraday-specific metrics from completed trades."""
+        if not self.trades:
+            return {}
+
+        # Group trades by session date
+        sessions: Dict[str, List] = {}
+        for t in self.trades:
+            date_key = str(t.entry_time)[:10]
+            sessions.setdefault(date_key, []).append(t)
+
+        total_sessions = len(sessions)
+        total_trades = len(self.trades)
+
+        # Session win rate: % of days ending net positive
+        session_pnls = {}
+        for date_key, trades_list in sessions.items():
+            session_pnls[date_key] = sum(t.net_pnl for t in trades_list)
+        winning_sessions = sum(1 for pnl in session_pnls.values() if pnl > 0)
+
+        # Square-off exits
+        square_off_exits = sum(1 for t in self.trades if t.exit_reason == "intraday_square_off")
+
+        # Best / worst sessions
+        best_session_pnl = max(session_pnls.values()) if session_pnls else 0
+        worst_session_pnl = min(session_pnls.values()) if session_pnls else 0
+
+        # Entry time distribution (by hour)
+        entry_hours: Dict[int, int] = {}
+        for t in self.trades:
+            try:
+                hr = pd.to_datetime(t.entry_time).hour
+                entry_hours[hr] = entry_hours.get(hr, 0) + 1
+            except Exception:
+                pass
+
+        return {
+            "total_sessions": total_sessions,
+            "avg_trades_per_session": round(total_trades / max(total_sessions, 1), 1),
+            "session_win_rate": round(winning_sessions / max(total_sessions, 1) * 100, 1),
+            "square_off_exits": square_off_exits,
+            "square_off_pct": round(square_off_exits / max(total_trades, 1) * 100, 1),
+            "best_session_pnl": round(best_session_pnl, 0),
+            "worst_session_pnl": round(worst_session_pnl, 0),
+            "entry_hour_distribution": dict(sorted(entry_hours.items())),
+        }
 
     def _calculate_metrics(
         self,
