@@ -498,6 +498,17 @@ class RiskManager:
             self._intraday_trades_today = 0
             self._today = today
 
+            # Auto-reset halt if drawdown has recovered below threshold
+            if self._halted and self.current_capital > 0 and self.peak_capital > 0:
+                current_dd = (self.peak_capital - self.current_capital) / self.peak_capital * 100
+                if current_dd < self.drawdown_halt_pct:
+                    self._halted = False
+                    self._halt_reason = ""
+                    logger.info(
+                        f"System halt auto-reset: drawdown recovered to {current_dd:.1f}% "
+                        f"(threshold: {self.drawdown_halt_pct}%)"
+                    )
+
     def force_close_all(self) -> List[Dict]:
         """Emergency: mark all positions for immediate closure."""
         log_risk("FORCE_CLOSE_ALL", {"positions": len(self._open_positions)})

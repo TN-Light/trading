@@ -77,6 +77,7 @@ class SignalFusionEngine:
         "oi_analysis": 0.80,
         "liquidity_sweep": 0.70,
         "regime": 0.75,
+        "ema": 0.75,
         "fvg_imbalance": 0.60,
         "fibonacci_ote": 0.55,
         "supertrend": 0.50,

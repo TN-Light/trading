@@ -76,7 +76,7 @@ WEEKLY_EXPIRY_DAYS = {
 }
 
 # ---------------------------------------------------------------------------
-# NSE Holidays 2025-2026 (update yearly)
+# NSE Holidays 2025-2027 (update yearly)
 # ---------------------------------------------------------------------------
 NSE_HOLIDAYS_2025 = [
     date(2025, 2, 26),   # Mahashivratri
@@ -89,8 +89,7 @@ NSE_HOLIDAYS_2025 = [
     date(2025, 6, 7),    # Bakri Id
     date(2025, 8, 15),   # Independence Day
     date(2025, 8, 16),   # Janmashtami
-    date(2025, 10, 1),   # Mahatma Gandhi Jayanti
-    date(2025, 10, 2),   # Dussehra
+    date(2025, 10, 2),   # Mahatma Gandhi Jayanti / Dussehra
     date(2025, 10, 21),  # Diwali (Laxmi Puja)
     date(2025, 10, 22),  # Diwali Balipratipada
     date(2025, 11, 5),   # Guru Nanak Jayanti
@@ -116,7 +115,27 @@ NSE_HOLIDAYS_2026 = [
     date(2026, 12, 25),  # Christmas
 ]
 
-ALL_HOLIDAYS = set(NSE_HOLIDAYS_2025 + NSE_HOLIDAYS_2026)
+NSE_HOLIDAYS_2027 = [
+    date(2027, 1, 26),   # Republic Day
+    date(2027, 3, 11),   # Maha Shivaratri
+    date(2027, 3, 22),   # Holi
+    date(2027, 3, 26),   # Good Friday
+    date(2027, 4, 14),   # Dr. Ambedkar Jayanti
+    date(2027, 5, 1),    # Maharashtra Day
+    date(2027, 5, 13),   # Buddha Purnima
+    date(2027, 6, 17),   # Eid-ul-Adha (Bakri Id)
+    date(2027, 7, 16),   # Muharram
+    date(2027, 8, 15),   # Independence Day
+    date(2027, 9, 4),    # Janmashtami
+    date(2027, 10, 2),   # Mahatma Gandhi Jayanti
+    date(2027, 10, 8),   # Dussehra
+    date(2027, 10, 28),  # Diwali (Laxmi Puja)
+    date(2027, 10, 29),  # Diwali Balipratipada
+    date(2027, 11, 19),  # Guru Nanak Jayanti
+    date(2027, 12, 25),  # Christmas
+]
+
+ALL_HOLIDAYS = set(NSE_HOLIDAYS_2025 + NSE_HOLIDAYS_2026 + NSE_HOLIDAYS_2027)
 
 
 def is_market_open(dt: Optional[datetime] = None) -> bool:

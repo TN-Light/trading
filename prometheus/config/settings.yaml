@@ -276,13 +276,34 @@ intraday:
   square_off_time: "15:15"          # Force close all intraday at 3:15 PM
   max_daily_trades: 4               # Separate limit for intraday trades
   risk_per_trade_pct: 2.0           # Risk per intraday trade
-  time_stop_bars_5min: 60           # ~5 hours in 5-min bars
-  time_stop_bars_15min: 20          # ~5 hours in 15-min bars
+  time_stop_bars_5min: 36            # Session 23: ~3 hours in 5-min bars (was 60)
+  time_stop_bars_15min: 16           # Session 23: ~4 hours in 15-min bars (was 20)
   breakeven_ratio: 0.5              # Faster breakeven for intraday
   trailing_poll_seconds: 10         # Faster polling than swing (15s)
   instruments:                      # Instruments for intraday
     - "NIFTY 50"
     - "NIFTY BANK"
+
+# ---------------------------------------------------------------------------
+# Multi-Account Paper Trading
+# ---------------------------------------------------------------------------
+multi_account:
+  # Activated via --multi-account CLI flag
+  accounts:
+    - label: "micro_15k"
+      capital: 15000
+    - label: "starter_50k"
+      capital: 50000
+    - label: "growth_100k"
+      capital: 100000
+      risk_overrides:
+        max_open_positions: 3
+        drawdown_halt_pct: 15.0
+    - label: "full_200k"
+      capital: 200000
+      risk_overrides:
+        max_open_positions: 4
+        drawdown_halt_pct: 15.0
 
 # ---------------------------------------------------------------------------
 # Logging

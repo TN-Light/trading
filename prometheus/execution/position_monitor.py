@@ -120,6 +120,10 @@ class PositionMonitor:
 
         self._last_bar_increment_date = ""
 
+        # LTP failure tracking per position
+        self._ltp_fail_counts: Dict[str, int] = {}
+        self._ltp_alert_sent: Dict[str, bool] = {}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -140,6 +144,8 @@ class PositionMonitor:
         """Stop monitoring a position (after close)."""
         with self._lock:
             self._positions.pop(position_id, None)
+        self._ltp_fail_counts.pop(position_id, None)
+        self._ltp_alert_sent.pop(position_id, None)
 
     def restore_positions(self, states: List[TrailingState]):
         """Restore positions from SQLite persistence (crash recovery)."""
@@ -183,6 +189,11 @@ class PositionMonitor:
     def _monitor_loop(self):
         while self._running:
             try:
+                # Skip polling on non-trading days to save API quota
+                if not is_trading_day(datetime.now().date()):
+                    time.sleep(60)
+                    continue
+
                 with self._lock:
                     positions = list(self._positions.items())
 
@@ -201,7 +212,19 @@ class PositionMonitor:
                             state.tradingsymbol, exchange="NFO"
                         )
                         if ltp <= 0:
+                            # Track consecutive LTP failures per position
+                            self._ltp_fail_counts[pid] = self._ltp_fail_counts.get(pid, 0) + 1
+                            if self._ltp_fail_counts[pid] >= 20 and not self._ltp_alert_sent.get(pid, False):
+                                logger.warning(
+                                    f"PositionMonitor: LTP unavailable for {pid} "
+                                    f"({self._ltp_fail_counts[pid]} consecutive failures) — "
+                                    f"trailing stops NOT updating"
+                                )
+                                self._ltp_alert_sent[pid] = True
                             continue
+                        # Reset failure counter on success
+                        self._ltp_fail_counts[pid] = 0
+                        self._ltp_alert_sent.pop(pid, None)
                         self._process_tick(state, ltp)
                     except Exception as e:
                         logger.error(f"PositionMonitor tick error {pid}: {e}")

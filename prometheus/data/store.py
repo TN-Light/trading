@@ -193,6 +193,13 @@ class DataStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                -- System state persistence (equity, capital across restarts)
+                CREATE TABLE IF NOT EXISTS system_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
             """)
 
     # -----------------------------------------------------------------------
@@ -460,3 +467,97 @@ class DataStore:
                 SET status = 'closed', realized_pnl = ?, updated_at = ?
                 WHERE position_id = ?
             """, (pnl, str(datetime.now()), position_id))
+
+    # -----------------------------------------------------------------------
+    # System State Persistence (equity across restarts)
+    # -----------------------------------------------------------------------
+    def save_state(self, key: str, value: str):
+        """Save a key-value pair to system state."""
+        now = str(datetime.now())
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO system_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+            """, (key, value, now))
+
+    def load_state(self, key: str, default: str = "") -> str:
+        """Load a value from system state."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "SELECT value FROM system_state WHERE key = ?", (key,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else default
+
+    def save_equity_snapshot(self, label: str, equity: float, peak: float,
+                             total_costs: float = 0, realized_pnl: float = 0):
+        """Save equity state for crash recovery."""
+        import json
+        data = json.dumps({
+            "equity": equity,
+            "peak": peak,
+            "total_costs": total_costs,
+            "realized_pnl": realized_pnl,
+        })
+        self.save_state(f"equity_{label}", data)
+
+    def load_equity_snapshot(self, label: str) -> dict:
+        """Load equity state after restart."""
+        import json
+        raw = self.load_state(f"equity_{label}")
+        if raw:
+            try:
+                return json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return {}
+
+    # -----------------------------------------------------------------------
+    # Data Pruning (prevent unbounded DB growth)
+    # -----------------------------------------------------------------------
+    def prune_old_data(self, options_days: int = 7, signals_days: int = 90,
+                       ohlcv_intraday_days: int = 30):
+        """Delete old data to keep SQLite size manageable.
+
+        Args:
+            options_days: Days of options_chain data to keep
+            signals_days: Days of signal log data to keep
+            ohlcv_intraday_days: Days of intraday OHLCV to keep (daily is kept forever)
+        """
+        from datetime import timedelta
+        now = datetime.now()
+        options_cutoff = str(now - timedelta(days=options_days))
+        signals_cutoff = str(now - timedelta(days=signals_days))
+        ohlcv_cutoff = str(now - timedelta(days=ohlcv_intraday_days))
+
+        with self._connection() as conn:
+            # Options chain: heaviest table (~300K rows/day)
+            r1 = conn.execute(
+                "DELETE FROM options_chain WHERE timestamp < ?",
+                (options_cutoff,)
+            )
+            # Old signals
+            r2 = conn.execute(
+                "DELETE FROM signals WHERE timestamp < ?",
+                (signals_cutoff,)
+            )
+            # Intraday OHLCV only (keep daily forever)
+            r3 = conn.execute(
+                "DELETE FROM ohlcv WHERE interval != 'day' AND timestamp < ?",
+                (ohlcv_cutoff,)
+            )
+            # Closed managed positions older than 30 days
+            closed_cutoff = str(now - timedelta(days=30))
+            r4 = conn.execute(
+                "DELETE FROM managed_positions WHERE status = 'closed' AND updated_at < ?",
+                (closed_cutoff,)
+            )
+
+            total = (r1.rowcount or 0) + (r2.rowcount or 0) + (r3.rowcount or 0) + (r4.rowcount or 0)
+            if total > 0:
+                conn.execute("PRAGMA optimize")
+                from prometheus.utils.logger import logger
+                logger.info(
+                    f"DB pruned: {r1.rowcount} options, {r2.rowcount} signals, "
+                    f"{r3.rowcount} intraday OHLCV, {r4.rowcount} closed positions"
+                )

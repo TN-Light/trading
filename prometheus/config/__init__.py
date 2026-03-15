@@ -72,6 +72,7 @@ def get_credential(key_path: str) -> Optional[str]:
     """
     Get a credential value by dot-separated path.
     Example: get_credential("zerodha.api_key")
+    Falls back: broker.* -> zerodha.* for backwards compatibility.
     """
     if not _credentials:
         load_credentials()
@@ -84,6 +85,9 @@ def get_credential(key_path: str) -> Optional[str]:
         else:
             return None
         if value is None:
+            # Fallback: "broker.X" -> "zerodha.X"
+            if keys[0] == "broker":
+                return get_credential("zerodha." + ".".join(keys[1:]))
             return None
     return value
 

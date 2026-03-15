@@ -43,6 +43,7 @@ class PaperTrader(BrokerBase):
         self.store = DataStore()
         self._connected = True
         self._price_feed: Dict[str, float] = {}  # simulated price feed
+        self._real_premiums: Dict[str, Dict] = {}  # real bid/ask from Angel One
         self.cost_model = ZerodhaCostModel()  # Realistic Zerodha fees
         self.total_costs = 0.0  # Running total of all fees paid
 
@@ -66,6 +67,23 @@ class PaperTrader(BrokerBase):
         self._update_positions()
         self._check_pending_orders()
 
+    def set_real_premium(self, tradingsymbol: str, ltp: float, bid: float = 0, ask: float = 0):
+        """
+        Feed real option premium from Angel One for accurate paper execution.
+        Uses bid for sells, ask for buys (worst-case fills like real market).
+        """
+        self._real_premiums[tradingsymbol] = {
+            "ltp": ltp,
+            "bid": bid if bid > 0 else ltp,
+            "ask": ask if ask > 0 else ltp,
+        }
+        # Also update the generic price feed
+        self._price_feed[tradingsymbol] = ltp
+
+    def get_real_premium(self, tradingsymbol: str) -> Optional[Dict]:
+        """Get real premium data if available."""
+        return self._real_premiums.get(tradingsymbol)
+
     def place_order(self, order: Order) -> Order:
         """Simulate order placement."""
         order.order_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
@@ -84,17 +102,26 @@ class PaperTrader(BrokerBase):
             return order
 
         if order.order_type == OrderType.MARKET:
-            # Instant fill at current price
-            current_price = self._price_feed.get(order.tradingsymbol, order.price)
-            if current_price <= 0:
-                current_price = order.price
-
-            # Simulate slippage (0.15% — realistic options slippage, matches backtest)
-            slippage = current_price * 0.0015
-            if order.side == OrderSide.BUY:
-                fill_price = current_price + slippage
+            # Use real premium if available, else simulated price
+            real = self._real_premiums.get(order.tradingsymbol)
+            if real:
+                # Real bid/ask → fill at actual spread (more realistic than %)
+                if order.side == OrderSide.BUY:
+                    fill_price = real["ask"]  # buy at ask
+                else:
+                    fill_price = real["bid"]  # sell at bid
+                logger.debug(f"Real premium fill: {order.tradingsymbol} {order.side.value} @ {fill_price:.2f}")
             else:
-                fill_price = current_price - slippage
+                current_price = self._price_feed.get(order.tradingsymbol, order.price)
+                if current_price <= 0:
+                    current_price = order.price
+
+                # Simulate slippage (0.15% — realistic options slippage, matches backtest)
+                slippage = current_price * 0.0015
+                if order.side == OrderSide.BUY:
+                    fill_price = current_price + slippage
+                else:
+                    fill_price = current_price - slippage
 
             order.average_price = round(fill_price, 2)
             order.filled_quantity = order.quantity

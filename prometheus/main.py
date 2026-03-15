@@ -96,6 +96,11 @@ class Prometheus:
         # Capital
         cap_cfg = get_capital_config()
         self.initial_capital = cap_cfg.get("initial", 200000)
+        if "initial" not in cap_cfg:
+            logger.warning(
+                "capital.initial not found in settings.yaml — using default Rs 2,00,000. "
+                "Set capital.initial in config/settings.yaml to your actual capital."
+            )
         self.capital = self.initial_capital
 
         # Data Engine
@@ -104,6 +109,11 @@ class Prometheus:
             kite_access_token=get("broker.access_token", ""),
         )
         self.store = DataStore()
+        # Prune old data on startup to prevent unbounded DB growth
+        try:
+            self.store.prune_old_data()
+        except Exception as e:
+            logger.debug(f"DB prune on startup: {e}")
 
         # Signal Engine
         sig_cfg = get("signals", {})
@@ -164,6 +174,9 @@ class Prometheus:
         self.running = False
         self.symbols = get("market.indices", ["NIFTY 50", "NIFTY BANK"])
 
+        # Multi-account paper trading (initialized on demand by --multi-account)
+        self.multi_account = None
+
         logger.info(f"Mode: {self.mode} | Capital: Rs {self.capital:,.0f} | Symbols: {self.symbols}")
 
     @property
@@ -188,6 +201,166 @@ class Prometheus:
         return self._ai
 
     # ─────────────────────────────────────────────────────────────────────
+    # MULTI-ACCOUNT & DATA COLLECTION
+    # ─────────────────────────────────────────────────────────────────────
+
+    def init_multi_account(self):
+        """Initialize multi-account paper trading from config."""
+        from prometheus.execution.multi_account import (
+            MultiAccountPaperTrader, AccountConfig,
+        )
+        ma_cfg = get("multi_account", {})
+        accounts = []
+        for acc in ma_cfg.get("accounts", []):
+            accounts.append(AccountConfig(
+                label=acc["label"],
+                initial_capital=acc["capital"],
+                risk_overrides=acc.get("risk_overrides", {}),
+            ))
+        if not accounts:
+            accounts = MultiAccountPaperTrader.DEFAULT_ACCOUNTS
+        self.multi_account = MultiAccountPaperTrader(
+            accounts, get_risk_limits(),
+        )
+
+    def run_data_collection(
+        self,
+        symbol: str = None,
+        interval: str = "5minute",
+        days: int = 180,
+    ):
+        """Collect and store historical data from Angel One into SQLite."""
+        symbols = [symbol] if symbol else self.symbols
+
+        if not self.data.angelone:
+            logger.error(
+                "Angel One not configured. "
+                "Add credentials to config/credentials.yaml"
+            )
+            return
+
+        self.dashboard.show_header()
+        logger.info(f"Data collection: {interval}, {days} days, {len(symbols)} symbols")
+
+        for sym in symbols:
+            logger.info(f"Collecting {sym} {interval} data ({days} days)...")
+            try:
+                df = self.data.angelone.fetch_historical(
+                    sym, days=days, interval=interval,
+                )
+                if df.empty:
+                    logger.warning(f"  No data returned for {sym}")
+                    continue
+                self.data.store.save_ohlcv(df, sym, interval)
+                logger.info(f"  Stored {len(df)} candles for {sym}")
+            except Exception as e:
+                logger.error(f"  Error collecting {sym}: {e}")
+
+        # Summary
+        logger.info("=" * 60)
+        logger.info("  DATA COLLECTION SUMMARY")
+        logger.info("=" * 60)
+        for sym in symbols:
+            for intv in [interval]:
+                cached = self.data.store.get_ohlcv(sym, intv)
+                if not cached.empty:
+                    ts_col = "timestamp" if "timestamp" in cached.columns else cached.columns[0]
+                    first = cached[ts_col].iloc[0]
+                    last = cached[ts_col].iloc[-1]
+                    logger.info(f"  {sym} {intv}: {len(cached)} candles ({first} to {last})")
+                else:
+                    logger.info(f"  {sym} {intv}: no data")
+
+    def _dispatch_multi_account(self, refined_signal, is_intraday: bool = False,
+                               bar_interval: str = "15minute"):
+        """If multi-account is initialized, dispatch signal to all accounts."""
+        if self.multi_account is not None:
+            # Sync primary broker's price feed to all multi-account traders
+            if isinstance(self.broker, PaperTrader) and self.broker._price_feed:
+                self.multi_account.update_all_prices(self.broker._price_feed)
+            results = self.multi_account.dispatch_signal(refined_signal, confirm=False)
+            opened = sum(1 for v in results.values() if v)
+            if opened:
+                logger.info(f"Multi-account: {opened}/{len(results)} accounts opened positions")
+            # Register multi-account positions with PositionMonitor for trailing stops
+            if self.position_monitor:
+                for label, did_open in results.items():
+                    if did_open:
+                        stack = self.multi_account.get_stack(label)
+                        if stack:
+                            # Find the most recent position opened by this stack
+                            managed = list(stack.order_manager.managed_positions.values())
+                            if managed:
+                                last = managed[-1]
+                                ts = stack.order_manager.create_trailing_state(
+                                    last.position_id
+                                )
+                                if ts:
+                                    # Tag with account label for exit routing
+                                    ts._multi_account_label = label
+                                    # Copy intraday tags from caller
+                                    if is_intraday:
+                                        ts.trade_mode = "intraday"
+                                        ts.bar_interval = bar_interval
+                                        intraday_cfg = get("intraday", {})
+                                        bi_key = ts.bar_interval.replace("minute", "min")
+                                        ts.max_bars = intraday_cfg.get(
+                                            f"time_stop_bars_{bi_key}",
+                                            intraday_cfg.get("time_stop_bars_15min", 20)
+                                        )
+                                        ts.breakeven_ratio = intraday_cfg.get(
+                                            "breakeven_ratio", 0.5
+                                        )
+                                    self.position_monitor.add_position(ts)
+
+    def _feed_real_premium(self, refined_signal: Dict):
+        """
+        If Angel One option chain is available, fetch real LTP/bid/ask
+        for the instrument and feed to PaperTrader for realistic fills.
+        """
+        if not getattr(self.data, "angelone_options", None):
+            return
+        instrument = refined_signal.get("instrument") or refined_signal.get("tradingsymbol")
+        if not instrument:
+            return
+        try:
+            symbol = refined_signal.get("symbol", "NIFTY 50")
+            strike = refined_signal.get("strike", 0)
+            opt_type = refined_signal.get("option_type", "CE")
+            expiry = refined_signal.get("expiry", "")
+            if not strike:
+                return
+            # "WEEKLY" or empty = nearest expiry, pass None to skip expiry filter
+            if not expiry or expiry.upper() == "WEEKLY":
+                expiry = None
+            result = self.data.angelone_options.get_real_premium(
+                symbol, strike, expiry, opt_type,
+            )
+            if result and result.get("ltp", 0) > 0:
+                if isinstance(self.broker, PaperTrader):
+                    self.broker.set_real_premium(
+                        instrument,
+                        ltp=result["ltp"],
+                        bid=result.get("bid", 0),
+                        ask=result.get("ask", 0),
+                    )
+                # Also feed to multi-account traders
+                if self.multi_account:
+                    for stack in self.multi_account.stacks.values():
+                        stack.trader.set_real_premium(
+                            instrument,
+                            ltp=result["ltp"],
+                            bid=result.get("bid", 0),
+                            ask=result.get("ask", 0),
+                        )
+                logger.info(
+                    f"Real premium for {instrument}: LTP={result['ltp']:.2f}, "
+                    f"Bid={result.get('bid', 0):.2f}, Ask={result.get('ask', 0):.2f}"
+                )
+        except Exception as e:
+            logger.debug(f"Real premium fetch failed for {instrument}: {e}")
+
+    # ─────────────────────────────────────────────────────────────────────
     # ANALYSIS PIPELINE
     # ─────────────────────────────────────────────────────────────────────
     def analyze(self, symbol: str) -> Optional[FusedSignal]:
@@ -203,6 +376,14 @@ class Prometheus:
         6. Fuse all signals
         7. Return actionable signal
         """
+        try:
+            return self._analyze_impl(symbol)
+        except Exception as e:
+            logger.error(f"analyze({symbol}) failed: {e}")
+            return None
+
+    def _analyze_impl(self, symbol: str) -> Optional[FusedSignal]:
+        """Internal implementation — separated for per-symbol error isolation."""
         logger.info(f"Analyzing {symbol}...")
 
         # 1. Fetch data
@@ -352,6 +533,14 @@ class Prometheus:
         3. Session-anchored VWAP (resets at market open)
         4. Tags signal as intraday with MIS product
         """
+        try:
+            return self._analyze_intraday_impl(symbol, bar_interval)
+        except Exception as e:
+            logger.error(f"analyze_intraday({symbol}) failed: {e}")
+            return None
+
+    def _analyze_intraday_impl(self, symbol: str, bar_interval: str = "5minute") -> Optional[FusedSignal]:
+        """Internal implementation — separated for per-symbol error isolation."""
         logger.info(f"Intraday analyzing {symbol} ({bar_interval})...")
 
         # 1. Fetch data
@@ -370,6 +559,13 @@ class Prometheus:
 
         # 2. Technical signals
         tech_signals = []
+
+        # ATR from primary for intraday SL (compute early — needed by EMA margin)
+        atr_value = 0.0
+        if len(data_primary) >= 15:
+            atr_series = calculate_atr(data_primary)
+            if not atr_series.empty:
+                atr_value = float(atr_series.iloc[-1])
 
         # Session VWAP (key for intraday)
         vwap_df = calculate_session_vwap(data_primary)
@@ -396,6 +592,29 @@ class Prometheus:
                     strength=0.65,
                     timeframe=bar_interval,
                 ))
+
+        # EMA 9/21 alignment (Session 23 addition)
+        if len(data_primary) >= 25:
+            ema9 = data_primary["close"].ewm(span=9, adjust=False).mean()
+            ema21 = data_primary["close"].ewm(span=21, adjust=False).mean()
+            if not ema9.empty and not ema21.empty:
+                ema9_now = ema9.iloc[-1]
+                ema21_now = ema21.iloc[-1]
+                margin = atr_value * 0.1 if atr_value > 0 else 0
+                if ema9_now > ema21_now + margin:
+                    tech_signals.append(TechnicalSignal(
+                        name="ema",
+                        direction="bullish",
+                        strength=0.65,
+                        timeframe=bar_interval,
+                    ))
+                elif ema9_now < ema21_now - margin:
+                    tech_signals.append(TechnicalSignal(
+                        name="ema",
+                        direction="bearish",
+                        strength=0.65,
+                        timeframe=bar_interval,
+                    ))
 
         # RSI Divergence on bias TF
         if not data_bias.empty and len(data_bias) > 44:
@@ -432,25 +651,30 @@ class Prometheus:
                     timeframe=bar_interval,
                 ))
 
-        # ATR from primary for intraday SL
-        atr_value = 0.0
-        if len(data_primary) >= 15:
-            atr_series = calculate_atr(data_primary)
-            if not atr_series.empty:
-                atr_value = float(atr_series.iloc[-1])
-
         # 3. Regime from daily (for strategy selection)
         regime = self.regime_detector.detect(data_daily) if not data_daily.empty else None
 
-        # 4. Fuse
-        signal = self.fusion.fuse(
-            symbol=symbol,
-            spot_price=spot,
-            technical_signals=tech_signals,
-            oi_signals=[],
-            regime=regime,
-            ai_sentiment=None,
-        )
+        # 4. Fuse with Session 23 intraday weight overrides
+        # Swap in a NEW dict with intraday-specific weights (avoids mutating class dict)
+        saved_weights = self.fusion.SIGNAL_WEIGHTS
+        intraday_weights = dict(saved_weights)
+        intraday_weights["vwap"] = 1.0         # Session VWAP is primary
+        intraday_weights["supertrend"] = 1.0   # Supertrend boosted
+        intraday_weights["ema"] = 0.75          # EMA 9/21 alignment
+        self.fusion.SIGNAL_WEIGHTS = intraday_weights
+
+        try:
+            signal = self.fusion.fuse(
+                symbol=symbol,
+                spot_price=spot,
+                technical_signals=tech_signals,
+                oi_signals=[],
+                regime=regime,
+                ai_sentiment=None,
+            )
+        finally:
+            # Restore original weights (so swing analyze() is unaffected)
+            self.fusion.SIGNAL_WEIGHTS = saved_weights
 
         # Attach ATR-based SL
         if signal and atr_value > 0:
@@ -553,6 +777,7 @@ class Prometheus:
                             enriched["action"] = "BUY_PE"
                         enriched["direction"] = signal.direction
                         logger.info(f"Trend strategy refined: {setup.instrument} {setup.lots}L @ {setup.entry_price}")
+                        self._feed_real_premium(enriched)
                         return enriched
 
             elif strategy_name == "expiry" and not data_15m.empty:
@@ -569,13 +794,16 @@ class Prometheus:
                     enriched["confidence"] = signal.confidence
                     enriched["entry_price"] = setup.total_cost
                     logger.info(f"Expiry strategy refined: {setup.strategy_type}")
+                    self._feed_real_premium(enriched)
                     return enriched
 
         except Exception as e:
             logger.debug(f"Strategy refinement failed ({strategy_name}): {e}")
 
-        # Fallback: return base fused signal dict (still valid for execution)
-        return base_dict
+        # Feed real premium if Angel One is available (for PaperTrader uses)
+        result = base_dict
+        self._feed_real_premium(result)
+        return result
 
     # ─────────────────────────────────────────────────────────────────────
     # MODE: SIGNAL (Show signals to user)
@@ -767,6 +995,7 @@ class Prometheus:
                                     position = self.order_manager.execute_signal(
                                         refined, confirm=False
                                     )
+                                    self._dispatch_multi_account(refined)
                                     if position:
                                         _today_traded_symbols.add(symbol)
                                         self.dashboard.show_status_line(
@@ -803,6 +1032,7 @@ class Prometheus:
                                 position = self.order_manager.execute_signal(
                                     refined, confirm=False
                                 )
+                                self._dispatch_multi_account(refined)
 
                                 if position:
                                     _today_traded_symbols.add(symbol)
@@ -893,6 +1123,10 @@ class Prometheus:
                 self.running = False
                 # Close all paper positions
                 total_pnl = self.order_manager.close_all_positions("session_end")
+                if self.multi_account:
+                    self.multi_account.close_all("session_end")
+                self._persist_equity_state()
+                self.stop()
                 logger.info(f"Paper trading stopped. Session P&L: Rs {total_pnl:+,.0f}")
                 break
             except Exception as e:
@@ -919,10 +1153,33 @@ class Prometheus:
 
     def _handle_position_exit(self, position_id: str, exit_price: float, reason: str):
         """Callback when PositionMonitor triggers an exit."""
-        pnl = self.order_manager.close_position(position_id, reason)
+        # Check if this is a multi-account position
+        ma_label = None
+        if self.position_monitor:
+            positions = self.position_monitor.get_positions()
+            state = positions.get(position_id)
+            if state:
+                ma_label = getattr(state, "_multi_account_label", None)
+
+        pnl = None
+        if ma_label and self.multi_account:
+            # Route exit to the correct sub-account stack
+            stack = self.multi_account.get_stack(ma_label)
+            if stack:
+                pnl = stack.order_manager.close_position(position_id, reason)
+                logger.info(f"[{ma_label}] Position {position_id} closed ({reason}): P&L Rs {pnl if pnl is not None else 0:+,.0f}")
+            else:
+                logger.warning(f"Multi-account stack '{ma_label}' not found for {position_id}")
+        else:
+            # Primary account exit
+            pnl = self.order_manager.close_position(position_id, reason)
+
         if self.position_monitor:
             self.position_monitor.remove_position(position_id)
-        self.store.close_position_state(position_id, pnl or 0)
+        self.store.close_position_state(position_id, pnl if pnl is not None else 0.0)
+
+        # Persist equity state for crash recovery
+        self._persist_equity_state()
 
         reason_labels = {
             "stop_loss": "SL Hit",
@@ -951,6 +1208,91 @@ class Prometheus:
     def _handle_state_persist(self, state):
         """Callback to persist trailing state to SQLite."""
         self.store.save_position_state(state.to_dict())
+
+    def _handle_loop_error(self, mode_label: str, error: Exception,
+                           consecutive_errors: int) -> tuple:
+        """Handle errors in trading loops with backoff and circuit breaker.
+
+        Returns (should_halt: bool, sleep_seconds: float).
+        """
+        backoff = min(30 * (2 ** min(consecutive_errors - 1, 4)), 300)
+        logger.error(f"{mode_label} error ({consecutive_errors} consecutive): {error}")
+        self.telegram.alert_system_error(str(error))
+        if consecutive_errors >= 20:
+            logger.critical(
+                f"{mode_label}: {consecutive_errors} consecutive errors — "
+                f"halting system. Manual restart needed."
+            )
+            self.telegram.send_message(
+                f"\U0001f6d1 <b>SYSTEM HALTED</b>\n\n"
+                f"{consecutive_errors} consecutive errors.\n"
+                f"Last: {str(error)[:200]}\n\n"
+                f"Manual restart required."
+            )
+            return True, 0
+        return False, backoff
+
+    def _persist_equity_state(self):
+        """Save current equity/capital to SQLite for crash recovery."""
+        try:
+            if isinstance(self.broker, PaperTrader):
+                margins = self.broker.get_margins()
+                self.store.save_equity_snapshot(
+                    "primary",
+                    equity=margins.get("equity", self.initial_capital),
+                    peak=self.risk.peak_capital,
+                    total_costs=self.broker.total_costs,
+                    realized_pnl=margins.get("realized_pnl", 0),
+                )
+            # Multi-account stacks
+            if self.multi_account:
+                for label, stack in self.multi_account.stacks.items():
+                    m = stack.trader.get_margins()
+                    self.store.save_equity_snapshot(
+                        label,
+                        equity=m.get("equity", stack.config.initial_capital),
+                        peak=stack.risk.peak_capital,
+                        total_costs=stack.trader.total_costs,
+                        realized_pnl=m.get("realized_pnl", 0),
+                    )
+        except Exception as e:
+            logger.debug(f"Equity persist error: {e}")
+
+    def _restore_equity_state(self):
+        """Restore equity/capital from SQLite after crash/restart."""
+        try:
+            snap = self.store.load_equity_snapshot("primary")
+            if snap and isinstance(self.broker, PaperTrader):
+                saved_equity = snap.get("equity", 0)
+                saved_peak = snap.get("peak", 0)
+                if saved_equity > 0:
+                    # Adjust PaperTrader cash to reflect cumulative P&L
+                    pnl_since_start = saved_equity - self.initial_capital
+                    self.broker.available_cash = self.initial_capital + pnl_since_start
+                    self.broker.total_costs = snap.get("total_costs", 0)
+                    # Sync risk manager capital
+                    self.risk.current_capital = saved_equity
+                    if saved_peak > 0:
+                        self.risk.peak_capital = saved_peak
+                    logger.info(
+                        f"Equity restored: Rs {saved_equity:,.0f} "
+                        f"(peak: Rs {saved_peak:,.0f}, "
+                        f"P&L since start: Rs {pnl_since_start:+,.0f})"
+                    )
+            # Multi-account stacks
+            if self.multi_account:
+                for label, stack in self.multi_account.stacks.items():
+                    ms = self.store.load_equity_snapshot(label)
+                    if ms and ms.get("equity", 0) > 0:
+                        pnl = ms["equity"] - stack.config.initial_capital
+                        stack.trader.available_cash = stack.config.initial_capital + pnl
+                        stack.trader.total_costs = ms.get("total_costs", 0)
+                        stack.risk.current_capital = ms["equity"]
+                        if ms.get("peak", 0) > 0:
+                            stack.risk.peak_capital = ms["peak"]
+                        logger.info(f"[{label}] Equity restored: Rs {ms['equity']:,.0f}")
+        except Exception as e:
+            logger.debug(f"Equity restore error: {e}")
 
     def _restore_persisted_positions(self):
         """Restore open positions from SQLite after crash/restart."""
@@ -981,6 +1323,8 @@ class Prometheus:
                 max_bars=row.get("max_bars", 7),
                 breakeven_ratio=row.get("breakeven_ratio", 0.6),
                 risk_distance=row.get("risk_distance", 0),
+                bar_interval=row.get("bar_interval", "day"),
+                trade_mode=row.get("trade_mode", "swing"),
             ))
         self.position_monitor.restore_positions(states)
         if states:
@@ -1016,6 +1360,7 @@ class Prometheus:
 
         # Start position monitor + restore any persisted positions
         self._start_position_monitor()
+        self._restore_equity_state()
         self._restore_persisted_positions()
 
         is_dry_run = isinstance(self.broker, PaperTrader)
@@ -1072,6 +1417,7 @@ class Prometheus:
                                     position = self.order_manager.execute_signal(
                                         refined, confirm=False
                                     )
+                                    self._dispatch_multi_account(refined)
                                     if position:
                                         _today_traded_symbols.add(symbol)
                                         self._register_position_with_monitor(position)
@@ -1094,6 +1440,7 @@ class Prometheus:
                             position = self.order_manager.execute_signal(
                                 refined, confirm=False
                             )
+                            self._dispatch_multi_account(refined)
                             if position:
                                 _today_traded_symbols.add(symbol)
                                 self._register_position_with_monitor(position)
@@ -1134,6 +1481,10 @@ class Prometheus:
                 if self.position_monitor:
                     self.position_monitor.stop()
                 total_pnl = self.order_manager.close_all_positions("session_end")
+                if self.multi_account:
+                    self.multi_account.close_all("session_end")
+                self._persist_equity_state()
+                self.stop()
                 logger.info(f"{mode_label} stopped. Session P&L: Rs {total_pnl:+,.0f}")
                 break
             except Exception as e:
@@ -1158,6 +1509,7 @@ class Prometheus:
         self.telegram.alert_system_start()
 
         self._start_position_monitor()
+        self._restore_equity_state()
         self._restore_persisted_positions()
 
         pm_cfg = get("position_monitor", {})
@@ -1273,6 +1625,10 @@ class Prometheus:
                 if self.position_monitor:
                     self.position_monitor.stop()
                 total_pnl = self.order_manager.close_all_positions("session_end")
+                if self.multi_account:
+                    self.multi_account.close_all("session_end")
+                self._persist_equity_state()
+                self.stop()
                 logger.info(f"Semi-auto stopped. Session P&L: Rs {total_pnl:+,.0f}")
                 break
             except Exception as e:
@@ -1313,6 +1669,7 @@ class Prometheus:
             on_state_changed=self._handle_state_persist,
         )
         self.position_monitor.start()
+        self._restore_equity_state()
         self._restore_persisted_positions()
 
         is_dry_run = isinstance(self.broker, PaperTrader)
@@ -1329,6 +1686,7 @@ class Prometheus:
         _intraday_trades_today = 0
         _did_square_off = False
         _last_scan_time = None
+        _did_send_daily_summary = False
 
         max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
@@ -1358,6 +1716,7 @@ class Prometheus:
                     _intraday_trades_today = 0
                     _did_square_off = False
                     _last_scan_time = None
+                    _did_send_daily_summary = False
                     self.dashboard.show_status_line(
                         f"{mode_label}: Pre-market. Scan starts at 9:45 AM."
                     )
@@ -1380,8 +1739,11 @@ class Prometheus:
                     time.sleep(60)
                     continue
 
-                # After square-off — just wait
+                # After square-off — send daily summary after hours, otherwise wait
                 if _did_square_off:
+                    if current_time >= dtime(16, 0) and not _did_send_daily_summary:
+                        self._send_daily_summary()
+                        _did_send_daily_summary = True
                     self.dashboard.show_status_line(
                         f"{mode_label}: Squared off. Market closing soon."
                     )
@@ -1427,6 +1789,10 @@ class Prometheus:
                         position = self.order_manager.execute_signal(
                             refined, confirm=False
                         )
+                        self._dispatch_multi_account(
+                            refined, is_intraday=True,
+                            bar_interval=bar_interval
+                        )
                         if position:
                             _today_traded_symbols.add(symbol)
                             _intraday_trades_today += 1
@@ -1451,6 +1817,15 @@ class Prometheus:
                             )
 
                 _last_scan_time = now
+
+                # ── AFTER HOURS: daily summary + slow sleep ──
+                if current_time >= dtime(16, 0):
+                    if not _did_send_daily_summary:
+                        self._send_daily_summary()
+                        _did_send_daily_summary = True
+                    time.sleep(60)
+                    continue
+
                 n_pos = self.position_monitor.active_count if self.position_monitor else 0
                 self.dashboard.show_status_line(
                     f"{mode_label}: {n_pos} position(s) | "
@@ -1461,9 +1836,14 @@ class Prometheus:
 
             except KeyboardInterrupt:
                 self.running = False
-                self._square_off_intraday_positions()
+                # Stop monitor FIRST to prevent race with square-off
                 if self.position_monitor:
                     self.position_monitor.stop()
+                self._square_off_intraday_positions()
+                if self.multi_account:
+                    self.multi_account.close_all("session_end")
+                self._persist_equity_state()
+                self.stop()
                 logger.info(f"{mode_label} stopped by user.")
                 break
             except Exception as e:
@@ -1529,6 +1909,7 @@ class Prometheus:
             on_state_changed=self._handle_state_persist,
         )
         self.position_monitor.start()
+        self._restore_equity_state()
         self._restore_persisted_positions()
 
         is_dry_run = isinstance(self.broker, PaperTrader)
@@ -1563,6 +1944,9 @@ class Prometheus:
         # Swing state
         _did_1pm_scan = False
         _did_335pm_scan = False
+        _did_send_daily_summary = False
+        _swing_traded_symbols = set()  # dedup: one swing trade per symbol per day
+        _consecutive_errors = 0
 
         while self.running:
             try:
@@ -1583,10 +1967,13 @@ class Prometheus:
                     _last_intra_scan = None
                     _did_1pm_scan = False
                     _did_335pm_scan = False
+                    _did_send_daily_summary = False
+                    _swing_traded_symbols.clear()
                     self.dashboard.show_status_line(
                         f"{mode_label}: Pre-market. Waiting for 9:45 AM."
                     )
                     time.sleep(60)
+                    _consecutive_errors = 0  # Reset AFTER successful pre-market iteration
                     continue
 
                 # Skip opening noise (9:15-9:45)
@@ -1603,10 +1990,12 @@ class Prometheus:
                     self._square_off_intraday_positions()
                     _did_square_off = True
 
-                # ── SWING SCAN #2 at 3:35 PM ──
-                if current_time >= dtime(15, 35) and not _did_335pm_scan:
+                # ── SWING SCAN #2 at 3:35 PM (but not after 4 PM — stale data guard) ──
+                if dtime(15, 35) <= current_time < dtime(16, 0) and not _did_335pm_scan:
                     logger.info(f"{mode_label}: Swing scan #2 (3:35 PM)")
                     for symbol in self.symbols:
+                        if symbol in _swing_traded_symbols:
+                            continue
                         signal = self.analyze(symbol)
                         if signal and signal.action != "HOLD":
                             self.telegram.alert_new_signal(signal.to_dict())
@@ -1614,7 +2003,9 @@ class Prometheus:
                             position = self.order_manager.execute_signal(
                                 refined, confirm=False
                             )
+                            self._dispatch_multi_account(refined)
                             if position:
+                                _swing_traded_symbols.add(symbol)
                                 ts = self.order_manager.create_trailing_state(
                                     position.position_id
                                 )
@@ -1633,15 +2024,16 @@ class Prometheus:
                     for symbol in self.symbols:
                         signal = self.analyze(symbol)
                         if signal and signal.action != "HOLD" and signal.confidence >= 0.80:
-                            n_signals = sum(1 for k, v in signal.to_dict().items()
-                                            if k.startswith("signal_") and v)
-                            if n_signals >= 4:
+                            n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
+                            if n_signals >= 4 and symbol not in _swing_traded_symbols:
                                 self.telegram.alert_new_signal(signal.to_dict())
                                 refined = self.refine_with_strategy(signal)
                                 position = self.order_manager.execute_signal(
                                     refined, confirm=False
                                 )
+                                self._dispatch_multi_account(refined)
                                 if position:
+                                    _swing_traded_symbols.add(symbol)
                                     ts = self.order_manager.create_trailing_state(
                                         position.position_id
                                     )
@@ -1669,6 +2061,10 @@ class Prometheus:
                                     position = self.order_manager.execute_signal(
                                         refined, confirm=False
                                     )
+                                    self._dispatch_multi_account(
+                                        refined, is_intraday=True,
+                                        bar_interval=bar_interval
+                                    )
                                     if position:
                                         _intra_traded_symbols.add(isym)
                                         _intra_trades_today += 1
@@ -1689,6 +2085,14 @@ class Prometheus:
 
                             _last_intra_scan = now
 
+                # ── AFTER HOURS: daily summary + slow sleep ──
+                if current_time >= dtime(16, 0):
+                    if not _did_send_daily_summary:
+                        self._send_daily_summary()
+                        _did_send_daily_summary = True
+                    time.sleep(60)  # slow poll after hours
+                    continue
+
                 # Status
                 n_pos = self.position_monitor.active_count if self.position_monitor else 0
                 self.dashboard.show_status_line(
@@ -1697,18 +2101,30 @@ class Prometheus:
                     f"Swing scans: {'1PM ' if _did_1pm_scan else ''}{'3:35PM' if _did_335pm_scan else ''}"
                 )
                 time.sleep(10)
+                _consecutive_errors = 0  # Reset on successful iteration
 
             except KeyboardInterrupt:
                 self.running = False
-                self._square_off_intraday_positions()
+                # Stop monitor FIRST to prevent race with square-off
                 if self.position_monitor:
                     self.position_monitor.stop()
-                logger.info(f"{mode_label} stopped by user.")
+                self._square_off_intraday_positions()
+                total_pnl = self.order_manager.close_all_positions("session_end")
+                if self.multi_account:
+                    self.multi_account.close_all("session_end")
+                self._persist_equity_state()
+                self.stop()
+                logger.info(f"{mode_label} stopped. Session P&L: Rs {total_pnl:+,.0f}")
                 break
             except Exception as e:
-                logger.error(f"{mode_label} error: {e}")
-                self.telegram.alert_system_error(str(e))
-                time.sleep(30)
+                _consecutive_errors += 1
+                should_halt, backoff = self._handle_loop_error(
+                    mode_label, e, _consecutive_errors
+                )
+                if should_halt:
+                    self.running = False
+                    break
+                time.sleep(backoff)
 
     def _compute_daily_bias(self, data_daily: pd.DataFrame) -> dict:
         """Compute hourly bias map from daily data only (5-day structure analysis)."""
@@ -1812,8 +2228,20 @@ class Prometheus:
             "signal_vol_confirm": 0.5,
             "signal_vwap": 0.5,
             "signal_bias": 0.5,
+            "signal_supertrend": 0.0,  # disabled by default (swing unchanged)
+            "signal_ema": 0.0,          # disabled by default (swing unchanged)
         }
         _w = _learned_weights if _learned_weights else _default_weights
+
+        # For intraday: ignore learned regression weights (R² negative = worse than random)
+        if overrides.get("use_default_weights", False):
+            _w = dict(_default_weights)
+
+        # Apply per-indicator weight overrides (e.g., intraday boosts)
+        _weight_overrides = overrides.get("weight_overrides", None)
+        if _weight_overrides:
+            _w = dict(_w)  # defensive copy
+            _w.update(_weight_overrides)
 
         # ================================================================
         # SHARED HELPERS (used by both trend and mean-reversion paths)
@@ -1910,6 +2338,28 @@ class Prometheus:
                 elif price_change < 0 and vol_trend:
                     vol_confirm_dir = "bearish"
 
+            # 9. SUPERTREND (trend filter — live parity, gated by weight)
+            supertrend_direction = None
+            if len(recent_window) >= 20:
+                st_df = calculate_supertrend(recent_window)
+                if not st_df.empty and "supertrend_direction" in st_df.columns:
+                    st_dir = st_df["supertrend_direction"].iloc[-1]
+                    supertrend_direction = "bullish" if st_dir == 1 else "bearish"
+
+            # 10. EMA 9/21 TREND ALIGNMENT (momentum confirmation, gated by weight)
+            ema_direction = None
+            if len(recent_window) >= 21:
+                ema9 = calculate_ema(recent_window["close"], 9)
+                ema21 = calculate_ema(recent_window["close"], 21)
+                if not ema9.empty and not ema21.empty:
+                    ema9_now = float(ema9.iloc[-1])
+                    ema21_now = float(ema21.iloc[-1])
+                    margin = current * 0.001  # 0.1% noise filter
+                    if ema9_now > ema21_now + margin:
+                        ema_direction = "bullish"
+                    elif ema9_now < ema21_now - margin:
+                        ema_direction = "bearish"
+
             return {
                 "recent_sweep": recent_sweep, "sweep_direction": sweep_direction,
                 "fvg_direction": fvg_direction,
@@ -1919,6 +2369,8 @@ class Prometheus:
                 "volume_surge": volume_surge,
                 "vwap_val": vwap_val, "vwap_direction": vwap_direction,
                 "vol_confirm_dir": vol_confirm_dir,
+                "supertrend_direction": supertrend_direction,
+                "ema_direction": ema_direction,
             }
 
         def _price_options(current, direction, atr, data_so_far):
@@ -2084,6 +2536,22 @@ class Prometheus:
             else:
                 bear_score += _w["signal_vwap"]; bear_reasons.append("VWAP")
 
+            # SUPERTREND confluence (weight-gated: 0.0 for swing, >0 for intraday)
+            st_w = _w.get("signal_supertrend", 0)
+            if st_w > 0:
+                if ind.get("supertrend_direction") == "bullish":
+                    bull_score += st_w; bull_reasons.append("ST")
+                elif ind.get("supertrend_direction") == "bearish":
+                    bear_score += st_w; bear_reasons.append("ST")
+
+            # EMA 9/21 alignment (weight-gated: 0.0 for swing, >0 for intraday)
+            ema_w = _w.get("signal_ema", 0)
+            if ema_w > 0:
+                if ind.get("ema_direction") == "bullish":
+                    bull_score += ema_w; bull_reasons.append("EMA")
+                elif ind.get("ema_direction") == "bearish":
+                    bear_score += ema_w; bear_reasons.append("EMA")
+
             if bias == "bullish":
                 bull_score += _w["signal_bias"]
             elif bias == "bearish":
@@ -2212,9 +2680,9 @@ class Prometheus:
             elif primary_interval == "day":
                 time_stop_bars = 7 if capital < 50000 else (6 if capital < 100000 else 5)
             elif primary_interval == "5minute":
-                time_stop_bars = 60 if capital < 50000 else (48 if capital < 100000 else 36)
+                time_stop_bars = 36 if capital < 50000 else (30 if capital < 100000 else 24)
             else:
-                time_stop_bars = 22 if capital < 50000 else (18 if capital < 100000 else 14)
+                time_stop_bars = 16 if capital < 50000 else (12 if capital < 100000 else 10)
 
             be_ratio = overrides.get("breakeven_ratio", 0.6)
 
@@ -2229,6 +2697,8 @@ class Prometheus:
                 "signal_vol_confirm": ind["vol_confirm_dir"] == direction,
                 "signal_vwap": ind["vwap_direction"] == direction,
                 "signal_bias": bias == direction,
+                "signal_supertrend": ind.get("supertrend_direction") == direction,
+                "signal_ema": ind.get("ema_direction") == direction,
                 "bull_score": float(bull_score),
                 "bear_score": float(bear_score),
                 "atr_at_entry": float(atr),
@@ -2817,6 +3287,13 @@ class Prometheus:
         intraday_cfg = get("intraday", {})
         intraday_overrides = {
             "breakeven_ratio": intraday_cfg.get("breakeven_ratio", 0.5),
+            # Force default weights + activate intraday-specific indicators
+            "use_default_weights": True,
+            "weight_overrides": {
+                "signal_supertrend": 1.0,   # Activate Supertrend for intraday
+                "signal_ema": 0.75,          # EMA 9/21 trend alignment
+                "signal_vwap": 1.0,          # Boost session VWAP (key intraday indicator)
+            },
         }
         intraday_overrides.update(overrides)
 
@@ -2921,8 +3398,8 @@ class Prometheus:
         logger.info(f"Starting INTRADAY backtest: {symbol} ({days} days, {bar_interval})" +
                      (" [PARRONDO]" if parrondo else ""))
 
-        # Cap days to yfinance limit for intraday
-        if days > 59:
+        # Cap days to yfinance limit for intraday (unless Angel One is available)
+        if days > 59 and not self.data.angelone:
             logger.warning(f"yfinance limits intraday data to ~60 days. Capping {days} -> 59 days.")
             days = 59
 
@@ -3921,6 +4398,262 @@ class Prometheus:
         print("=" * 70)
 
     # ─────────────────────────────────────────────────────────────────────
+    # MODE: INTRADAY DAILY-PROXY WALK-FORWARD
+    # ─────────────────────────────────────────────────────────────────────
+    def run_intraday_daily_walkforward(
+        self,
+        symbol: str = "NIFTY 50",
+        train_end: str = "2020-12-31",
+        test_start: str = "2021-01-01",
+        dd_throttle: bool = True,
+    ):
+        """
+        Walk-forward validation using daily bars with intraday signal weights.
+        PROXY: Validates whether intraday signal combination (ST+EMA+VWAP)
+        predicts direction over 15yr of statistically significant data.
+        """
+        self.dashboard.show_header()
+        print("\n" + "=" * 70)
+        print("  INTRADAY DAILY-PROXY WALK-FORWARD VALIDATION")
+        print(f"  Symbol: {symbol}")
+        print(f"  Train: earliest...{train_end}  |  Test: {test_start}...present")
+        print("  NOTE: Daily bars with intraday weights (ST+EMA+VWAP) — PROXY only")
+        print("=" * 70)
+
+        intraday_daily_overrides = {
+            "use_default_weights": True,
+            "weight_overrides": {
+                "signal_supertrend": 1.0,
+                "signal_ema": 0.75,
+                "signal_vwap": 1.0,
+            },
+            "time_stop_bars": 3,
+            "breakeven_ratio": 0.5,
+        }
+
+        logger.info(f"Fetching maximum daily data for {symbol}...")
+        data_all = self.data.fetch_historical(
+            symbol, days=6750, interval="day", force_refresh=True
+        )
+
+        if data_all.empty or len(data_all) < 100:
+            logger.error(f"Insufficient data for {symbol}: {len(data_all)} bars")
+            return None
+
+        train_end_ts = pd.Timestamp(train_end)
+        test_start_ts = pd.Timestamp(test_start)
+
+        data_train = data_all[data_all["timestamp"] <= train_end_ts].copy().reset_index(drop=True)
+        data_test = data_all[data_all["timestamp"] >= test_start_ts].copy().reset_index(drop=True)
+
+        if len(data_train) < 100:
+            logger.error(f"Insufficient training data: {len(data_train)} bars")
+            return None
+        if len(data_test) < 50:
+            logger.error(f"Insufficient test data: {len(data_test)} bars")
+            return None
+
+        print(f"\n  Train: {str(data_train['timestamp'].iloc[0])[:10]} to "
+              f"{str(data_train['timestamp'].iloc[-1])[:10]} ({len(data_train)} bars)")
+        print(f"  Test:  {str(data_test['timestamp'].iloc[0])[:10]} to "
+              f"{str(data_test['timestamp'].iloc[-1])[:10]} ({len(data_test)} bars)")
+
+        print("\n" + "=" * 70)
+        print("  IN-SAMPLE — Intraday Weights on Daily Bars")
+        print("=" * 70)
+        result_train, engine_train = self._run_backtest_on_slice(
+            data_train, symbol,
+            f"IntradayProxy_IS_{symbol.replace(' ', '_')}",
+            param_overrides=intraday_daily_overrides,
+            parrondo=True,
+            dd_throttle=dd_throttle,
+        )
+
+        print("\n" + "=" * 70)
+        print("  OUT-OF-SAMPLE — Intraday Weights on Daily Bars")
+        print("=" * 70)
+        result_test, engine_test = self._run_backtest_on_slice(
+            data_test, symbol,
+            f"IntradayProxy_OOS_{symbol.replace(' ', '_')}",
+            param_overrides=intraday_daily_overrides,
+            parrondo=True,
+            dd_throttle=dd_throttle,
+        )
+
+        self._display_walkforward_comparison(
+            result_train, result_test, symbol,
+            engine_train=engine_train,
+            engine_test=engine_test,
+        )
+
+        print("\n  " + "-" * 65)
+        print("  PROXY CAVEAT")
+        print("  " + "-" * 65)
+        print("  This is a DAILY-BAR proxy for intraday signal validation.")
+        print("  Supertrend, EMA 9/21, and VWAP are timeframe-agnostic indicators.")
+        print("  If they predict direction on daily bars over 15yr, the directional")
+        print("  signal transfers to intraday — but execution dynamics differ.")
+        print("  Actual intraday WR/PF may differ due to: noise, spread, session gaps.")
+        print("  " + "-" * 65)
+
+        return result_train, result_test
+
+    # ─────────────────────────────────────────────────────────────────────
+    # MODE: INTRADAY DAILY-PROXY SENSITIVITY SWEEP
+    # ─────────────────────────────────────────────────────────────────────
+    def run_intraday_daily_sensitivity(
+        self,
+        symbol: str = "NIFTY 50",
+        days: int = 5475,
+    ):
+        """
+        Parameter sensitivity sweep using daily bars with intraday signal weights.
+        Tests intraday-relevant parameters on 15yr daily data.
+        """
+        self.dashboard.show_header()
+        print("\n" + "=" * 70)
+        print("  INTRADAY DAILY-PROXY SENSITIVITY SWEEP")
+        print(f"  Symbol: {symbol} | Period: {days} days")
+        print("  NOTE: Daily bars with intraday weights — PROXY for intraday params")
+        print("=" * 70)
+
+        base_overrides = {
+            "use_default_weights": True,
+            "weight_overrides": {
+                "signal_supertrend": 1.0,
+                "signal_ema": 0.75,
+                "signal_vwap": 1.0,
+            },
+            "time_stop_bars": 3,
+            "breakeven_ratio": 0.5,
+        }
+
+        logger.info(f"Fetching {days} days of daily data for {symbol}...")
+        data_all = self.data.fetch_historical(
+            symbol, days=days, interval="day", force_refresh=True
+        )
+
+        if data_all.empty or len(data_all) < 100:
+            logger.error(f"Insufficient data: {len(data_all)} bars")
+            return None
+
+        print(f"\n  Data: {len(data_all)} bars "
+              f"({str(data_all['timestamp'].iloc[0])[:10]} to "
+              f"{str(data_all['timestamp'].iloc[-1])[:10]})")
+
+        param_grid = [
+            ("signal_supertrend",   [0.5, 0.75, 1.0, 1.25]),
+            ("signal_ema",          [0.5, 0.75, 1.0]),
+            ("signal_vwap",         [0.75, 1.0, 1.25]),
+            ("confluence_trending", [2.5, 3.0, 3.5]),
+            ("time_stop_bars",      [3, 4, 5]),
+            ("breakeven_ratio",     [0.4, 0.5, 0.6]),
+        ]
+
+        print("\n  --- Baseline (intraday default params) ---")
+        baseline, _ = self._run_backtest_on_slice(
+            data_all, symbol, "intraday_baseline",
+            param_overrides=base_overrides,
+            verbose=False,
+            parrondo=True,
+        )
+        wr_b = baseline.win_rate * 100 if baseline.win_rate <= 1 else baseline.win_rate
+        print(f"  Baseline: PF={baseline.profit_factor:.2f}, "
+              f"Sharpe={baseline.sharpe_ratio:.2f}, "
+              f"WR={wr_b:.0f}%, "
+              f"DD={baseline.max_drawdown_pct:.1f}%, Trades={baseline.total_trades}")
+
+        results = []
+        for param_name, test_values in param_grid:
+            for val in test_values:
+                sweep_overrides = dict(base_overrides)
+                if param_name.startswith("signal_"):
+                    sweep_overrides["weight_overrides"] = dict(base_overrides["weight_overrides"])
+                    sweep_overrides["weight_overrides"][param_name] = val
+                else:
+                    sweep_overrides[param_name] = val
+
+                label = f"{param_name}={val}"
+                logger.info(f"  Testing: {label}")
+                result, _ = self._run_backtest_on_slice(
+                    data_all, symbol, label,
+                    param_overrides=sweep_overrides,
+                    verbose=False,
+                    parrondo=True,
+                )
+                results.append((param_name, val, result))
+
+        self._display_intraday_daily_sensitivity_results(baseline, results, param_grid)
+
+    def _display_intraday_daily_sensitivity_results(self, baseline, results, param_grid):
+        """Display intraday daily-proxy sensitivity sweep results."""
+        print("\n" + "=" * 70)
+        print("  INTRADAY DAILY-PROXY SENSITIVITY RESULTS")
+        print("=" * 70)
+
+        defaults = {
+            "signal_supertrend": 1.0,
+            "signal_ema": 0.75,
+            "signal_vwap": 1.0,
+            "confluence_trending": 3.0,
+            "time_stop_bars": 3,
+            "breakeven_ratio": 0.5,
+        }
+
+        min_pf = baseline.profit_factor
+        best_wr = baseline.win_rate * 100 if baseline.win_rate <= 1 else baseline.win_rate
+        best_wr_label = "baseline"
+        all_above_1_2 = True
+        any_below_1_0 = False
+
+        for param_name, test_values in param_grid:
+            print(f"\n  --- {param_name} (default: {defaults.get(param_name, '?')}) ---")
+            print(f"  {'Value':>8} {'PF':>8} {'Sharpe':>8} {'WR%':>6} {'DD%':>8} {'Trades':>7} {'vs Base':>10}")
+            print("  " + "-" * 60)
+
+            for pname, val, result in results:
+                if pname != param_name:
+                    continue
+                is_default = (val == defaults.get(param_name))
+                pf_change = ((result.profit_factor - baseline.profit_factor) /
+                             baseline.profit_factor * 100
+                             if baseline.profit_factor > 0 else 0)
+                marker = " <-- default" if is_default else ""
+                wr = result.win_rate * 100 if result.win_rate <= 1 else result.win_rate
+                print(f"  {val:>8} {result.profit_factor:>8.2f} {result.sharpe_ratio:>8.2f} "
+                      f"{wr:>5.0f}% {result.max_drawdown_pct:>7.1f}% {result.total_trades:>7} "
+                      f"{pf_change:>+9.1f}%{marker}")
+
+                min_pf = min(min_pf, result.profit_factor)
+                if wr > best_wr:
+                    best_wr = wr
+                    best_wr_label = f"{param_name}={val}"
+                if result.profit_factor < 1.2:
+                    all_above_1_2 = False
+                if result.profit_factor < 1.0:
+                    any_below_1_0 = True
+
+        print("\n" + "=" * 70)
+        print("  INTRADAY DAILY-PROXY ROBUSTNESS VERDICT")
+        print("=" * 70)
+        print(f"  Baseline PF: {baseline.profit_factor:.2f}")
+        print(f"  Min PF across all variations: {min_pf:.2f}")
+        wr_base = baseline.win_rate * 100 if baseline.win_rate <= 1 else baseline.win_rate
+        print(f"  Baseline WR: {wr_base:.0f}% | Best WR: {best_wr:.0f}% ({best_wr_label})")
+
+        if all_above_1_2:
+            print(f"  Status: ROBUST — PF stays >= 1.2 across all parameter variations")
+        elif not any_below_1_0:
+            print(f"  Status: MODERATELY ROBUST — PF stays >= 1.0 but dips below 1.2")
+        else:
+            print(f"  Status: FRAGILE — PF drops below 1.0 on some variations")
+        print("  The system is NOT sensitive to parameter tuning." if all_above_1_2 else "")
+        print("=" * 70)
+
+        print("\n  PROXY CAVEAT: These results use daily bars as proxy for intraday.")
+        print("  Actual intraday execution may differ due to noise and microstructure.")
+
+    # ─────────────────────────────────────────────────────────────────────
     # MODE: ONE-TIME SCAN
     # ─────────────────────────────────────────────────────────────────────
     def run_scan(self):
@@ -4133,12 +4866,34 @@ class Prometheus:
     def _send_daily_summary(self):
         """Send end-of-day summary."""
         state = self.risk.get_portfolio_state()
+        # Compute winning trades from PaperTrader history
+        winning = 0
+        if isinstance(self.broker, PaperTrader):
+            winning = sum(1 for t in self.broker.trade_history if t.get("net_pnl", 0) > 0)
         self.telegram.alert_daily_summary({
             "daily_pnl": state.realized_pnl_today,
             "total_trades": state.trades_today,
-            "winning_trades": 0,  # would need trade-level tracking
+            "winning_trades": winning,
             "equity": state.capital,
         })
+
+        # Multi-account summary
+        if self.multi_account is not None:
+            self.multi_account.record_all_equity()
+            summaries = self.multi_account.get_summary_table()
+            self.dashboard.show_multi_account_summary(summaries)
+            # Also send to Telegram
+            lines = ["\U0001f4ca <b>MULTI-ACCOUNT DAILY SUMMARY</b>"]
+            for s in summaries:
+                emoji = "\u2705" if s["pnl"] >= 0 else "\u274c"
+                lines.append(
+                    f"{emoji} <b>{s['label']}</b>: Rs {s['equity']:,.0f} "
+                    f"({s['return_pct']:+.1f}%) | {s['trades']} trades | WR {s['win_rate']:.0f}%"
+                )
+            self.telegram.send_message("\n".join(lines))
+
+        # Persist equity state at end of day (crash recovery)
+        self._persist_equity_state()
 
     # ─────────────────────────────────────────────────────────────────────
     # TELEGRAM COMMAND HANDLERS
@@ -4374,7 +5129,7 @@ def main():
 
     parser.add_argument(
         "mode",
-        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning", "semi_auto", "full_auto", "dry_run"],
+        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning", "semi_auto", "full_auto", "dry_run", "collect"],
         help="Operating mode",
     )
     parser.add_argument(
@@ -4482,6 +5237,24 @@ def main():
         default=False,
         help="Run both swing and intraday simultaneously in one process",
     )
+    parser.add_argument(
+        "--intraday-daily",
+        action="store_true",
+        default=False,
+        help="Use daily bars as proxy for intraday signal validation (15yr data with intraday weights)",
+    )
+    parser.add_argument(
+        "--multi-account",
+        action="store_true",
+        default=False,
+        help="Run paper trading with multiple simulated capital levels simultaneously",
+    )
+    parser.add_argument(
+        "--collect-interval",
+        default="5minute",
+        choices=["5minute", "15minute", "60minute", "day"],
+        help="Candle interval for data collection (default: 5minute)",
+    )
 
     args = parser.parse_args()
 
@@ -4532,10 +5305,15 @@ def main():
         prometheus.symbols = [args.symbol]
 
     # Handle graceful shutdown
-    def handle_shutdown(signum, frame):
-        prometheus.stop()
+    # SIGINT: Python's default handler raises KeyboardInterrupt (caught by loop except blocks)
+    # SIGTERM: Convert to KeyboardInterrupt for same cleanup path
+    def _sigterm_handler(signum, frame):
+        raise KeyboardInterrupt
 
-    sig.signal(sig.SIGINT, handle_shutdown)
+    try:
+        sig.signal(sig.SIGTERM, _sigterm_handler)
+    except (OSError, ValueError):
+        pass  # SIGTERM not available on Windows in some contexts
 
     # Dispatch to mode
     if args.mode == "setup":
@@ -4581,6 +5359,8 @@ def main():
         prometheus.run_signal_mode(interval_seconds=args.interval)
 
     elif args.mode == "paper":
+        if getattr(args, "multi_account", False):
+            prometheus.init_multi_account()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
         elif args.intraday:
@@ -4589,9 +5369,13 @@ def main():
             prometheus.run_paper_mode(interval_seconds=args.interval)
 
     elif args.mode == "semi_auto":
+        if getattr(args, "multi_account", False):
+            prometheus.init_multi_account()
         prometheus.run_semi_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "full_auto":
+        if getattr(args, "multi_account", False):
+            prometheus.init_multi_account()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
         elif args.intraday:
@@ -4601,6 +5385,8 @@ def main():
 
     elif args.mode == "dry_run":
         # Same as full_auto but forces PaperTrader (already done above)
+        if getattr(args, "multi_account", False):
+            prometheus.init_multi_account()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
         elif args.intraday:
@@ -4609,7 +5395,15 @@ def main():
             prometheus.run_full_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "walkforward":
-        if args.intraday:
+        if args.intraday_daily:
+            # ── DAILY-PROXY INTRADAY WALK-FORWARD (15yr validation) ──
+            prometheus.run_intraday_daily_walkforward(
+                symbol=args.symbol or "NIFTY 50",
+                train_end=args.train_end,
+                test_start=args.test_start,
+                dd_throttle=args.dd_throttle,
+            )
+        elif args.intraday:
             # ── INTRADAY WALK-FORWARD (separate from swing) ──
             prometheus.run_intraday_walkforward(
                 symbol=args.symbol or "NIFTY 50",
@@ -4633,15 +5427,29 @@ def main():
             )
 
     elif args.mode == "sensitivity":
-        prometheus.run_sensitivity(
-            symbol=args.symbol or "NIFTY 50",
-            days=args.days,
-            strategy=args.strategy,
-        )
+        if args.intraday_daily:
+            # ── DAILY-PROXY INTRADAY SENSITIVITY (15yr sweep) ──
+            prometheus.run_intraday_daily_sensitivity(
+                symbol=args.symbol or "NIFTY 50",
+                days=args.days,
+            )
+        else:
+            prometheus.run_sensitivity(
+                symbol=args.symbol or "NIFTY 50",
+                days=args.days,
+                strategy=args.strategy,
+            )
 
     elif args.mode == "parrondo_tuning":
         prometheus.run_parrondo_tuning(
             symbol=args.symbol or "BANKNIFTY",
+            days=args.days,
+        )
+
+    elif args.mode == "collect":
+        prometheus.run_data_collection(
+            symbol=args.symbol,
+            interval=args.collect_interval,
             days=args.days,
         )
 

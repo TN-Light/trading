@@ -147,31 +147,37 @@ class OrderManager:
         symbol = signal["symbol"]
         action = signal["action"]
         option_type = "CE" if "CE" in action else "PE"
-
-        # Get ATM strike and expiry
-        from prometheus.utils.indian_market import get_atm_strike
-        spot = signal.get("entry_price", 0)
-        strike = get_atm_strike(spot, symbol)
-        expiry = get_expiry_date(symbol)  # next weekly expiry
         lot_size = get_lot_size(symbol)
 
-        # Total quantity must be in lot multiples
-        lots = max(1, quantity // lot_size)
-        total_qty = lots * lot_size
-
-        # Generate tradingsymbol
-        underlying = symbol.replace(" ", "").replace("NIFTY50", "NIFTY").replace("NIFTYBANK", "BANKNIFTY")
-        if "BANK" in symbol.upper():
-            underlying = "BANKNIFTY"
-        elif "FIN" in symbol.upper():
-            underlying = "FINNIFTY"
+        # Use enriched signal data if available (from refine_with_strategy),
+        # otherwise fall back to ATM calculation
+        if signal.get("strike") and signal.get("instrument"):
+            strike = signal["strike"]
+            tradingsymbol = signal["instrument"]
+            estimated_premium = signal.get("entry_price", 0)
+            lots = signal.get("lots", max(1, quantity // lot_size))
+            total_qty = lots * lot_size
         else:
-            underlying = "NIFTY"
+            from prometheus.utils.indian_market import get_atm_strike
+            spot = signal.get("spot_price", signal.get("entry_price", 0))
+            strike = get_atm_strike(spot, symbol)
+            expiry = get_expiry_date(symbol)
+            lots = max(1, quantity // lot_size)
+            total_qty = lots * lot_size
 
-        expiry_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, 'strftime') else str(expiry)
-        tradingsymbol = generate_tradingsymbol(underlying, expiry_str, strike, option_type)
+            underlying = symbol.replace(" ", "").replace("NIFTY50", "NIFTY").replace("NIFTYBANK", "BANKNIFTY")
+            if "BANK" in symbol.upper():
+                underlying = "BANKNIFTY"
+            elif "FIN" in symbol.upper():
+                underlying = "FINNIFTY"
+            else:
+                underlying = "NIFTY"
 
-        # Build entry order
+            expiry_str = expiry.strftime("%Y-%m-%d") if hasattr(expiry, 'strftime') else str(expiry)
+            tradingsymbol = generate_tradingsymbol(underlying, expiry_str, strike, option_type)
+            estimated_premium = signal.get("entry_price", 0)
+
+        # Build entry order (set price for PaperTrader reference)
         entry_order = Order(
             symbol=symbol,
             tradingsymbol=tradingsymbol,
@@ -180,6 +186,7 @@ class OrderManager:
             order_type=OrderType.MARKET,
             product=ProductType.MIS,  # Intraday
             quantity=total_qty,
+            price=estimated_premium,  # reference price for paper fills
             tag=f"P-{signal.get('strategy', 'TREND')[:5]}",
         )
 
@@ -359,8 +366,11 @@ class OrderManager:
         managed.realized_pnl = round(total_pnl, 2)
         managed.status = "closed"
 
-        # Record in risk manager
-        self.risk.record_trade_result(total_pnl)
+        # Record in risk manager (pass trade info so _open_positions gets cleaned)
+        self.risk.record_trade_result(total_pnl, trade={
+            "instrument": managed.tradingsymbol,
+            "symbol": managed.symbol,
+        })
 
         logger.info(
             f"Position closed: {position_id} | "

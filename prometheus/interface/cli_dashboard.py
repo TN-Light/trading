@@ -441,3 +441,46 @@ class CLIDashboard:
             "[dim]Adj Conf = Confluence x Regime Multiplier. "
             "Ranked highest-first. HOLD signals excluded from ranking.[/dim]"
         )
+
+    def show_multi_account_summary(self, accounts: list):
+        """Display comparison table of all simulated paper trading accounts."""
+        if not accounts:
+            return
+        if not self.console:
+            for acc in accounts:
+                print(f"  {acc['label']}: Rs {acc['equity']:,.0f} ({acc['return_pct']:+.1f}%)")
+            return
+
+        table = Table(
+            title="Multi-Account Paper Trading",
+            box=box.ROUNDED,
+            border_style="cyan",
+        )
+        table.add_column("Account", style="bold")
+        table.add_column("Capital", justify="right")
+        table.add_column("Equity", justify="right")
+        table.add_column("P&L", justify="right")
+        table.add_column("Return", justify="right")
+        table.add_column("Trades", justify="right")
+        table.add_column("WR", justify="right")
+        table.add_column("Open", justify="right")
+        table.add_column("Costs", justify="right")
+
+        for acc in accounts:
+            pnl = acc.get("pnl", 0)
+            ret = acc.get("return_pct", 0)
+            color = "green" if pnl >= 0 else "red"
+            table.add_row(
+                acc["label"],
+                f"Rs {acc['initial']:,.0f}",
+                f"Rs {acc['equity']:,.0f}",
+                f"[{color}]Rs {pnl:+,.0f}[/{color}]",
+                f"[{color}]{ret:+.1f}%[/{color}]",
+                str(acc.get("trades", 0)),
+                f"{acc.get('win_rate', 0):.0f}%",
+                str(acc.get("open_positions", 0)),
+                f"Rs {acc.get('total_costs', 0):,.0f}",
+            )
+
+        self.console.print()
+        self.console.print(table)

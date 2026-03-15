@@ -375,6 +375,26 @@ class DataEngine:
         self.yf = YFinanceFallback()
         self.nse = NSEDirectFeed()
 
+        # Angel One for extended intraday history (up to 5yr of 5min data)
+        self.angelone = None
+        try:
+            from prometheus.data.angelone_fetcher import create_angelone_fetcher
+            self.angelone = create_angelone_fetcher()
+            if self.angelone:
+                logger.info("Angel One data source available (extended intraday history)")
+        except Exception:
+            pass
+
+        # Angel One option chain (real premiums, OI, Greeks)
+        self.angelone_options = None
+        try:
+            from prometheus.data.angelone_options import create_angelone_option_chain
+            self.angelone_options = create_angelone_option_chain()
+            if self.angelone_options:
+                logger.info("Angel One option chain available (real premiums + Greeks)")
+        except Exception:
+            pass
+
         from prometheus.data.store import DataStore
         self.store = DataStore()
 
@@ -411,6 +431,16 @@ class DataEngine:
                     self.store.save_ohlcv(df, symbol, interval)
                     return df
 
+        # Try Angel One for intraday intervals (5min/15min) when days > 59
+        # yfinance caps at ~60 days for intraday, Angel One gives up to 5 years
+        _intraday_intervals = {"5minute", "5m", "15minute", "15m", "minute", "1m"}
+        if self.angelone and interval in _intraday_intervals and days > 59:
+            df = self.angelone.fetch_historical(symbol, days=days, interval=interval)
+            if not df.empty:
+                self.store.save_ohlcv(df, symbol, interval)
+                logger.info(f"Fetched {len(df)} rows for {symbol} via Angel One ({interval})")
+                return df
+
         # Fallback to yfinance
         yf_interval_map = {
             "day": "1d", "week": "1wk", "month": "1mo",
@@ -444,22 +474,45 @@ class DataEngine:
 
     def get_vix(self) -> float:
         """
-        Fetch India VIX for auto-interval selection.
-
-        Returns VIX value or 15.0 (moderate default) if unavailable.
+        Fetch India VIX. Tries NSE → yfinance → safe 15.0 default.
         """
+        # Try NSE direct
+        try:
+            vix = self.nse.get_india_vix()
+            if vix and vix > 0:
+                return float(vix)
+        except Exception:
+            pass
+
+        # yfinance fallback
         try:
             import yfinance as yf
-            vix = yf.Ticker("^INDIAVIX")
-            hist = vix.history(period="1d")
+            ticker = yf.Ticker("^INDIAVIX")
+            hist = ticker.history(period="1d")
             if not hist.empty:
                 return float(hist["Close"].iloc[-1])
         except Exception:
             pass
-        return 15.0
+
+        return 15.0  # moderate default
 
     def fetch_options_chain(self, symbol: str = "NIFTY 50") -> pd.DataFrame:
-        """Fetch and parse options chain data."""
+        """Fetch and parse options chain data. Prefers Angel One, falls back to NSE."""
+        # Try Angel One first (authenticated, reliable)
+        if self.angelone_options:
+            try:
+                spot = self.get_spot_price(symbol) or 0
+                df = self.angelone_options.get_option_chain(
+                    symbol, spot_price=spot, strikes_around_atm=10,
+                )
+                if not df.empty:
+                    df["symbol"] = symbol
+                    self.store.save_options_chain(df)
+                    return df
+            except Exception as e:
+                logger.warning(f"Angel One option chain failed: {e}, falling back to NSE")
+
+        # Fallback: NSE scraping
         raw = self.nse.get_options_chain(symbol)
         if raw is None:
             return pd.DataFrame()
@@ -481,10 +534,3 @@ class DataEngine:
 
         # yfinance fallback
         return self.yf.get_current_price(symbol)
-
-    def get_vix(self) -> Optional[float]:
-        """Get current India VIX."""
-        vix = self.nse.get_india_vix()
-        if vix:
-            return vix
-        return self.yf.get_current_price("INDIA VIX")

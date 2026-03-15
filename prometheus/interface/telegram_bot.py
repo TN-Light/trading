@@ -110,6 +110,7 @@ class TelegramBot:
                 self._session = self._make_session(self._proxy_config)
                 if self._try_connect(self._session, self._base_url):
                     self._enabled = True
+                    self._connection_strategy = "proxy"
                     logger.info("Telegram connected via user proxy")
                     return
                 logger.warning(f"Telegram user proxy failed: {self._proxy_config}")
@@ -118,6 +119,7 @@ class TelegramBot:
             self._session = self._make_session()
             if self._try_connect(self._session, self._base_url):
                 self._enabled = True
+                self._connection_strategy = "direct"
                 logger.info("Telegram connected directly")
                 return
 
@@ -146,6 +148,7 @@ class TelegramBot:
             if self._try_connect(session, self._base_url):
                 self._session = session
                 self._enabled = True
+                self._connection_strategy = "sni"
                 logger.info("Telegram connected via SNI workaround")
                 return
 
@@ -209,6 +212,15 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Telegram send error: {e}")
             return False
+
+    def send_message_async(self, text: str, parse_mode: str = "HTML"):
+        """Send message in background thread so trading loop isn't blocked."""
+        t = threading.Thread(
+            target=self.send_message,
+            args=(text, parse_mode),
+            daemon=True,
+        )
+        t.start()
 
     def request_confirmation(self, signal: Dict, timeout: int = 1800) -> bool:
         """
@@ -287,6 +299,26 @@ class TelegramBot:
 
     def _poll_loop(self):
         """Long-poll getUpdates for incoming messages."""
+        # Use separate session for thread safety (main thread uses self._session)
+        # Must replicate the same connection strategy (proxy / direct / SNI)
+        strategy = getattr(self, '_connection_strategy', 'direct')
+        if strategy == "sni":
+            import ssl
+            import urllib3
+            class NoSNIAdapter(self._requests.adapters.HTTPAdapter):
+                def init_poolmanager(self, *args, **kwargs):
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    kwargs['ssl_context'] = ctx
+                    super().init_poolmanager(*args, **kwargs)
+            poll_session = self._requests.Session()
+            poll_session.mount("https://", NoSNIAdapter())
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        elif strategy == "proxy":
+            poll_session = self._make_session(self._proxy_config)
+        else:
+            poll_session = self._make_session()
         while self._listening:
             try:
                 url = f"{self._base_url}/bot{self.bot_token}/getUpdates"
@@ -294,7 +326,7 @@ class TelegramBot:
                     "offset": self._last_update_id + 1,
                     "timeout": 10,
                 }
-                resp = self._session.get(url, params=params, timeout=15)
+                resp = poll_session.get(url, params=params, timeout=15)
                 if resp.status_code != 200:
                     time.sleep(5)
                     continue
@@ -578,9 +610,9 @@ class TelegramBot:
         self.send_message(text)
 
     def alert_system_error(self, error: str):
-        """Alert on critical system error."""
+        """Alert on critical system error (non-blocking)."""
         text = (
             f"\U0001f525 <b>SYSTEM ERROR</b>\n\n"
             f"{error[:300]}"
         )
-        self.send_message(text)
+        self.send_message_async(text)
