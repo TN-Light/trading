@@ -2868,14 +2868,33 @@ class Prometheus:
 
             mr_be = overrides.get("mr_breakeven_ratio", 0.4)
 
+            # Build signal features for proper trade attribution
+            mr_signal_features = {
+                "bull_score": float(mr_bull_score),
+                "bear_score": float(mr_bear_score),
+                "atr_at_entry": float(atr),
+                "regime_at_entry": bar_regime.regime.value if bar_regime else "unknown",
+                "signal_liqsweep": False,
+                "signal_fvg": False,
+                "signal_vp": ind["vp_direction"] == direction,
+                "signal_ote": False,
+                "signal_rsi_div": ind["div_direction"] == direction,
+                "signal_vol_surge": False,
+                "signal_vol_confirm": False,
+                "signal_vwap": "MR_VWAP" in reasons,
+                "signal_bias": bias == direction,
+            }
+
             sig = _build_signal(direction, premium, premium_sl, premium_target,
                                 total_quantity, reasons, time_stop_bars, mr_be, "mr",
+                                signal_features=mr_signal_features,
                                 signal_spot=current, atr_at_signal=atr,
                                 option_expiry_date=expiry_str)
             sig["delta"] = delta
             return sig
 
-        def _generate_expiry_spread_signal(data_so_far, recent_window, current, prev_bar, atr):
+        def _generate_expiry_spread_signal(data_so_far, recent_window, current, prev_bar, atr,
+                                           regime_name="unknown"):
             """
             Expiry debit spread signal — fires on DTE 0-2 days.
 
@@ -2982,11 +3001,27 @@ class Prometheus:
             except Exception:
                 expiry_str = ""
 
+            expiry_signal_features = {
+                "bull_score": 0.0,
+                "bear_score": 0.0,
+                "atr_at_entry": float(atr),
+                "regime_at_entry": regime_name,
+                "signal_liqsweep": False,
+                "signal_fvg": False,
+                "signal_vp": False,
+                "signal_ote": False,
+                "signal_rsi_div": False,
+                "signal_vol_surge": False,
+                "signal_vol_confirm": False,
+                "signal_vwap": False,
+                "signal_bias": False,
+            }
+
             sig = _build_signal(
                 direction, net_debit, premium_sl, premium_target,
                 total_quantity, [f"Spread_DTE{dte}"], time_stop, 0.3,
                 strategy_prefix="expiry",
-                signal_features=None,
+                signal_features=expiry_signal_features,
                 signal_spot=current,
                 atr_at_signal=atr,
                 option_expiry_date=expiry_str)
@@ -3039,10 +3074,7 @@ class Prometheus:
                 # ROUTE based on detected regime
                 if regime_value == "volatile":
                     # Capital preservation — skip trading in volatile regime
-                    # But still try expiry spread (defined risk, works in all regimes)
-                    return _generate_expiry_spread_signal(
-                        data_so_far, recent_window, current, prev_bar, atr
-                    )
+                    return None
                 elif regime_value in ("accumulation", "distribution"):
                     # MEAN-REVERSION mode
                     mr_signal = _generate_mean_reversion_signal(
@@ -3051,12 +3083,7 @@ class Prometheus:
                     )
                     if mr_signal:
                         return mr_signal
-                    # Fallback: try expiry spread, then trend with higher confluence
-                    expiry_sig = _generate_expiry_spread_signal(
-                        data_so_far, recent_window, current, prev_bar, atr
-                    )
-                    if expiry_sig:
-                        return expiry_sig
+                    # Fallback: trend with higher confluence
                     conf_sideways = overrides.get("confluence_sideways", 3.5)
                     return _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
@@ -3071,19 +3098,14 @@ class Prometheus:
                     )
                     if trend_sig:
                         return trend_sig
-                    # Fallback: try expiry spread when trend doesn't fire
-                    return _generate_expiry_spread_signal(
-                        data_so_far, recent_window, current, prev_bar, atr
-                    )
+                    return None
             else:
                 # NON-PARRONDO: per-bar regime for confluence threshold only
                 conf_trending = overrides.get("confluence_trending", 3.0)
                 conf_sideways = overrides.get("confluence_sideways", 3.5)
                 if regime_value == "volatile":
-                    # Try expiry spread even in volatile (defined risk)
-                    return _generate_expiry_spread_signal(
-                        data_so_far, recent_window, current, prev_bar, atr
-                    )
+                    # Capital preservation — skip volatile regime
+                    return None
                 elif regime_value in ("accumulation", "distribution", "unknown"):
                     min_confluence = conf_sideways
                 else:
@@ -3095,10 +3117,7 @@ class Prometheus:
                 )
                 if trend_sig:
                     return trend_sig
-                # Fallback: try expiry spread
-                return _generate_expiry_spread_signal(
-                    data_so_far, recent_window, current, prev_bar, atr
-                )
+                return None
 
         # Attach transition log to the closure for post-backtest analysis
         pro_signal_generator.regime_transitions = _regime_transitions
@@ -5146,7 +5165,7 @@ def main():
     parser.add_argument(
         "--strategy",
         default="trend",
-        choices=["trend", "volatility", "expiry"],
+        choices=["trend", "volatility"],
         help="Strategy to backtest (default: trend)",
     )
     parser.add_argument(

@@ -349,9 +349,9 @@ class RegimeDetector:
     ) -> list:
         """Map regime to recommended strategy modules."""
         strategy_map = {
-            MarketRegime.ACCUMULATION: ["mean_reversion", "expiry"],
+            MarketRegime.ACCUMULATION: ["mean_reversion", "trend"],
             MarketRegime.MARKUP: ["trend"],
-            MarketRegime.DISTRIBUTION: ["mean_reversion", "expiry"],
+            MarketRegime.DISTRIBUTION: ["mean_reversion", "trend"],
             MarketRegime.MARKDOWN: ["trend"],
             MarketRegime.VOLATILE: ["volatility"],
             MarketRegime.UNKNOWN: ["trend"],

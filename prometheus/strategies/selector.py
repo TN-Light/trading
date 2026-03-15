@@ -24,10 +24,10 @@ from prometheus.utils.logger import logger
 # Strategy activation matrix
 REGIME_STRATEGY_MAP = {
     MarketRegime.ACCUMULATION: {
-        "primary": "expiry",
+        "primary": "trend",
         "secondary": "mean_reversion",
         "options_bias": "neutral",
-        "description": "Low volatility range — harvest theta with defined-risk spreads",
+        "description": "Low volatility range — trend with higher confluence or mean-reversion",
     },
     MarketRegime.MARKUP: {
         "primary": "trend",
@@ -78,7 +78,7 @@ class StrategySelector:
         self.config = config
         self.capital = capital
         self.regime_detector = RegimeDetector()
-        self.active_modules = config.get("active_modules", ["trend", "volatility", "expiry"])
+        self.active_modules = config.get("active_modules", ["trend", "volatility"])
 
     def select(
         self,
