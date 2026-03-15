@@ -57,6 +57,10 @@ class TrailingState:
     breakeven_ratio: float = 0.6
     risk_distance: float = 0.0
 
+    # Intraday support
+    bar_interval: str = "day"        # "day", "15minute", "5minute"
+    trade_mode: str = "swing"        # "swing" or "intraday"
+
     def __post_init__(self):
         if self.risk_distance == 0.0 and self.entry_premium > 0:
             self.risk_distance = (
@@ -188,6 +192,8 @@ class PositionMonitor:
 
                 # Time stop: increment bar count once per trading day at 3:30 PM
                 self._check_daily_bar_increment()
+                # Intraday: increment bar count every N minutes
+                self._check_intraday_bar_increment()
 
                 for pid, state in positions:
                     try:
@@ -369,7 +375,7 @@ class PositionMonitor:
     # ------------------------------------------------------------------
 
     def _check_daily_bar_increment(self):
-        """Increment bar count once per trading day at 3:30 PM."""
+        """Increment bar count once per trading day at 3:30 PM (swing only)."""
         now = datetime.now()
         today_str = now.strftime("%Y-%m-%d")
 
@@ -382,9 +388,33 @@ class PositionMonitor:
 
         with self._lock:
             for state in self._positions.values():
-                state.entry_bar_count += 1
+                if state.bar_interval == "day":
+                    state.entry_bar_count += 1
         self._last_bar_increment_date = today_str
         logger.info(
             f"PositionMonitor: daily bar count incremented "
             f"({len(self._positions)} positions)"
         )
+
+    def _check_intraday_bar_increment(self):
+        """Increment bar count for intraday positions based on elapsed time."""
+        now = datetime.now()
+
+        with self._lock:
+            for state in self._positions.values():
+                if state.bar_interval == "day":
+                    continue
+
+                interval_minutes = 5 if state.bar_interval == "5minute" else 15
+
+                # Track last increment per-position using _last_bar_ts
+                last_ts = getattr(state, "_last_bar_ts", None)
+                if last_ts is None:
+                    state._last_bar_ts = now
+                    continue
+
+                elapsed = (now - last_ts).total_seconds()
+                if elapsed >= interval_minutes * 60:
+                    bars_to_add = int(elapsed // (interval_minutes * 60))
+                    state.entry_bar_count += bars_to_add
+                    state._last_bar_ts = now

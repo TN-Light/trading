@@ -264,6 +264,27 @@ position_monitor:
   confirmation_timeout: 1800   # semi_auto: seconds to wait for /confirm
 
 # ---------------------------------------------------------------------------
+# Intraday Trading Configuration
+# ---------------------------------------------------------------------------
+intraday:
+  enabled: false                    # Must be explicitly enabled via --intraday flag
+  scan_interval_seconds: 180        # Scan every 3 minutes during market hours
+  bar_interval: "auto"              # auto | 5minute | 15minute
+  vix_threshold_5min: 18.0          # Use 5min bars when VIX > 18
+  skip_first_minutes: 30            # Skip opening 30 minutes (9:15-9:45)
+  last_entry_time: "14:30"          # No new entries after 2:30 PM
+  square_off_time: "15:15"          # Force close all intraday at 3:15 PM
+  max_daily_trades: 4               # Separate limit for intraday trades
+  risk_per_trade_pct: 2.0           # Risk per intraday trade
+  time_stop_bars_5min: 60           # ~5 hours in 5-min bars
+  time_stop_bars_15min: 20          # ~5 hours in 15-min bars
+  breakeven_ratio: 0.5              # Faster breakeven for intraday
+  trailing_poll_seconds: 10         # Faster polling than swing (15s)
+  instruments:                      # Instruments for intraday
+    - "NIFTY 50"
+    - "NIFTY BANK"
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logging:

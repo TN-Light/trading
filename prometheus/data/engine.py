@@ -426,6 +426,38 @@ class DataEngine:
 
         return df
 
+    def fetch_intraday(
+        self,
+        symbol: str,
+        interval: str = "5minute",
+        days: int = 5,
+    ) -> pd.DataFrame:
+        """
+        Fetch intraday bars — always fresh for live scanning.
+
+        yfinance limitation: 15-min delay on intraday data.
+        Kite provides real-time when connected.
+        """
+        return self.fetch_historical(
+            symbol, days=days, interval=interval, force_refresh=True
+        )
+
+    def get_vix(self) -> float:
+        """
+        Fetch India VIX for auto-interval selection.
+
+        Returns VIX value or 15.0 (moderate default) if unavailable.
+        """
+        try:
+            import yfinance as yf
+            vix = yf.Ticker("^INDIAVIX")
+            hist = vix.history(period="1d")
+            if not hist.empty:
+                return float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+        return 15.0
+
     def fetch_options_chain(self, symbol: str = "NIFTY 50") -> pd.DataFrame:
         """Fetch and parse options chain data."""
         raw = self.nse.get_options_chain(symbol)

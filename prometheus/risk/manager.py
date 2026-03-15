@@ -108,6 +108,10 @@ class RiskManager:
         self.pause_duration_minutes = config.get("pause_duration_minutes", 60)
         self.drawdown_halt_pct = config.get("drawdown_halt_pct", 10.0)
 
+        # Intraday limits
+        self.max_intraday_trades = config.get("max_intraday_trades", 4)
+        self._intraday_trades_today = 0
+
         # State tracking
         self._daily_pnl = 0.0
         self._weekly_pnl = 0.0
@@ -185,6 +189,14 @@ class RiskManager:
             violations.append(
                 f"Max daily trades reached: {self._trades_today} "
                 f"(limit: {self.max_daily_trades})"
+            )
+
+        # 5b. Intraday trade limit (separate counter)
+        trade_mode = trade.get("trade_mode", "swing")
+        if trade_mode == "intraday" and self._intraday_trades_today >= self.max_intraday_trades:
+            violations.append(
+                f"Max intraday trades reached: {self._intraday_trades_today} "
+                f"(limit: {self.max_intraday_trades})"
             )
 
         # 6. Max open positions
@@ -367,6 +379,8 @@ class RiskManager:
     def record_trade_entry(self, trade: Dict):
         """Record a new trade entry."""
         self._trades_today += 1
+        if trade.get("trade_mode") == "intraday":
+            self._intraday_trades_today += 1
         self._open_positions.append(trade)
 
     def get_portfolio_state(self) -> PortfolioState:
@@ -481,6 +495,7 @@ class RiskManager:
 
             self._daily_pnl = 0.0
             self._trades_today = 0
+            self._intraday_trades_today = 0
             self._today = today
 
     def force_close_all(self) -> List[Dict]:

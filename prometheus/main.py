@@ -49,9 +49,9 @@ from prometheus.data.engine import DataEngine
 from prometheus.data.store import DataStore
 
 from prometheus.signals.technical import (
-    calculate_vwap, calculate_volume_profile, detect_liquidity_sweeps,
-    detect_fair_value_gaps, fibonacci_ote_levels, calculate_rsi,
-    detect_rsi_divergence, calculate_atr, calculate_supertrend,
+    calculate_vwap, calculate_session_vwap, calculate_volume_profile,
+    detect_liquidity_sweeps, detect_fair_value_gaps, fibonacci_ote_levels,
+    calculate_rsi, detect_rsi_divergence, calculate_atr, calculate_supertrend,
     calculate_ema, TechnicalSignal
 )
 from prometheus.signals.oi_analyzer import OIAnalyzer
@@ -338,6 +338,141 @@ class Prometheus:
                     signal.risk_reward = round(abs(signal.target - spot) / risk, 2)
 
         return signal
+
+    # ─────────────────────────────────────────────────────────────────────
+    # INTRADAY ANALYSIS PIPELINE
+    # ─────────────────────────────────────────────────────────────────────
+    def analyze_intraday(self, symbol: str, bar_interval: str = "5minute") -> Optional[FusedSignal]:
+        """
+        Intraday analysis pipeline — uses 5min/15min bars as primary.
+
+        Key differences from analyze():
+        1. Primary data = 5min or 15min bars (not daily)
+        2. Bias from one-level-up timeframe
+        3. Session-anchored VWAP (resets at market open)
+        4. Tags signal as intraday with MIS product
+        """
+        logger.info(f"Intraday analyzing {symbol} ({bar_interval})...")
+
+        # 1. Fetch data
+        data_primary = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+        if bar_interval == "5minute":
+            data_bias = self.data.fetch_historical(symbol, days=10, interval="15minute")
+        else:
+            data_bias = self.data.fetch_historical(symbol, days=30, interval="60minute")
+        data_daily = self.data.fetch_historical(symbol, days=120, interval="day")
+
+        if data_primary.empty:
+            logger.warning(f"No intraday data for {symbol}")
+            return None
+
+        spot = data_primary["close"].iloc[-1]
+
+        # 2. Technical signals
+        tech_signals = []
+
+        # Session VWAP (key for intraday)
+        vwap_df = calculate_session_vwap(data_primary)
+        if not vwap_df.empty and "vwap" in vwap_df.columns:
+            last_vwap = vwap_df["vwap"].iloc[-1]
+            if last_vwap > 0:
+                vwap_dir = "bullish" if spot > last_vwap else "bearish"
+                vwap_dist = abs(spot - last_vwap) / last_vwap
+                tech_signals.append(TechnicalSignal(
+                    name="vwap",
+                    direction=vwap_dir,
+                    strength=min(vwap_dist * 20, 0.9),
+                    timeframe=bar_interval,
+                ))
+
+        # Supertrend on primary
+        if len(data_primary) >= 20:
+            st_df = calculate_supertrend(data_primary)
+            if not st_df.empty and "supertrend_direction" in st_df.columns:
+                st_dir = st_df["supertrend_direction"].iloc[-1]
+                tech_signals.append(TechnicalSignal(
+                    name="supertrend",
+                    direction="bullish" if st_dir == 1 else "bearish",
+                    strength=0.65,
+                    timeframe=bar_interval,
+                ))
+
+        # RSI Divergence on bias TF
+        if not data_bias.empty and len(data_bias) > 44:
+            div_result = detect_rsi_divergence(data_bias, rsi_period=14)
+            if div_result:
+                tech_signals.append(TechnicalSignal(
+                    name="rsi_divergence",
+                    direction=div_result["direction"],
+                    strength=div_result.get("strength", 0.5),
+                    timeframe="bias",
+                ))
+
+        # FVG on primary
+        if len(data_primary) > 3:
+            fvgs = detect_fair_value_gaps(data_primary)
+            for f in fvgs[-3:]:
+                direction = "bullish" if f.get("type") == "bullish_fvg" else "bearish"
+                tech_signals.append(TechnicalSignal(
+                    name="fvg_imbalance",
+                    direction=direction,
+                    strength=min(f.get("gap_pct", 0.1) / 0.5, 0.8),
+                    timeframe=bar_interval,
+                ))
+
+        # Liquidity Sweeps on primary
+        if len(data_primary) > 10:
+            sweeps = detect_liquidity_sweeps(data_primary)
+            for s in sweeps[-3:]:
+                direction = "bullish" if s.get("type") == "bullish_sweep" else "bearish"
+                tech_signals.append(TechnicalSignal(
+                    name="liquidity_sweep",
+                    direction=direction,
+                    strength=s.get("strength", 0.5),
+                    timeframe=bar_interval,
+                ))
+
+        # ATR from primary for intraday SL
+        atr_value = 0.0
+        if len(data_primary) >= 15:
+            atr_series = calculate_atr(data_primary)
+            if not atr_series.empty:
+                atr_value = float(atr_series.iloc[-1])
+
+        # 3. Regime from daily (for strategy selection)
+        regime = self.regime_detector.detect(data_daily) if not data_daily.empty else None
+
+        # 4. Fuse
+        signal = self.fusion.fuse(
+            symbol=symbol,
+            spot_price=spot,
+            technical_signals=tech_signals,
+            oi_signals=[],
+            regime=regime,
+            ai_sentiment=None,
+        )
+
+        # Attach ATR-based SL
+        if signal and atr_value > 0:
+            if signal.stop_loss == 0 or signal.stop_loss == spot * 0.985:
+                sl = self.risk.calculate_dynamic_stop_loss(spot, atr_value, signal.direction)
+                signal.stop_loss = sl
+                risk = abs(spot - sl)
+                if risk > 0 and signal.target > 0:
+                    signal.risk_reward = round(abs(signal.target - spot) / risk, 2)
+
+        return signal
+
+    def _select_intraday_interval(self) -> str:
+        """Auto-select 5min vs 15min based on VIX."""
+        intraday_cfg = get("intraday", {})
+        configured = intraday_cfg.get("bar_interval", "auto")
+        if configured != "auto":
+            return configured
+
+        vix = self.data.get_vix()
+        threshold = intraday_cfg.get("vix_threshold_5min", 18.0)
+        return "5minute" if vix > threshold else "15minute"
 
     def scan_all(self) -> list:
         """Scan all configured symbols and return signals."""
@@ -793,6 +928,7 @@ class Prometheus:
             "stop_loss": "SL Hit",
             "target": "Target Hit",
             "time_stop": "Time Stop",
+            "intraday_square_off": "Intraday Square-Off (3:15 PM)",
         }
         label = reason_labels.get(reason, reason)
         pnl_text = f"Rs {pnl:+,.0f}" if pnl is not None else "unknown"
@@ -1145,8 +1281,226 @@ class Prometheus:
                 time.sleep(30)
 
     # ─────────────────────────────────────────────────────────────────────
-    # BACKTEST HELPERS (shared by backtest, walkforward, sensitivity)
+    # MODE: INTRADAY TRADING
     # ─────────────────────────────────────────────────────────────────────
+
+    def run_intraday_mode(self, interval_seconds: int = 180):
+        """
+        Intraday trading — continuous scanning during market hours.
+
+        Timing:
+        - 9:15-9:45: Skip (opening noise)
+        - 9:45-14:30: Scan every N minutes, execute trades
+        - 14:30-15:15: Monitor only, no new entries
+        - 15:15: Force close all intraday positions
+
+        Works with paper, dry_run, semi_auto, full_auto broker types.
+        """
+        self.running = True
+        self.dashboard.show_header()
+        self._setup_telegram_commands()
+        self.telegram.alert_system_start()
+
+        # Start position monitor with faster intraday polling
+        intraday_cfg = get("intraday", {})
+        from prometheus.execution.position_monitor import PositionMonitor
+        poll_s = intraday_cfg.get("trailing_poll_seconds", 10)
+        self.position_monitor = PositionMonitor(
+            broker=self.broker,
+            poll_interval=poll_s,
+            on_exit=self._handle_position_exit,
+            on_trailing_update=self._handle_trailing_update,
+            on_state_changed=self._handle_state_persist,
+        )
+        self.position_monitor.start()
+        self._restore_persisted_positions()
+
+        is_dry_run = isinstance(self.broker, PaperTrader)
+        mode_label = "INTRADAY DRY" if is_dry_run else "INTRADAY LIVE"
+
+        logger.info(f"Starting {mode_label} mode...")
+        self.telegram.send_message(
+            f"\U0001f4c8 <b>{mode_label} MODE STARTED</b>\n"
+            f"Capital: Rs {self.capital:,.0f}\n"
+            f"Scan every {interval_seconds}s | Square-off at 3:15 PM"
+        )
+
+        _today_traded_symbols = set()
+        _intraday_trades_today = 0
+        _did_square_off = False
+        _last_scan_time = None
+
+        max_trades = intraday_cfg.get("max_daily_trades", 4)
+        skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
+        last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
+        square_off_str = intraday_cfg.get("square_off_time", "15:15")
+        last_entry_h, last_entry_m = map(int, last_entry_str.split(":"))
+        square_off_h, square_off_m = map(int, square_off_str.split(":"))
+        last_entry_time = dtime(last_entry_h, last_entry_m)
+        square_off_time = dtime(square_off_h, square_off_m)
+        intraday_instruments = intraday_cfg.get("instruments", self.symbols)
+        be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
+
+        while self.running:
+            try:
+                now = datetime.now()
+
+                if not is_trading_day(now.date()):
+                    self.dashboard.show_status_line(f"{mode_label}: Holiday. Waiting...")
+                    time.sleep(60)
+                    continue
+
+                current_time = now.time()
+
+                # Pre-market reset
+                if current_time < dtime(9, 15):
+                    _today_traded_symbols.clear()
+                    _intraday_trades_today = 0
+                    _did_square_off = False
+                    _last_scan_time = None
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Pre-market. Scan starts at 9:45 AM."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # Skip opening noise (9:15-9:45)
+                market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+                if (now - market_open).total_seconds() < skip_minutes * 60:
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Skipping opening noise. Scan at 9:45 AM."
+                    )
+                    time.sleep(30)
+                    continue
+
+                # MANDATORY SQUARE-OFF at 3:15 PM
+                if current_time >= square_off_time and not _did_square_off:
+                    self._square_off_intraday_positions()
+                    _did_square_off = True
+                    time.sleep(60)
+                    continue
+
+                # After square-off — just wait
+                if _did_square_off:
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Squared off. Market closing soon."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # No new entries after 2:30 PM — monitor only
+                if current_time >= last_entry_time:
+                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
+                        f"Square-off at {square_off_str}."
+                    )
+                    time.sleep(interval_seconds)
+                    continue
+
+                # Rate limit scans
+                if _last_scan_time and (now - _last_scan_time).total_seconds() < interval_seconds:
+                    time.sleep(10)
+                    continue
+
+                # Max trades check
+                if _intraday_trades_today >= max_trades:
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Max trades ({max_trades}) reached. Monitoring."
+                    )
+                    time.sleep(interval_seconds)
+                    continue
+
+                # ── INTRADAY SCAN ──
+                bar_interval = self._select_intraday_interval()
+                logger.info(f"{mode_label}: Scanning ({bar_interval})...")
+
+                for symbol in intraday_instruments:
+                    if symbol in _today_traded_symbols:
+                        continue
+
+                    signal = self.analyze_intraday(symbol, bar_interval)
+                    if signal and signal.action != "HOLD":
+                        self.telegram.alert_new_signal(signal.to_dict())
+                        refined = self.refine_with_strategy(signal)
+
+                        position = self.order_manager.execute_signal(
+                            refined, confirm=False
+                        )
+                        if position:
+                            _today_traded_symbols.add(symbol)
+                            _intraday_trades_today += 1
+                            # Register with monitor (intraday-tagged)
+                            ts = self.order_manager.create_trailing_state(
+                                position.position_id
+                            )
+                            if ts:
+                                ts.trade_mode = "intraday"
+                                ts.bar_interval = bar_interval
+                                ts.breakeven_ratio = be_ratio
+                                intraday_ts_cfg = intraday_cfg.get(
+                                    f"time_stop_bars_{bar_interval.replace('minute', 'min')}",
+                                    intraday_cfg.get("time_stop_bars_15min", 20)
+                                )
+                                ts.max_bars = intraday_ts_cfg
+                                self.position_monitor.add_position(ts)
+                                self._handle_state_persist(ts)
+                            self.telegram.send_message(
+                                f"\u2705 Intraday trade: {position.position_id} "
+                                f"({bar_interval})"
+                            )
+
+                _last_scan_time = now
+                n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                self.dashboard.show_status_line(
+                    f"{mode_label}: {n_pos} position(s) | "
+                    f"Trades: {_intraday_trades_today}/{max_trades} | "
+                    f"Next scan in {interval_seconds}s"
+                )
+                time.sleep(10)
+
+            except KeyboardInterrupt:
+                self.running = False
+                self._square_off_intraday_positions()
+                if self.position_monitor:
+                    self.position_monitor.stop()
+                logger.info(f"{mode_label} stopped by user.")
+                break
+            except Exception as e:
+                logger.error(f"{mode_label} error: {e}")
+                self.telegram.alert_system_error(str(e))
+                time.sleep(30)
+
+    def _square_off_intraday_positions(self):
+        """Force close all intraday positions at 3:15 PM."""
+        if not self.position_monitor:
+            return
+
+        positions = self.position_monitor.get_positions()
+        intraday_pids = [
+            pid for pid, state in positions.items()
+            if getattr(state, "trade_mode", "swing") == "intraday"
+        ]
+
+        if not intraday_pids:
+            logger.info("Square-off: no intraday positions to close.")
+            return
+
+        logger.info(f"Square-off: closing {len(intraday_pids)} intraday position(s)")
+        self.telegram.send_message(
+            f"\u23f0 <b>INTRADAY SQUARE-OFF (3:15 PM)</b>\n"
+            f"Closing {len(intraday_pids)} position(s)..."
+        )
+
+        for pid in intraday_pids:
+            try:
+                state = positions[pid]
+                ltp = self.broker.get_ltp(state.tradingsymbol, exchange="NFO")
+                if ltp <= 0:
+                    ltp = state.current_sl  # fallback
+                self._handle_position_exit(pid, ltp, "intraday_square_off")
+            except Exception as e:
+                logger.error(f"Square-off error for {pid}: {e}")
 
     def _compute_daily_bias(self, data_daily: pd.DataFrame) -> dict:
         """Compute hourly bias map from daily data only (5-day structure analysis)."""
@@ -1329,8 +1683,11 @@ class Prometheus:
             current_vol = recent_window["volume"].iloc[-1]
             volume_surge = current_vol > vol_avg * 1.3 if vol_avg > 0 else False
 
-            # 7. VWAP
-            vwap_df = calculate_vwap(recent_window.copy())
+            # 7. VWAP — session-anchored for intraday, cumulative for daily
+            if primary_interval in ("5minute", "15minute"):
+                vwap_df = calculate_session_vwap(recent_window.copy())
+            else:
+                vwap_df = calculate_vwap(recent_window.copy())
             vwap_val = vwap_df["vwap"].iloc[-1] if "vwap" in vwap_df.columns else current
             vwap_direction = "bullish" if current > vwap_val else "bearish"
 
@@ -1385,6 +1742,8 @@ class Prometheus:
             daily_vol = atr / current
             if primary_interval == "day":
                 atm_sigma = daily_vol * np.sqrt(252)
+            elif primary_interval == "5minute":
+                atm_sigma = daily_vol * np.sqrt(78 * 252)  # 78 five-min bars/day
             else:
                 atm_sigma = daily_vol * np.sqrt(26 * 252)
             atm_sigma = max(atm_sigma, 0.10)
@@ -1644,6 +2003,8 @@ class Prometheus:
                 time_stop_bars = o_time_stop
             elif primary_interval == "day":
                 time_stop_bars = 7 if capital < 50000 else (6 if capital < 100000 else 5)
+            elif primary_interval == "5minute":
+                time_stop_bars = 60 if capital < 50000 else (48 if capital < 100000 else 36)
             else:
                 time_stop_bars = 22 if capital < 50000 else (18 if capital < 100000 else 14)
 
@@ -1822,6 +2183,8 @@ class Prometheus:
                 time_stop_bars = mr_ts
             elif primary_interval == "day":
                 time_stop_bars = 3
+            elif primary_interval == "5minute":
+                time_stop_bars = 24  # ~2 hours
             else:
                 time_stop_bars = 8
 
@@ -1886,6 +2249,8 @@ class Prometheus:
             daily_vol = atr / current
             if primary_interval == "day":
                 atm_sigma = daily_vol * np.sqrt(252)
+            elif primary_interval == "5minute":
+                atm_sigma = daily_vol * np.sqrt(78 * 252)  # 78 five-min bars/day
             else:
                 atm_sigma = daily_vol * np.sqrt(26 * 252)
             atm_sigma = max(atm_sigma, 0.10)
@@ -3508,6 +3873,8 @@ def main():
             "  python main.py walkforward             Walk-forward validation\n"
             "  python main.py sensitivity             Parameter sensitivity sweep\n"
             "  python main.py paper                   Paper trading (live sim)\n"
+            "  python main.py paper --intraday        Intraday paper trading\n"
+            "  python main.py dry_run --intraday      Intraday dry run\n"
             "  python main.py signal                  Signal-only mode\n"
             "  python main.py setup                   First-time setup wizard\n"
         ),
@@ -3611,6 +3978,12 @@ def main():
         default=False,
         help="Raise signal quality thresholds: confluence 3.0/4.0, net edge 2.0, Kelly WR 0.35",
     )
+    parser.add_argument(
+        "--intraday",
+        action="store_true",
+        default=False,
+        help="Enable intraday mode: continuous scanning, auto bar interval, 3:15 PM square-off",
+    )
 
     args = parser.parse_args()
 
@@ -3701,17 +4074,26 @@ def main():
         prometheus.run_signal_mode(interval_seconds=args.interval)
 
     elif args.mode == "paper":
-        prometheus.run_paper_mode(interval_seconds=args.interval)
+        if args.intraday:
+            prometheus.run_intraday_mode(interval_seconds=args.interval)
+        else:
+            prometheus.run_paper_mode(interval_seconds=args.interval)
 
     elif args.mode == "semi_auto":
         prometheus.run_semi_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "full_auto":
-        prometheus.run_full_auto_mode(interval_seconds=args.interval)
+        if args.intraday:
+            prometheus.run_intraday_mode(interval_seconds=args.interval)
+        else:
+            prometheus.run_full_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "dry_run":
-        # Same as full_auto but forces PaperTrader (already done in __init__)
-        prometheus.run_full_auto_mode(interval_seconds=args.interval)
+        # Same as full_auto but forces PaperTrader (already done above)
+        if args.intraday:
+            prometheus.run_intraday_mode(interval_seconds=args.interval)
+        else:
+            prometheus.run_full_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "walkforward":
         prometheus.run_walkforward(

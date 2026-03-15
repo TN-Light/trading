@@ -59,6 +59,41 @@ def calculate_vwap(df: pd.DataFrame, anchor: str = "day") -> pd.DataFrame:
     return df
 
 
+def calculate_session_vwap(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Session-anchored VWAP — resets at market open each trading day.
+
+    For intraday bars, VWAP must reset at session start because institutional
+    algorithms benchmark against the session VWAP, not a multi-day cumulative.
+    Returns the same columns as calculate_vwap(): vwap, vwap_upper/lower_1/2.
+    """
+    df = df.copy()
+    ts = pd.to_datetime(df["timestamp"])
+    df["_date"] = ts.dt.date
+
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3
+    df["_tp_vol"] = typical_price * df["volume"]
+    df["_tp2_vol"] = (typical_price ** 2) * df["volume"]
+
+    # Cumulative sums within each trading session (day)
+    df["_cum_tp_vol"] = df.groupby("_date")["_tp_vol"].cumsum()
+    df["_cum_tp2_vol"] = df.groupby("_date")["_tp2_vol"].cumsum()
+    df["_cum_vol"] = df.groupby("_date")["volume"].cumsum()
+
+    safe_vol = df["_cum_vol"].replace(0, np.nan)
+    df["vwap"] = df["_cum_tp_vol"] / safe_vol
+    vwap_sq = df["_cum_tp2_vol"] / safe_vol
+    df["vwap_std"] = np.sqrt(np.maximum(vwap_sq - df["vwap"] ** 2, 0))
+
+    df["vwap_upper_1"] = df["vwap"] + df["vwap_std"]
+    df["vwap_lower_1"] = df["vwap"] - df["vwap_std"]
+    df["vwap_upper_2"] = df["vwap"] + 2 * df["vwap_std"]
+    df["vwap_lower_2"] = df["vwap"] - 2 * df["vwap_std"]
+
+    df.drop(columns=["_date", "_tp_vol", "_tp2_vol", "_cum_tp_vol", "_cum_tp2_vol", "_cum_vol"], inplace=True)
+    return df
+
+
 def calculate_volume_profile(
     df: pd.DataFrame,
     num_bins: int = 50,

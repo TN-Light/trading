@@ -187,6 +187,9 @@ class DataStore:
                     breakeven_ratio REAL DEFAULT 0.6,
                     risk_distance REAL DEFAULT 0,
                     entry_orders_json TEXT,
+                    trade_mode TEXT DEFAULT 'swing',
+                    bar_interval TEXT DEFAULT 'day',
+                    product_type TEXT DEFAULT 'MIS',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -412,9 +415,10 @@ class DataStore:
                  breakeven_set, trailing_activated, trailing_stage2,
                  trailing_stage3, premium_hwm,
                  entry_bar_count, max_bars, breakeven_ratio, risk_distance,
-                 entry_orders_json, created_at, updated_at)
+                 entry_orders_json, trade_mode, bar_interval, product_type,
+                 created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         COALESCE((SELECT created_at FROM managed_positions WHERE position_id = ?), ?),
                         ?)
             """, (
@@ -433,6 +437,9 @@ class DataStore:
                 state.get("entry_bar_count", 0), state.get("max_bars", 7),
                 state.get("breakeven_ratio", 0.6), state.get("risk_distance", 0),
                 state.get("entry_orders_json", ""),
+                state.get("trade_mode", "swing"),
+                state.get("bar_interval", "day"),
+                state.get("product_type", "MIS"),
                 state["position_id"], now,
                 now,
             ))
