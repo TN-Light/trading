@@ -334,7 +334,7 @@ class Prometheus:
             if not expiry or expiry.upper() == "WEEKLY":
                 expiry = None
             result = self.data.angelone_options.get_real_premium(
-                symbol, strike, expiry, opt_type,
+                symbol, strike, opt_type, expiry,
             )
             if result and result.get("ltp", 0) > 0:
                 if isinstance(self.broker, PaperTrader):
