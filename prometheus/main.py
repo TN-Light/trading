@@ -1646,7 +1646,7 @@ class Prometheus:
 
         Timing:
         - 9:15-9:45: Skip (opening noise)
-        - 9:45-14:30: Scan every N minutes, execute trades
+        - 9:45-14:30: Scan aligned to bar interval (5min→300s, 15min→900s)
         - 14:30-15:15: Monitor only, no new entries
         - 15:15: Force close all intraday positions
 
@@ -1679,7 +1679,7 @@ class Prometheus:
         self.telegram.send_message(
             f"\U0001f4c8 <b>{mode_label} MODE STARTED</b>\n"
             f"Capital: Rs {self.capital:,.0f}\n"
-            f"Scan every {interval_seconds}s | Square-off at 3:15 PM"
+            f"Scan aligned to bar interval | Square-off at 3:15 PM"
         )
 
         _today_traded_symbols = set()
@@ -1757,11 +1757,16 @@ class Prometheus:
                         f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
                         f"Square-off at {square_off_str}."
                     )
-                    time.sleep(interval_seconds)
+                    time.sleep(30)
                     continue
 
-                # Rate limit scans
-                if _last_scan_time and (now - _last_scan_time).total_seconds() < interval_seconds:
+                # ── INTRADAY SCAN ──
+                bar_interval = self._select_intraday_interval()
+                # Auto-match scan interval to bar interval (5min→300s, 15min→900s)
+                scan_interval = 300 if bar_interval == "5minute" else 900
+
+                # Rate limit scans — wait for candle close
+                if _last_scan_time and (now - _last_scan_time).total_seconds() < scan_interval:
                     time.sleep(10)
                     continue
 
@@ -1770,12 +1775,10 @@ class Prometheus:
                     self.dashboard.show_status_line(
                         f"{mode_label}: Max trades ({max_trades}) reached. Monitoring."
                     )
-                    time.sleep(interval_seconds)
+                    time.sleep(60)
                     continue
 
-                # ── INTRADAY SCAN ──
-                bar_interval = self._select_intraday_interval()
-                logger.info(f"{mode_label}: Scanning ({bar_interval})...")
+                logger.info(f"{mode_label}: Scanning ({bar_interval}, next in {scan_interval}s)...")
 
                 for symbol in intraday_instruments:
                     if symbol in _today_traded_symbols:
@@ -1830,7 +1833,7 @@ class Prometheus:
                 self.dashboard.show_status_line(
                     f"{mode_label}: {n_pos} position(s) | "
                     f"Trades: {_intraday_trades_today}/{max_trades} | "
-                    f"Next scan in {interval_seconds}s"
+                    f"Bar: {bar_interval}"
                 )
                 time.sleep(10)
 
@@ -1953,6 +1956,7 @@ class Prometheus:
                 now = datetime.now()
 
                 if not is_trading_day(now.date()):
+                    self.telegram.reconnect()
                     self.dashboard.show_status_line(f"{mode_label}: Holiday. Waiting...")
                     time.sleep(60)
                     continue
@@ -1969,6 +1973,8 @@ class Prometheus:
                     _did_335pm_scan = False
                     _did_send_daily_summary = False
                     _swing_traded_symbols.clear()
+                    # Retry Telegram if it failed at startup
+                    self.telegram.reconnect()
                     self.dashboard.show_status_line(
                         f"{mode_label}: Pre-market. Waiting for 9:45 AM."
                     )
@@ -2047,9 +2053,11 @@ class Prometheus:
                 # ── INTRADAY SCAN (9:45-14:30) ──
                 if current_time < last_entry_time and not _did_square_off:
                     if _intra_trades_today < intra_max_trades:
-                        if _last_intra_scan is None or (now - _last_intra_scan).total_seconds() >= interval_seconds:
-                            bar_interval = self._select_intraday_interval()
-                            logger.info(f"{mode_label}: Intraday scan ({bar_interval})...")
+                        bar_interval = self._select_intraday_interval()
+                        # Auto-match scan interval to bar interval
+                        intra_scan_interval = 300 if bar_interval == "5minute" else 900
+                        if _last_intra_scan is None or (now - _last_intra_scan).total_seconds() >= intra_scan_interval:
+                            logger.info(f"{mode_label}: Intraday scan ({bar_interval}, next in {intra_scan_interval}s)...")
 
                             for isym in intraday_instruments:
                                 if isym in _intra_traded_symbols:
@@ -4936,11 +4944,17 @@ class Prometheus:
 
     def _tg_cmd_help(self, args: str = "") -> str:
         """Handle /help command."""
+        ma_info = ""
+        if self.multi_account is not None:
+            labels = [s.config.label for s in self.multi_account.stacks.values()]
+            ma_info = f"\n\U0001f4b3 Accounts: {', '.join(labels)}\n"
         return (
-            "\U0001f4d6 <b>PROMETHEUS Commands</b>\n\n"
+            "\U0001f4d6 <b>PROMETHEUS Commands</b>\n"
+            f"{ma_info}\n"
             "/scan — Run multi-index scanner\n"
-            "/status — System status & open positions\n"
-            "/pnl — Today's P&L summary\n"
+            "/status — System status & all accounts\n"
+            "/pnl — Today's P&L (all accounts)\n"
+            "/positions — Open positions (all accounts)\n"
             "/regime — Current regime for all indices\n"
             "/help — Show this help message\n\n"
             "<i>Signals are sent automatically during market hours.</i>"
@@ -4998,11 +5012,31 @@ class Prometheus:
         return None  # already sent via alert_scanner_summary
 
     def _tg_cmd_status(self, args: str = "") -> str:
-        """Handle /status command."""
+        """Handle /status command — shows all accounts if multi-account is active."""
+        mode_str = self.mode.upper()
+
+        # Multi-account summary
+        if self.multi_account is not None:
+            text = f"\U0001f4ca <b>SYSTEM STATUS — MULTI-ACCOUNT</b>\n\n"
+            text += f"Mode: <b>{mode_str}</b>\n"
+            text += f"Symbols: {', '.join(self.symbols)}\n\n"
+
+            for label, stack in self.multi_account.stacks.items():
+                s = stack.get_summary()
+                halted = "\U0001f6d1" if stack.risk._halted else "\u2705"
+                pnl_emoji = "\U0001f7e2" if s["pnl"] >= 0 else "\U0001f534"
+                text += (
+                    f"{halted} <b>{s['label']}</b> (Rs {s['initial']:,.0f})\n"
+                    f"  Equity: Rs {s['equity']:,.0f} | "
+                    f"{pnl_emoji} P&L: Rs {s['pnl']:+,.0f} ({s['return_pct']:+.1f}%)\n"
+                    f"  Trades: {s['trades']} | Open: {s['open_positions']} | "
+                    f"WR: {s['win_rate']:.0f}%\n\n"
+                )
+            return text
+
+        # Single account fallback
         state = self.risk.get_portfolio_state()
         positions = self.broker.get_positions() if hasattr(self.broker, "get_positions") else []
-
-        mode_str = self.mode.upper()
         n_pos = len(positions)
         halted = "\U0001f6d1 HALTED" if self.risk._halted else "\u2705 ACTIVE"
 
@@ -5029,7 +5063,29 @@ class Prometheus:
         return text
 
     def _tg_cmd_pnl(self, args: str = "") -> str:
-        """Handle /pnl command."""
+        """Handle /pnl command — shows all accounts if multi-account is active."""
+        # Multi-account P&L
+        if self.multi_account is not None:
+            text = "\U0001f4b0 <b>TODAY'S P&L — ALL ACCOUNTS</b>\n\n"
+            total_pnl = 0
+            for label, stack in self.multi_account.stacks.items():
+                s = stack.get_summary()
+                risk_state = stack.risk.get_portfolio_state()
+                pnl = risk_state.realized_pnl_today
+                total_pnl += pnl
+                emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
+                text += (
+                    f"{emoji} <b>{s['label']}</b> (Rs {s['initial']:,.0f})\n"
+                    f"  Realized: Rs {pnl:+,.0f} | "
+                    f"Trades: {risk_state.trades_today} | "
+                    f"Losses: {risk_state.consecutive_losses}\n"
+                    f"  Equity: Rs {s['equity']:,.0f} ({s['return_pct']:+.1f}%)\n\n"
+                )
+            summary_emoji = "\U0001f4c8" if total_pnl >= 0 else "\U0001f4c9"
+            text += f"{summary_emoji} <b>TOTAL TODAY: Rs {total_pnl:+,.0f}</b>"
+            return text
+
+        # Single account fallback
         state = self.risk.get_portfolio_state()
         pnl = state.realized_pnl_today
         emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
@@ -5090,9 +5146,10 @@ class Prometheus:
         for pid, state in self.position_monitor.get_positions().items():
             pnl_pct = ((self.broker.get_ltp(state.tradingsymbol) - state.entry_premium)
                        / state.entry_premium * 100) if state.entry_premium > 0 else 0
+            acct_label = getattr(state, "_multi_account_label", "primary")
             lines.append(
                 f"<code>{pid}</code>\n"
-                f"  {state.tradingsymbol}\n"
+                f"  {state.tradingsymbol} [{acct_label}]\n"
                 f"  Entry: {state.entry_premium:.2f} | SL: {state.current_sl:.2f}\n"
                 f"  Stage: {state.current_stage()} | Bars: {state.entry_bar_count}/{state.max_bars}\n"
                 f"  P&L: {pnl_pct:+.1f}%\n"

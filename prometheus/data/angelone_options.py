@@ -171,30 +171,34 @@ class AngelOneOptionChain:
             else:
                 return None  # futures or unknown
 
-            # Extract strike (digits at end)
-            strike_match = re.search(r'(\d+\.?\d*)$', suffix)
-            if not strike_match:
-                return None
-            strike = float(strike_match.group(1))
-            date_part = suffix[:strike_match.start()]
+            # Parse with explicit DDMMMYY pattern first (most common)
+            # e.g. "07APR2623500" -> date="07APR26", strike="23500"
+            m = re.match(r'^(\d{2}[A-Z]{3}\d{2})(\d+)$', suffix)
+            if m:
+                date_part, strike_str = m.groups()
+                strike = float(strike_str)
+                expiry_str = ""
+                try:
+                    dt = datetime.strptime(date_part, "%d%b%y")
+                    expiry_str = dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+                return {"strike": strike, "option_type": option_type, "expiry_str": expiry_str}
 
-            # Parse expiry date from date_part (e.g. "25MAR" or "27MAR25")
-            expiry_str = ""
-            try:
-                if len(date_part) >= 5:
-                    for fmt in ["%d%b%y", "%d%b%Y", "%d%b"]:
-                        try:
-                            dt = datetime.strptime(date_part, fmt)
-                            if dt.year < 2000:
-                                dt = dt.replace(year=dt.year + 2000)
-                            expiry_str = dt.strftime("%Y-%m-%d")
-                            break
-                        except ValueError:
-                            continue
-            except Exception:
-                pass
+            # Fallback: DDMMMYYYY pattern (e.g. "07APR202623500")
+            m = re.match(r'^(\d{2}[A-Z]{3}\d{4})(\d+)$', suffix)
+            if m:
+                date_part, strike_str = m.groups()
+                strike = float(strike_str)
+                expiry_str = ""
+                try:
+                    dt = datetime.strptime(date_part, "%d%b%Y")
+                    expiry_str = dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+                return {"strike": strike, "option_type": option_type, "expiry_str": expiry_str}
 
-            return {"strike": strike, "option_type": option_type, "expiry_str": expiry_str}
+            return None
         except Exception:
             return None
 
@@ -440,7 +444,7 @@ class AngelOneOptionChain:
                 try:
                     g_result = obj.optionGreek({
                         "name": target["tradingsymbol"],
-                        "expirydate": expiry,
+                        "expirydate": expiry or target.get("expiry", ""),
                         "strikeprice": str(strike),
                         "optiontype": option_type,
                     })

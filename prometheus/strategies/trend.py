@@ -393,15 +393,16 @@ class TrendStrategy:
         symbol: str,
         option_type: str
     ) -> float:
-        """Select optimal strike for the trade."""
+        """Select optimal strike for the trade. 1-strike OTM for <50K capital."""
         atm = get_atm_strike(spot, symbol)
         interval = get_strike_interval(symbol)
 
-        if option_type == "CE":
-            # ATM or 1 strike OTM for better R:R
-            return atm
-        else:
-            return atm
+        if self.capital < 50000:
+            if option_type == "CE":
+                return atm + interval  # 1-strike OTM CE
+            else:
+                return atm - interval  # 1-strike OTM PE
+        return atm
 
     def _estimate_premium(
         self,

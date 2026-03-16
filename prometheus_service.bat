@@ -24,9 +24,9 @@ echo [%date% %time%] PROMETHEUS service starting... >> "%LOGFILE%"
 echo [%date% %time%] Mode: COMBINED (swing + intraday) + MULTI-ACCOUNT >> "%LOGFILE%"
 
 :: Run combined mode: swing + intraday with 4 paper accounts
-:: --combined  = both swing scans (1PM, 3:35PM) + intraday scans (every 3min, 9:45-14:30)
+:: --combined  = both swing scans (1PM, 3:35PM) + intraday scans (9:45-14:30)
 :: --multi-account = 4 parallel accounts (15K, 50K, 1L, 2L)
-:: --interval 180 = intraday scan every 3 minutes
-"C:\Program Files\Python312\python.exe" prometheus/main.py paper --combined --multi-account --interval 180 >> "%LOGFILE%" 2>&1
+:: Intraday scan auto-aligns to bar interval (5min bars→300s, 15min bars→900s)
+"C:\Program Files\Python312\python.exe" prometheus/main.py paper --combined --multi-account >> "%LOGFILE%" 2>&1
 
 echo [%date% %time%] PROMETHEUS service stopped. >> "%LOGFILE%"

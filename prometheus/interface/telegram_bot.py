@@ -184,6 +184,9 @@ class TelegramBot:
             self._init_bot()
             if self._enabled:
                 logger.info("Telegram: reconnected successfully!")
+                # Auto-start command listener if it wasn't running
+                if not self._listening and self._command_handlers:
+                    self.start_listening()
             return self._enabled
         return False
 
