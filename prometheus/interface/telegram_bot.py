@@ -395,49 +395,62 @@ class TelegramBot:
         if action == "HOLD":
             return
 
-        emoji = "\U0001f7e2" if "CE" in action else "\U0001f534" if "PE" in action else "\U0001f7e1"
+        emoji = "\U0001f7e2" if "CE" in action else "\U0001f534"
+        direction = "BULLISH" if "CE" in action else "BEARISH"
 
-        # Regime quality warning
         quality, wr = REGIME_QUALITY.get(regime, ("???", ""))
-        regime_line = f"Regime: {regime.upper()} ({quality} — {wr})"
+        caution = ""
         if quality == "WEAK":
-            regime_line += "\n\u26a0\ufe0f CAUTION: Unknown regime — 26% historical WR"
+            caution = "\n\u26a0\ufe0f Low-confidence regime (26% WR)"
         elif quality == "LOW":
-            regime_line += "\n\u26a0\ufe0f Volatile regime — lower conviction"
+            caution = "\n\u26a0\ufe0f Volatile regime — lower conviction"
 
         text = (
-            f"{emoji} <b>NEW SIGNAL</b>\n\n"
-            f"<b>{action}</b> {symbol}\n"
-            f"Confidence: {confidence:.0%} | R:R = 1:{rr:.1f}\n\n"
-            f"Entry: <b>{entry:.2f}</b>\n"
-            f"Stop Loss: <b>{sl:.2f}</b>\n"
-            f"Target: <b>{target:.2f}</b>\n"
-            f"{regime_line}\n\n"
-            f"<i>{reasoning[:200]}</i>"
+            f"{emoji} <b>SIGNAL  \u2014  {direction}</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{symbol}</b>  \u2502  {action}\n"
+            f"Confidence  <code>{confidence:.0%}</code>  \u2502  R:R  <code>1:{rr:.1f}</code>\n\n"
+            f"\u25B6  Entry     <code>Rs {entry:,.2f}</code>\n"
+            f"\U0001f6d1  Stop       <code>Rs {sl:,.2f}</code>\n"
+            f"\U0001f3af  Target    <code>Rs {target:,.2f}</code>\n\n"
+            f"\U0001f30d  {regime.upper()} ({quality} \u2014 {wr})"
+            f"{caution}\n"
         )
+        if reasoning:
+            text += f"\n<i>{reasoning[:200]}</i>"
+
         self.send_message(text)
 
     def alert_scanner_summary(self, scan_results: List[Dict]):
         """Send multi-index scanner results as a formatted summary."""
         if not scan_results:
-            self.send_message("\U0001f50d <b>SCAN COMPLETE</b>\n\nNo signals found across any index.")
+            self.send_message(
+                "\U0001f50d <b>SCAN COMPLETE</b>\n"
+                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+                "No actionable signals found."
+            )
             return
 
-        # Sort by adjusted confidence
         results = sorted(scan_results, key=lambda x: x.get("adj_confidence", 0), reverse=True)
 
-        lines = ["\U0001f50d <b>MULTI-INDEX SCAN</b>"]
-        lines.append(f"{datetime.now().strftime('%d %b %Y %H:%M')}\n")
+        # Separate swing and intraday
+        swing = [r for r in results if r.get("timeframe") != "intraday"]
+        intraday = [r for r in results if r.get("timeframe") == "intraday"]
 
-        for i, r in enumerate(results, 1):
+        lines = [
+            f"\U0001f50d <b>MARKET SCAN</b>",
+            f"<code>{datetime.now().strftime('%d %b %Y  %H:%M')}</code>",
+            "",
+        ]
+
+        def _format_row(r, idx):
             action = r.get("action", "HOLD")
             symbol = r.get("symbol", "")
             regime = r.get("regime", "unknown")
             adj_conf = r.get("adj_confidence", 0)
             sig_count = r.get("signal_count", 0)
-            quality, wr = REGIME_QUALITY.get(regime, ("???", ""))
+            quality, _ = REGIME_QUALITY.get(regime, ("???", ""))
 
-            # Direction emoji
             if "CE" in action:
                 d_emoji = "\U0001f7e2"
             elif "PE" in action:
@@ -445,34 +458,46 @@ class TelegramBot:
             else:
                 d_emoji = "\u26aa"
 
-            # Quality emoji
             if quality == "HIGH":
-                q_emoji = "\u2705"
+                q_tag = "\u2705"
             elif quality == "MED":
-                q_emoji = "\U0001f7e1"
+                q_tag = "\U0001f7e1"
             elif quality == "LOW":
-                q_emoji = "\u26a0\ufe0f"
+                q_tag = "\u26a0\ufe0f"
             else:
-                q_emoji = "\u274c"
+                q_tag = "\u274c"
 
-            executable = "" if r.get("executable", True) else " (signal only)"
+            sig_only = "  <i>(signal only)</i>" if not r.get("executable", True) else ""
 
-            lines.append(
-                f"{i}. {d_emoji} <b>{symbol}</b>{executable}\n"
-                f"   {action} | Conf: {adj_conf:.0%} | {sig_count}/10 signals\n"
-                f"   {q_emoji} {regime.upper()} ({quality})"
+            return (
+                f"{d_emoji} <b>{symbol}</b>{sig_only}\n"
+                f"    {action}  \u2502  <code>{adj_conf:>3.0%}</code>  \u2502  {sig_count}/10 signals\n"
+                f"    {q_tag} {regime.upper()} ({quality})"
             )
 
-        # Actionable summary
+        if intraday:
+            lines.append("\U0001f552 <b>INTRADAY</b>")
+            lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+            for i, r in enumerate(intraday, 1):
+                lines.append(_format_row(r, i))
+            lines.append("")
+
+        if swing:
+            lines.append("\U0001f4c5 <b>SWING</b>")
+            lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+            for i, r in enumerate(swing, 1):
+                lines.append(_format_row(r, i))
+            lines.append("")
+
         actionable = [r for r in results if r["action"] != "HOLD" and r.get("adj_confidence", 0) >= 0.50]
+        lines.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
         if actionable:
-            lines.append(f"\n<b>{len(actionable)} actionable signal(s) above 50% confidence</b>")
+            lines.append(f"\U0001f525 <b>{len(actionable)} actionable signal(s)</b> above 50%")
         else:
-            lines.append("\n<i>No signals above 50% confidence threshold</i>")
+            lines.append("\u23f8 No signals above 50% threshold")
 
         self.send_message("\n".join(lines))
 
-        # Send detailed cards for top signals
         for r in actionable[:3]:
             self.alert_new_signal({
                 "action": r["action"],
@@ -489,22 +514,23 @@ class TelegramBot:
     def alert_order_placed(self, order_info: Dict):
         """Alert when an order is placed."""
         text = (
-            f"\U0001f4cb <b>ORDER PLACED</b>\n\n"
-            f"{order_info.get('side', '')} {order_info.get('quantity', 0)} "
+            f"\U0001f4cb <b>ORDER PLACED</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{order_info.get('side', '')}  {order_info.get('quantity', 0)}x</b>  "
             f"{order_info.get('symbol', '')}\n"
-            f"Type: {order_info.get('order_type', '')}\n"
-            f"ID: {order_info.get('order_id', '')}"
+            f"Type: {order_info.get('order_type', '')}  \u2502  ID: <code>{order_info.get('order_id', '')}</code>"
         )
         self.send_message(text)
 
     def alert_order_filled(self, order_info: Dict):
         """Alert when an order is filled."""
         text = (
-            f"\u2705 <b>ORDER FILLED</b>\n\n"
-            f"{order_info.get('side', '')} {order_info.get('quantity', 0)} "
+            f"\u2705 <b>ORDER FILLED</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{order_info.get('side', '')}  {order_info.get('quantity', 0)}x</b>  "
             f"{order_info.get('symbol', '')}\n"
-            f"Price: Rs {order_info.get('price', 0):.2f}\n"
-            f"ID: {order_info.get('order_id', '')}"
+            f"Price: <code>Rs {order_info.get('price', 0):,.2f}</code>  \u2502  "
+            f"ID: <code>{order_info.get('order_id', '')}</code>"
         )
         self.send_message(text)
 
@@ -512,10 +538,11 @@ class TelegramBot:
         """Alert when a stop loss is hit."""
         pnl = trade_info.get("pnl", 0)
         text = (
-            f"\U0001f6d1 <b>STOP LOSS HIT</b>\n\n"
-            f"{trade_info.get('symbol', '')}\n"
-            f"P&L: Rs {pnl:+,.0f}\n"
-            f"Exit Price: {trade_info.get('exit_price', 0):.2f}"
+            f"\U0001f6d1 <b>STOP LOSS HIT</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{trade_info.get('symbol', '')}</b>\n"
+            f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
+            f"P&L: <code>Rs {pnl:+,.0f}</code>"
         )
         self.send_message(text)
 
@@ -523,10 +550,11 @@ class TelegramBot:
         """Alert when target is achieved."""
         pnl = trade_info.get("pnl", 0)
         text = (
-            f"\U0001f3af <b>TARGET HIT</b>\n\n"
-            f"{trade_info.get('symbol', '')}\n"
-            f"P&L: Rs {pnl:+,.0f}\n"
-            f"Exit Price: {trade_info.get('exit_price', 0):.2f}"
+            f"\U0001f3af <b>TARGET HIT</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{trade_info.get('symbol', '')}</b>\n"
+            f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
+            f"P&L: <code>Rs {pnl:+,.0f}</code>"
         )
         self.send_message(text)
 
@@ -544,37 +572,38 @@ class TelegramBot:
         pnl_emoji = "\U0001f4c8" if net_pnl >= 0 else "\U0001f4c9"
         result = "PROFIT" if net_pnl >= 0 else "LOSS"
 
-        cost_lines = ""
+        text = (
+            f"{pnl_emoji} <b>TRADE CLOSED  \u2014  {result}</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{side}  {qty}x  {symbol}</b>\n"
+            f"Exit: <code>Rs {price:,.2f}</code>\n\n"
+            f"Gross P&L:  <code>Rs {gross_pnl:+,.2f}</code>\n"
+            f"<b>Net P&L:    <code>Rs {net_pnl:+,.2f}</code></b>\n"
+        )
+
         if costs:
-            cost_lines = (
-                f"\n<b>Costs Breakdown:</b>\n"
-                f"  Brokerage: Rs {costs.get('brokerage', 0):.2f}\n"
-                f"  STT: Rs {costs.get('stt', 0):.2f}\n"
-                f"  Transaction: Rs {costs.get('transaction_charges', 0):.2f}\n"
-                f"  GST: Rs {costs.get('gst', 0):.2f}\n"
-                f"  Stamp Duty: Rs {costs.get('stamp_duty', 0):.2f}\n"
-                f"  SEBI: Rs {costs.get('sebi_charges', 0):.2f}\n"
-                f"  <b>Total Costs: Rs {costs.get('total', 0):.2f}</b>"
+            total_cost = costs.get('total', 0)
+            text += (
+                f"\n<i>Costs: Rs {total_cost:,.2f}</i>\n"
+                f"<i>(Brokerage {costs.get('brokerage', 0):.1f} + "
+                f"STT {costs.get('stt', 0):.1f} + "
+                f"GST {costs.get('gst', 0):.1f} + others)</i>\n"
             )
 
-        text = (
-            f"{pnl_emoji} <b>TRADE CLOSED — {result}</b>\n\n"
-            f"{side} {qty} {symbol}\n"
-            f"Exit Price: Rs {price:.2f}\n\n"
-            f"Gross P&L: Rs {gross_pnl:+,.2f}\n"
-            f"<b>Net P&L: Rs {net_pnl:+,.2f}</b> (after all costs)\n"
-            f"{cost_lines}\n\n"
-            f"\U0001f4b0 Portfolio: <b>Rs {equity:,.0f}</b>"
+        text += (
+            f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
         )
         self.send_message(text)
 
     def alert_risk_breach(self, risk_info: Dict):
         """Alert when a risk limit is breached."""
         text = (
-            f"\u26a0\ufe0f <b>RISK ALERT</b>\n\n"
-            f"Violation: {risk_info.get('violation', '')}\n"
-            f"Details: {risk_info.get('details', '')}\n"
-            f"Action: {risk_info.get('action', 'Review immediately')}"
+            f"\u26a0\ufe0f <b>RISK ALERT</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<b>{risk_info.get('violation', '')}</b>\n"
+            f"{risk_info.get('details', '')}\n\n"
+            f"Action: <i>{risk_info.get('action', 'Review immediately')}</i>"
         )
         self.send_message(text)
 
@@ -585,37 +614,45 @@ class TelegramBot:
         wins = summary.get("winning_trades", 0)
         equity = summary.get("equity", 0)
         pnl_emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
-
-        wr_line = f"Win Rate: {wins/trades*100:.0f}%\n" if trades > 0 else ""
         total_costs = summary.get("total_costs", 0)
         gross_pnl = summary.get("gross_pnl", pnl + total_costs)
-        cost_line = f"Costs (brokerage+tax): Rs {total_costs:,.0f}\n" if total_costs > 0 else ""
+
+        wr_line = f"Win Rate:    <code>{wins/trades*100:.0f}%</code>\n" if trades > 0 else ""
+
         text = (
             f"{pnl_emoji} <b>DAILY SUMMARY</b>\n"
-            f"{datetime.now().strftime('%d %b %Y')}\n\n"
-            f"Gross P&L: Rs {gross_pnl:+,.0f}\n"
-            f"{cost_line}"
-            f"<b>Net P&L: Rs {pnl:+,.0f}</b>\n"
-            f"Trades: {trades} (Won: {wins})\n"
-            f"{wr_line}"
-            f"\U0001f4b0 Portfolio: <b>Rs {equity:,.0f}</b>\n"
+            f"<code>{datetime.now().strftime('%d %b %Y')}</code>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"Gross P&L:   <code>Rs {gross_pnl:+,.0f}</code>\n"
+        )
+        if total_costs > 0:
+            text += f"Costs:       <code>Rs {total_costs:,.0f}</code>\n"
+        text += (
+            f"<b>Net P&L:     <code>Rs {pnl:+,.0f}</code></b>\n\n"
+            f"Trades:      <code>{trades}</code>  (Won: {wins})\n"
+            f"{wr_line}\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
         )
         self.send_message(text)
 
     def alert_system_start(self):
         """Alert when system starts."""
         text = (
-            f"\U0001f680 <b>PROMETHEUS STARTED</b>\n"
-            f"{datetime.now().strftime('%d %b %Y %H:%M')}\n"
-            f"System is online and monitoring.\n\n"
-            f"Commands: /scan /status /pnl /regime /help"
+            f"\U0001f680 <b>PROMETHEUS  ONLINE</b>\n"
+            f"<code>{datetime.now().strftime('%d %b %Y  %H:%M')}</code>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"System is monitoring the markets.\n\n"
+            f"/scan  \u2502  /status  \u2502  /pnl\n"
+            f"/positions  \u2502  /regime  \u2502  /help"
         )
         self.send_message(text)
 
     def alert_system_error(self, error: str):
         """Alert on critical system error (non-blocking)."""
         text = (
-            f"\U0001f525 <b>SYSTEM ERROR</b>\n\n"
-            f"{error[:300]}"
+            f"\U0001f525 <b>SYSTEM ERROR</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"<code>{error[:300]}</code>"
         )
         self.send_message_async(text)

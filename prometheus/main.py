@@ -4947,17 +4947,19 @@ class Prometheus:
         ma_info = ""
         if self.multi_account is not None:
             labels = [s.config.label for s in self.multi_account.stacks.values()]
-            ma_info = f"\n\U0001f4b3 Accounts: {', '.join(labels)}\n"
+            ma_info = f"\U0001f4b3 Accounts: {', '.join(labels)}\n\n"
         return (
-            "\U0001f4d6 <b>PROMETHEUS Commands</b>\n"
-            f"{ma_info}\n"
-            "/scan — Run multi-index scanner\n"
-            "/status — System status & all accounts\n"
-            "/pnl — Today's P&L (all accounts)\n"
-            "/positions — Open positions (all accounts)\n"
-            "/regime — Current regime for all indices\n"
-            "/help — Show this help message\n\n"
-            "<i>Signals are sent automatically during market hours.</i>"
+            f"\U0001f4d6 <b>PROMETHEUS</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"{ma_info}"
+            f"/scan          Swing + Intraday scan\n"
+            f"/status        System status\n"
+            f"/pnl            Today's P&amp;L\n"
+            f"/positions   Open positions\n"
+            f"/regime       Market regime\n"
+            f"/help           This message\n\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"<i>Signals sent automatically during market hours</i>"
         )
 
     def _tg_cmd_scan(self, args: str = "") -> str:
@@ -5066,20 +5068,21 @@ class Prometheus:
 
         # Multi-account summary
         if self.multi_account is not None:
-            text = f"\U0001f4ca <b>SYSTEM STATUS — MULTI-ACCOUNT</b>\n\n"
-            text += f"Mode: <b>{mode_str}</b>\n"
-            text += f"Symbols: {', '.join(self.symbols)}\n\n"
+            text = (
+                f"\U0001f4ca <b>STATUS  \u2014  MULTI-ACCOUNT</b>\n"
+                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+                f"Mode: <b>{mode_str}</b>\n\n"
+            )
 
             for label, stack in self.multi_account.stacks.items():
                 s = stack.get_summary()
                 halted = "\U0001f6d1" if stack.risk._halted else "\u2705"
                 pnl_emoji = "\U0001f7e2" if s["pnl"] >= 0 else "\U0001f534"
                 text += (
-                    f"{halted} <b>{s['label']}</b> (Rs {s['initial']:,.0f})\n"
-                    f"  Equity: Rs {s['equity']:,.0f} | "
-                    f"{pnl_emoji} P&L: Rs {s['pnl']:+,.0f} ({s['return_pct']:+.1f}%)\n"
-                    f"  Trades: {s['trades']} | Open: {s['open_positions']} | "
-                    f"WR: {s['win_rate']:.0f}%\n\n"
+                    f"{halted} <b>{s['label']}</b>  (Rs {s['initial']:,.0f})\n"
+                    f"    Equity <code>Rs {s['equity']:,.0f}</code>\n"
+                    f"    {pnl_emoji} P&amp;L <code>Rs {s['pnl']:+,.0f}</code>  ({s['return_pct']:+.1f}%)\n"
+                    f"    Trades <code>{s['trades']}</code>  \u2502  Open <code>{s['open_positions']}</code>  \u2502  WR <code>{s['win_rate']:.0f}%</code>\n\n"
                 )
             return text
 
@@ -5090,23 +5093,22 @@ class Prometheus:
         halted = "\U0001f6d1 HALTED" if self.risk._halted else "\u2705 ACTIVE"
 
         text = (
-            f"\U0001f4ca <b>SYSTEM STATUS</b>\n\n"
-            f"Mode: <b>{mode_str}</b>\n"
-            f"Status: {halted}\n"
-            f"Capital: Rs {state.capital:,.0f}\n"
-            f"Open Positions: {n_pos}\n"
-            f"Symbols: {', '.join(self.symbols)}\n"
+            f"\U0001f4ca <b>STATUS</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"Mode:       <b>{mode_str}</b>  {halted}\n"
+            f"Capital:    <code>Rs {state.capital:,.0f}</code>\n"
+            f"Positions:  <code>{n_pos}</code>\n"
         )
 
         if positions:
-            text += "\n<b>Open Positions:</b>\n"
+            text += f"\n<b>Open Positions</b>\n"
             for p in positions:
                 pnl = getattr(p, "unrealized_pnl", 0)
                 pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
                 text += (
-                    f"  {pnl_emoji} {p.tradingsymbol} "
-                    f"qty={p.quantity} "
-                    f"P&L=Rs {pnl:+,.0f}\n"
+                    f"  {pnl_emoji} {p.tradingsymbol}  "
+                    f"<code>{p.quantity}x</code>  "
+                    f"<code>Rs {pnl:+,.0f}</code>\n"
                 )
 
         return text
@@ -5115,49 +5117,59 @@ class Prometheus:
         """Handle /pnl command — shows all accounts if multi-account is active."""
         # Multi-account P&L
         if self.multi_account is not None:
-            text = "\U0001f4b0 <b>TODAY'S P&L — ALL ACCOUNTS</b>\n\n"
+            text = (
+                f"\U0001f4b0 <b>TODAY'S P&amp;L</b>\n"
+                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            )
             total_pnl = 0
             for label, stack in self.multi_account.stacks.items():
                 s = stack.get_summary()
                 risk_state = stack.risk.get_portfolio_state()
                 pnl = risk_state.realized_pnl_today
                 total_pnl += pnl
-                emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
+                emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
                 text += (
-                    f"{emoji} <b>{s['label']}</b> (Rs {s['initial']:,.0f})\n"
-                    f"  Realized: Rs {pnl:+,.0f} | "
-                    f"Trades: {risk_state.trades_today} | "
-                    f"Losses: {risk_state.consecutive_losses}\n"
-                    f"  Equity: Rs {s['equity']:,.0f} ({s['return_pct']:+.1f}%)\n\n"
+                    f"{emoji} <b>{s['label']}</b>\n"
+                    f"    Realized  <code>Rs {pnl:+,.0f}</code>\n"
+                    f"    Trades <code>{risk_state.trades_today}</code>  \u2502  "
+                    f"Equity <code>Rs {s['equity']:,.0f}</code>\n\n"
                 )
-            summary_emoji = "\U0001f4c8" if total_pnl >= 0 else "\U0001f4c9"
-            text += f"{summary_emoji} <b>TOTAL TODAY: Rs {total_pnl:+,.0f}</b>"
+            summary_emoji = "\U0001f7e2" if total_pnl >= 0 else "\U0001f534"
+            text += (
+                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                f"{summary_emoji} <b>TOTAL:  <code>Rs {total_pnl:+,.0f}</code></b>"
+            )
             return text
 
         # Single account fallback
         state = self.risk.get_portfolio_state()
         pnl = state.realized_pnl_today
-        emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
+        emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+        used_pct = abs(pnl) / self.risk.max_daily_loss * 100 if self.risk.max_daily_loss > 0 else 0
 
         return (
-            f"{emoji} <b>TODAY'S P&L</b>\n\n"
-            f"Realized P&L: Rs {pnl:+,.0f}\n"
-            f"Trades today: {state.trades_today}\n"
-            f"Consecutive losses: {state.consecutive_losses}\n"
-            f"Capital: Rs {state.capital:,.0f}\n"
-            f"Daily limit: Rs {self.risk.max_daily_loss:,.0f}\n"
-            f"Used: {abs(pnl)/self.risk.max_daily_loss*100:.0f}%"
+            f"\U0001f4b0 <b>TODAY'S P&amp;L</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"{emoji} Realized:  <code>Rs {pnl:+,.0f}</code>\n"
+            f"Trades:     <code>{state.trades_today}</code>\n"
+            f"Capital:    <code>Rs {state.capital:,.0f}</code>\n\n"
+            f"Daily limit: <code>Rs {self.risk.max_daily_loss:,.0f}</code>\n"
+            f"Used:        <code>{used_pct:.0f}%</code>"
         )
 
     def _tg_cmd_regime(self, args: str = "") -> str:
         """Handle /regime command — show current regime for all indices."""
-        lines = ["\U0001f30d <b>REGIME STATUS</b>\n"]
+        lines = [
+            "\U0001f30d <b>MARKET REGIME</b>",
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            "",
+        ]
 
         for symbol in self.symbols:
             try:
-                data = self.data.fetch_historical(symbol, days=60, interval="day")
+                data = self.data.fetch_historical(symbol, days=90, interval="day")
                 if data.empty:
-                    lines.append(f"  {symbol}: no data")
+                    lines.append(f"\u26aa {symbol}:  <i>no data</i>")
                     continue
 
                 regime = self.regime_detector.detect(data)
@@ -5168,7 +5180,6 @@ class Prometheus:
                 from prometheus.interface.telegram_bot import REGIME_QUALITY
                 quality, wr = REGIME_QUALITY.get(r_val, ("???", ""))
 
-                # Direction arrow
                 if trend > 0.2:
                     arrow = "\u2b06\ufe0f"
                 elif trend < -0.2:
@@ -5177,31 +5188,41 @@ class Prometheus:
                     arrow = "\u27a1\ufe0f"
 
                 lines.append(
-                    f"  {arrow} <b>{symbol}</b>\n"
-                    f"     {r_val.upper()} ({r_conf:.0%}) | {quality} ({wr})\n"
-                    f"     Trend: {trend:+.2f}"
+                    f"{arrow} <b>{symbol}</b>\n"
+                    f"    {r_val.upper()} <code>{r_conf:.0%}</code>  \u2502  {quality} ({wr})\n"
+                    f"    Trend: <code>{trend:+.2f}</code>"
                 )
             except Exception as e:
-                lines.append(f"  {symbol}: error — {str(e)[:50]}")
+                lines.append(f"\u26aa {symbol}:  <i>error</i>")
 
         return "\n".join(lines)
 
     def _tg_cmd_positions(self, args: str = "") -> str:
         """Handle /positions — show open positions with trailing stop state."""
         if not self.position_monitor or self.position_monitor.active_count == 0:
-            return "No open positions being monitored."
+            return (
+                "\U0001f4ca <b>POSITIONS</b>\n"
+                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+                "No open positions."
+            )
 
-        lines = ["\U0001f4ca <b>OPEN POSITIONS</b>\n"]
+        lines = [
+            "\U0001f4ca <b>OPEN POSITIONS</b>",
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+            "",
+        ]
         for pid, state in self.position_monitor.get_positions().items():
             pnl_pct = ((self.broker.get_ltp(state.tradingsymbol) - state.entry_premium)
                        / state.entry_premium * 100) if state.entry_premium > 0 else 0
+            pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
             acct_label = getattr(state, "_multi_account_label", "primary")
             lines.append(
-                f"<code>{pid}</code>\n"
-                f"  {state.tradingsymbol} [{acct_label}]\n"
-                f"  Entry: {state.entry_premium:.2f} | SL: {state.current_sl:.2f}\n"
-                f"  Stage: {state.current_stage()} | Bars: {state.entry_bar_count}/{state.max_bars}\n"
-                f"  P&L: {pnl_pct:+.1f}%\n"
+                f"{pnl_emoji} <b>{state.tradingsymbol}</b>\n"
+                f"    <i>{acct_label}</i>\n"
+                f"    Entry <code>{state.entry_premium:.2f}</code>  \u2502  SL <code>{state.current_sl:.2f}</code>\n"
+                f"    Stage <code>{state.current_stage()}</code>  \u2502  "
+                f"Bars <code>{state.entry_bar_count}/{state.max_bars}</code>\n"
+                f"    P&amp;L <code>{pnl_pct:+.1f}%</code>\n"
             )
         return "\n".join(lines)
 
