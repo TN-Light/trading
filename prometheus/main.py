@@ -4961,8 +4961,8 @@ class Prometheus:
         )
 
     def _tg_cmd_scan(self, args: str = "") -> str:
-        """Handle /scan command — run multi-index scanner and send results."""
-        self.telegram.send_message("\U0001f50e Scanning all indices... please wait.")
+        """Handle /scan command — run multi-index scanner with swing + intraday."""
+        self.telegram.send_message("\U0001f50e Scanning all indices (swing + intraday)... please wait.")
 
         # Regime multipliers (same as run_scan)
         REGIME_MULTIPLIER = {
@@ -4978,7 +4978,7 @@ class Prometheus:
                 if not signal:
                     continue
 
-                data = self.data.fetch_historical(symbol, days=60, interval="day")
+                data = self.data.fetch_historical(symbol, days=90, interval="day")
                 regime_str = "unknown"
                 if not data.empty:
                     regime = self.regime_detector.detect(data)
@@ -5003,9 +5003,58 @@ class Prometheus:
                     "risk_reward": signal.risk_reward,
                     "reasoning": signal.reasoning,
                     "executable": symbol not in SIGNAL_ONLY,
+                    "timeframe": "swing",
                 })
             except Exception as e:
                 logger.debug(f"Scan failed for {symbol}: {e}")
+
+        # Intraday scan (during market hours only)
+        from datetime import time as dtime
+        now = datetime.now()
+        intraday_cfg = self.config.get("intraday", {})
+        intraday_instruments = intraday_cfg.get("instruments", self.symbols[:2])
+        mkt_open = dtime(9, 15)
+        mkt_close = dtime(15, 15)
+
+        if mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
+            bar_interval = self._select_intraday_interval()
+            for symbol in intraday_instruments:
+                try:
+                    signal = self.analyze_intraday(symbol, bar_interval)
+                    if not signal:
+                        continue
+
+                    data = self.data.fetch_historical(symbol, days=5, interval=bar_interval)
+                    regime_str = "unknown"
+                    if not data.empty:
+                        data_daily = self.data.fetch_historical(symbol, days=90, interval="day")
+                        if not data_daily.empty:
+                            regime = self.regime_detector.detect(data_daily)
+                            regime_str = regime.regime.value
+
+                    raw_confidence = signal.confidence
+                    regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
+                    adj_confidence = raw_confidence * regime_mult
+
+                    sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
+
+                    scan_results.append({
+                        "symbol": f"{symbol} (intraday {bar_interval})",
+                        "action": signal.action,
+                        "raw_confidence": raw_confidence,
+                        "adj_confidence": adj_confidence,
+                        "regime": regime_str,
+                        "signal_count": sig_count,
+                        "entry_price": signal.entry_price,
+                        "stop_loss": signal.stop_loss,
+                        "target": signal.target,
+                        "risk_reward": getattr(signal, "risk_reward", 0),
+                        "reasoning": getattr(signal, "reasoning", ""),
+                        "executable": symbol not in SIGNAL_ONLY,
+                        "timeframe": "intraday",
+                    })
+                except Exception as e:
+                    logger.debug(f"Intraday scan failed for {symbol}: {e}")
 
         # Send formatted summary (handles empty case too)
         self.telegram.alert_scanner_summary(scan_results)
