@@ -384,6 +384,10 @@ class TelegramBot:
         """Send a new trading signal alert with regime-adjusted confidence."""
         action = signal.get("action", "HOLD")
         symbol = signal.get("symbol", "")
+        instrument = signal.get("instrument", "")
+        strike = signal.get("strike", 0)
+        option_type = signal.get("option_type", "")
+        expiry = signal.get("expiry", "")
         confidence = signal.get("confidence", 0)
         entry = signal.get("entry_price", 0)
         sl = signal.get("stop_loss", 0)
@@ -405,11 +409,19 @@ class TelegramBot:
         elif quality == "LOW":
             caution = "\n\u26a0\ufe0f Volatile regime — lower conviction"
 
+        contract_line = ""
+        if instrument:
+            contract_line = f"Contract      <code>{instrument}</code>\n"
+        elif strike and option_type:
+            exp = f" {expiry}" if expiry else ""
+            contract_line = f"Contract      <code>{symbol}{exp} {int(float(strike))}{option_type}</code>\n"
+
         text = (
             f"{emoji} <b>SIGNAL  \u2014  {direction}</b>\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
             f"<b>{symbol}</b>  \u2502  {action}\n"
             f"Confidence  <code>{confidence:.0%}</code>  \u2502  R:R  <code>1:{rr:.1f}</code>\n\n"
+            f"{contract_line}"
             f"\u25B6  Entry     <code>Rs {entry:,.2f}</code>\n"
             f"\U0001f6d1  Stop       <code>Rs {sl:,.2f}</code>\n"
             f"\U0001f3af  Target    <code>Rs {target:,.2f}</code>\n\n"
@@ -502,6 +514,10 @@ class TelegramBot:
             self.alert_new_signal({
                 "action": r["action"],
                 "symbol": r["symbol"],
+                "instrument": r.get("instrument", ""),
+                "strike": r.get("strike", 0),
+                "option_type": r.get("option_type", ""),
+                "expiry": r.get("expiry", ""),
                 "confidence": r["adj_confidence"],
                 "entry_price": r.get("entry_price", 0),
                 "stop_loss": r.get("stop_loss", 0),

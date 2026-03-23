@@ -980,7 +980,8 @@ class Prometheus:
                             self.dashboard.show_signal(signal.to_dict())
 
                             if signal.action != "HOLD":
-                                self.telegram.alert_new_signal(signal.to_dict())
+                                refined = self.refine_with_strategy(signal)
+                                self.telegram.alert_new_signal(refined)
 
                             # Show regime
                             data = self.data.fetch_historical(symbol, days=60, interval="day")
@@ -1103,15 +1104,15 @@ class Prometheus:
                             if signal.confidence >= 0.80 and n_signals >= 4:
                                 _mid_found += 1
                                 self.dashboard.show_signal(signal.to_dict())
+                                refined = self.refine_with_strategy(signal)
                                 self.telegram.send_message(
                                     "\U0001f525 <b>EARLY SIGNAL (1 PM scan)</b>\n"
                                     f"High-confluence ({signal.confidence:.0%}, "
                                     f"{n_signals} indicators) on <b>{symbol}</b>"
                                 )
-                                self.telegram.alert_new_signal(signal.to_dict())
+                                self.telegram.alert_new_signal(refined)
 
                                 if symbol not in _today_traded_symbols:
-                                    refined = self.refine_with_strategy(signal)
                                     position = self.order_manager.execute_signal(
                                         refined, confirm=False
                                     )
@@ -1143,10 +1144,9 @@ class Prometheus:
                             self.dashboard.show_signal(signal.to_dict())
 
                             if signal.action != "HOLD" and symbol not in _today_traded_symbols:
-                                self.telegram.alert_new_signal(signal.to_dict())
-
                                 # Refine through strategy module for strike/premium/sizing
                                 refined = self.refine_with_strategy(signal)
+                                self.telegram.alert_new_signal(refined)
 
                                 # Execute in paper mode
                                 position = self.order_manager.execute_signal(
@@ -1727,8 +1727,8 @@ class Prometheus:
                             n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
                             if signal.confidence >= 0.80 and n_signals >= 4:
                                 if symbol not in _today_traded_symbols:
-                                    self.telegram.alert_new_signal(signal.to_dict())
                                     refined = self.refine_with_strategy(signal)
+                                    self.telegram.alert_new_signal(refined)
                                     position = self.order_manager.execute_signal(
                                         refined, confirm=False
                                     )
@@ -1750,8 +1750,8 @@ class Prometheus:
                     for symbol in self.symbols:
                         signal = self.analyze(symbol)
                         if signal and signal.action != "HOLD" and symbol not in _today_traded_symbols:
-                            self.telegram.alert_new_signal(signal.to_dict())
                             refined = self.refine_with_strategy(signal)
+                            self.telegram.alert_new_signal(refined)
                             position = self.order_manager.execute_signal(
                                 refined, confirm=False
                             )
@@ -1875,7 +1875,7 @@ class Prometheus:
                             if signal.confidence >= 0.80 and n_signals >= 4 and symbol not in _today_traded_symbols:
                                 refined = self.refine_with_strategy(signal)
                                 confirmed = self.telegram.request_confirmation(
-                                    signal.to_dict(), timeout=confirm_timeout
+                                    refined, timeout=confirm_timeout
                                 )
                                 if confirmed:
                                     position = self.order_manager.execute_signal(
@@ -1899,7 +1899,7 @@ class Prometheus:
                         if signal and signal.action != "HOLD" and symbol not in _today_traded_symbols:
                             refined = self.refine_with_strategy(signal)
                             confirmed = self.telegram.request_confirmation(
-                                signal.to_dict(), timeout=confirm_timeout
+                                refined, timeout=confirm_timeout
                             )
                             if confirmed:
                                 position = self.order_manager.execute_signal(
@@ -2152,8 +2152,8 @@ class Prometheus:
 
                     signal = self.analyze_intraday(symbol, bar_interval)
                     if signal and signal.action != "HOLD":
-                        self.telegram.alert_new_signal(signal.to_dict())
                         refined = self.refine_with_strategy(signal)
+                        self.telegram.alert_new_signal(refined)
 
                         position = self.order_manager.execute_signal(
                             refined, confirm=False
@@ -2447,8 +2447,8 @@ class Prometheus:
                                     if n_sigs < 4:
                                         continue
                                 
-                                self.telegram.alert_new_signal(signal.to_dict())
                                 refined = self.refine_with_strategy(signal)
+                                self.telegram.alert_new_signal(refined)
                                 position = self.order_manager.execute_signal(refined, confirm=False)
                                 self._dispatch_multi_account(refined)
                                 if position:
@@ -2499,8 +2499,8 @@ class Prometheus:
                                     continue
                                 signal = self.analyze_intraday(isym, bar_interval)
                                 if signal and signal.action != "HOLD":
-                                    self.telegram.alert_new_signal(signal.to_dict())
                                     refined = self.refine_with_strategy(signal)
+                                    self.telegram.alert_new_signal(refined)
                                     position = self.order_manager.execute_signal(
                                         refined, confirm=False
                                     )
