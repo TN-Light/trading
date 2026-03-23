@@ -504,6 +504,7 @@ intraday:
         time_stop_bars: 12
         max_daily_trades: 5
   instruments:                      # Instruments for intraday
+    - "NIFTY 50"
     - "NIFTY BANK"
     - "SENSEX"
 

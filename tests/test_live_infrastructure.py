@@ -25,6 +25,14 @@ import time
 import tempfile
 import shutil
 
+# This module is intended to run as a standalone validation script,
+# not as a pytest-collected test module.
+__test__ = False
+
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script-style validation module", allow_module_level=True)
+
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

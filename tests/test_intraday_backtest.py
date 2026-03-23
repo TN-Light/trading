@@ -21,6 +21,14 @@ import os
 import math
 from datetime import datetime, time as dtime
 
+# This module is intended to run as a standalone validation script,
+# not as a pytest-collected test module.
+__test__ = False
+
+if __name__ != "__main__":
+     import pytest
+     pytest.skip("script-style validation module", allow_module_level=True)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
