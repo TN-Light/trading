@@ -149,16 +149,61 @@ class YFinanceFallback:
         "NIFTY MIDCAP SELECT": "NIFTY_MIDCAP_SELECT.NS",
         "NIFTY NEXT 50": "^NSMIDCP",
         "INDIA VIX": "^INDIAVIX",
-        "RELIANCE": "RELIANCE.NS",
-        "TCS": "TCS.NS",
-        "INFY": "INFY.NS",
+        # --- F&O Stocks (40+) ---
+        # Banks
         "HDFCBANK": "HDFCBANK.NS",
         "ICICIBANK": "ICICIBANK.NS",
         "SBIN": "SBIN.NS",
-        "TATAMOTORS": "TATAMOTORS.NS",
-        "ITC": "ITC.NS",
         "AXISBANK": "AXISBANK.NS",
+        "KOTAKBANK": "KOTAKBANK.NS",
+        "INDUSINDBK": "INDUSINDBK.NS",
+        "PNB": "PNB.NS",
+        "IDFCFIRSTB": "IDFCFIRSTB.NS",
+        # IT
+        "TCS": "TCS.NS",
+        "INFY": "INFY.NS",
+        "WIPRO": "WIPRO.NS",
+        "HCLTECH": "HCLTECH.NS",
+        "TECHM": "TECHM.NS",
+        "LTIM": "LTIM.NS",
+        # Auto
+        "TATAMOTORS": "TATAMOTORS.NS",  # Commercial vehicles (post demerger Oct 2025)
+        "TMPV": "TMPV.NS",              # Passenger vehicles + JLR (post demerger Oct 2025)
+        "M&M": "M%26M.NS",
+        "MARUTI": "MARUTI.NS",
+        "BAJAJ-AUTO": "BAJAJ-AUTO.NS",
+        "HEROMOTOCO": "HEROMOTOCO.NS",
+        # Energy & Infra
+        "RELIANCE": "RELIANCE.NS",
+        "ONGC": "ONGC.NS",
+        "NTPC": "NTPC.NS",
+        "POWERGRID": "POWERGRID.NS",
+        "ADANIENT": "ADANIENT.NS",
+        "ADANIPORTS": "ADANIPORTS.NS",
+        # Pharma
+        "SUNPHARMA": "SUNPHARMA.NS",
+        "DRREDDY": "DRREDDY.NS",
+        "CIPLA": "CIPLA.NS",
+        "DIVISLAB": "DIVISLAB.NS",
+        # FMCG
+        "ITC": "ITC.NS",
+        "HINDUNILVR": "HINDUNILVR.NS",
+        "NESTLEIND": "NESTLEIND.NS",
+        "BRITANNIA": "BRITANNIA.NS",
+        # Finance (non-bank)
         "BAJFINANCE": "BAJFINANCE.NS",
+        "BAJAJFINSV": "BAJAJFINSV.NS",
+        "SBILIFE": "SBILIFE.NS",
+        "HDFCLIFE": "HDFCLIFE.NS",
+        # Metals & Cement
+        "TATASTEEL": "TATASTEEL.NS",
+        "JSWSTEEL": "JSWSTEEL.NS",
+        "HINDALCO": "HINDALCO.NS",
+        "ULTRACEMCO": "ULTRACEMCO.NS",
+        # Others
+        "LT": "LT.NS",
+        "TITAN": "TITAN.NS",
+        "ASIANPAINT": "ASIANPAINT.NS",
         # US indices (backtest only)
         "SPX": "^GSPC",
         "NASDAQ": "^IXIC",
@@ -374,6 +419,8 @@ class DataEngine:
         self.kite = KiteDataFeed(kite_api_key, kite_access_token)
         self.yf = YFinanceFallback()
         self.nse = NSEDirectFeed()
+        self.historical_source = "auto"  # auto | kite | angelone | yfinance
+        self.fetch_retries = 2
 
         # Angel One for extended intraday history (up to 5yr of 5min data)
         self.angelone = None
@@ -400,6 +447,99 @@ class DataEngine:
 
         logger.info("Data Engine initialized")
 
+    def configure_historical_fetch(self, source: str = "auto", retries: int = 2):
+        """Configure historical data provider selection and retry behavior."""
+        valid_sources = {"auto", "kite", "angelone", "yfinance"}
+        normalized_source = (source or "auto").lower()
+        if normalized_source not in valid_sources:
+            logger.warning(f"Invalid data source '{source}'. Falling back to auto.")
+            normalized_source = "auto"
+
+        self.historical_source = normalized_source
+        self.fetch_retries = max(1, int(retries))
+        logger.info(
+            f"Historical fetch config: source={self.historical_source}, retries={self.fetch_retries}"
+        )
+
+    def _get_source_order(self, symbol: str, interval: str, days: int) -> List[str]:
+        """Resolve provider priority based on mode and data characteristics."""
+        if self.historical_source != "auto":
+            return [self.historical_source]
+
+        sources: List[str] = []
+        intraday_intervals = {"5minute", "5m", "15minute", "15m", "minute", "1m"}
+
+        if self.kite.is_connected() and KiteDataFeed.INDEX_TOKENS.get(symbol):
+            sources.append("kite")
+
+        # Prefer Angel One for long intraday history where yfinance is capped.
+        if self.angelone and interval in intraday_intervals and days > 59:
+            sources.append("angelone")
+
+        sources.append("yfinance")
+        return sources
+
+    def _fetch_from_source(
+        self,
+        source: str,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        interval: str,
+        days: int,
+    ) -> pd.DataFrame:
+        """Fetch raw OHLCV data from a specific source."""
+        if source == "kite":
+            if not self.kite.is_connected():
+                logger.warning("Kite requested but not connected")
+                return pd.DataFrame()
+            token = KiteDataFeed.INDEX_TOKENS.get(symbol)
+            if not token:
+                logger.warning(f"Kite token not found for {symbol}")
+                return pd.DataFrame()
+            return self.kite.get_historical_data(token, start_date, end_date, interval)
+
+        if source == "angelone":
+            if not self.angelone:
+                logger.warning("Angel One requested but not configured")
+                return pd.DataFrame()
+            return self.angelone.fetch_historical(symbol, days=days, interval=interval)
+
+        if source == "yfinance":
+            yf_interval_map = {
+                "day": "1d", "week": "1wk", "month": "1mo",
+                "60minute": "1h", "15minute": "15m", "5minute": "5m",
+                "minute": "1m",
+            }
+            yf_interval = yf_interval_map.get(interval, "1d")
+            return self.yf.get_historical_data(symbol, start_date, end_date, yf_interval)
+
+        logger.warning(f"Unknown source '{source}'")
+        return pd.DataFrame()
+
+    def _fetch_with_retry(
+        self,
+        source: str,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        interval: str,
+        days: int,
+    ) -> pd.DataFrame:
+        """Fetch with bounded retries to mitigate transient API/network failures."""
+        for attempt in range(1, self.fetch_retries + 1):
+            try:
+                df = self._fetch_from_source(source, symbol, start_date, end_date, interval, days)
+                if not df.empty:
+                    return df
+            except Exception as e:
+                logger.warning(f"{source} fetch attempt {attempt}/{self.fetch_retries} failed: {e}")
+
+            if attempt < self.fetch_retries:
+                time.sleep(min(2 * attempt, 5))
+
+        return pd.DataFrame()
+
     def fetch_historical(
         self,
         symbol: str,
@@ -414,46 +554,50 @@ class DataEngine:
         end_date = datetime.now(IST).strftime("%Y-%m-%d")
         start_date = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
 
-        # Check cache first
-        if not force_refresh:
+        # Check cache first only in auto mode. When source is explicitly forced,
+        # bypass shared cache so provider comparisons stay deterministic.
+        use_cache = (self.historical_source == "auto") and (not force_refresh)
+        if use_cache:
             cached = self.store.get_ohlcv(symbol, interval, start=start_date, end=end_date)
             if not cached.empty and len(cached) > (days * 0.5):
                 logger.debug(f"Using cached data for {symbol} ({len(cached)} rows)")
                 return cached
 
-        # Try Kite first
-        if self.kite.is_connected():
-            token = KiteDataFeed.INDEX_TOKENS.get(symbol)
-            if token:
-                df = self.kite.get_historical_data(token, start_date, end_date, interval)
-                if not df.empty:
-                    df["symbol"] = symbol
-                    self.store.save_ohlcv(df, symbol, interval)
-                    return df
+        source_order = self._get_source_order(symbol, interval, days)
+        for source in source_order:
+            df = self._fetch_with_retry(source, symbol, start_date, end_date, interval, days)
+            if df.empty:
+                logger.warning(
+                    f"No data from {source} for {symbol} ({interval}, {days}d)"
+                )
+                continue
 
-        # Try Angel One for intraday intervals (5min/15min) when days > 59
-        # yfinance caps at ~60 days for intraday, Angel One gives up to 5 years
-        _intraday_intervals = {"5minute", "5m", "15minute", "15m", "minute", "1m"}
-        if self.angelone and interval in _intraday_intervals and days > 59:
-            df = self.angelone.fetch_historical(symbol, days=days, interval=interval)
-            if not df.empty:
-                self.store.save_ohlcv(df, symbol, interval)
-                logger.info(f"Fetched {len(df)} rows for {symbol} via Angel One ({interval})")
-                return df
+            if source == "kite":
+                df["symbol"] = symbol
 
-        # Fallback to yfinance
-        yf_interval_map = {
-            "day": "1d", "week": "1wk", "month": "1mo",
-            "60minute": "1h", "15minute": "15m", "5minute": "5m",
-            "minute": "1m",
-        }
-        yf_interval = yf_interval_map.get(interval, "1d")
-        df = self.yf.get_historical_data(symbol, start_date, end_date, yf_interval)
-
-        if not df.empty:
+            df = self._clean_ohlcv(df)
             self.store.save_ohlcv(df, symbol, interval)
-            logger.info(f"Fetched {len(df)} rows for {symbol} via yfinance")
+            logger.info(f"Fetched {len(df)} rows for {symbol} via {source}")
+            return df
 
+        logger.error(
+            f"Historical fetch failed for {symbol} ({interval}, {days}d). "
+            f"Tried sources: {', '.join(source_order)}"
+        )
+        return pd.DataFrame()
+
+    def _clean_ohlcv(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure OHLCV data is timezone-normalized to IST, sorted, and de-duplicated."""
+        if df.empty:
+            return df
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        if getattr(ts.dt, "tz", None) is None:
+            ts = ts.dt.tz_localize("UTC")
+        else:
+            ts = ts.dt.tz_convert("UTC")
+        df["timestamp"] = ts.dt.tz_convert(IST).dt.tz_localize(None)
+        df = df.dropna(subset=["timestamp"])
+        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df
 
     def fetch_intraday(

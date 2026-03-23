@@ -85,13 +85,18 @@ class SignalFusionEngine:
         "ai_sentiment": 0.65,
     }
 
-    def __init__(self, min_confluence: float = 0.65, min_rr: float = 2.0):
+    def __init__(self, min_confluence_score: float = 3.0, min_rr: float = 2.0, min_confluence: Optional[float] = None):
         """
         Args:
-            min_confluence: Minimum weighted score to emit a signal (0-1)
+            min_confluence_score: Minimum confluence on 0-10 scale to emit a signal
             min_rr: Minimum risk:reward ratio required
+            min_confluence: (deprecated 0-1 scale). If provided, converted to 0-10.
         """
-        self.min_confluence = min_confluence
+        if min_confluence is not None:
+            # backward-compatible: assume 0-1 scale if <=1, else already 0-10
+            self.min_confluence_score = min_confluence * 10 if min_confluence <= 1 else min_confluence
+        else:
+            self.min_confluence_score = min_confluence_score
         self.min_rr = min_rr
 
     def fuse(
@@ -101,7 +106,8 @@ class SignalFusionEngine:
         technical_signals: List[TechnicalSignal],
         oi_signals: List[OISignal],
         regime: RegimeState,
-        ai_sentiment: Optional[Dict] = None
+        ai_sentiment: Optional[Dict] = None,
+        min_rr: Optional[float] = None
     ) -> Optional[FusedSignal]:
         """
         Run the fusion algorithm.
@@ -168,13 +174,14 @@ class SignalFusionEngine:
 
         bullish_pct = bullish_score / total_weight
         bearish_pct = bearish_score / total_weight
+        confluence_score = max(bullish_pct, bearish_pct) * 10  # normalize to 0-10 scale
 
         # Determine direction
-        if bullish_pct > bearish_pct and bullish_pct >= self.min_confluence:
+        if bullish_pct > bearish_pct and confluence_score >= self.min_confluence_score:
             direction = "bullish"
             confidence = bullish_pct
             action = "BUY_CE"
-        elif bearish_pct > bullish_pct and bearish_pct >= self.min_confluence:
+        elif bearish_pct > bullish_pct and confluence_score >= self.min_confluence_score:
             direction = "bearish"
             confidence = bearish_pct
             action = "BUY_PE"
@@ -186,8 +193,7 @@ class SignalFusionEngine:
                 action="HOLD",
                 direction="neutral",
                 confidence=max(bullish_pct, bearish_pct),
-                reasoning=f"Insufficient confluence (bull={bullish_pct:.2f}, bear={bearish_pct:.2f}, "
-                          f"threshold={self.min_confluence})",
+                reasoning=f"Insufficient confluence score {confluence_score:.2f} (threshold {self.min_confluence_score:.1f})",
                 contributing_signals=contributing,
             )
 
@@ -197,12 +203,13 @@ class SignalFusionEngine:
         )
 
         # Calculate risk:reward
+        target_rr = min_rr if min_rr is not None else self.min_rr
         risk = abs(entry - sl) if sl > 0 else entry * 0.02  # default 2% risk
-        reward = abs(target - entry) if target > 0 else risk * self.min_rr
+        reward = abs(target - entry) if target > 0 else risk * target_rr
         rr = reward / risk if risk > 0 else 0
 
         # Reject if R:R is too low
-        if rr < self.min_rr:
+        if rr < target_rr:
             return FusedSignal(
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 symbol=symbol,
@@ -213,7 +220,7 @@ class SignalFusionEngine:
                 stop_loss=sl,
                 target=target,
                 risk_reward=rr,
-                reasoning=f"R:R too low ({rr:.1f}x, minimum {self.min_rr}x required)",
+                reasoning=f"R:R too low ({rr:.1f}x, minimum {target_rr}x required)",
                 contributing_signals=contributing,
             )
 

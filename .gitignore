@@ -34,3 +34,22 @@ Thumbs.db
 venv/
 .venv/
 env/
+
+# Generated reports and experiment artifacts
+prometheus/reports/
+reports/*.txt
+reports/*_report.md
+
+# Generated analysis outputs (root)
+trade_analysis_*.csv
+loss_database_*.csv
+loss_patterns_report_*.json
+loss_elimination_report_*.md
+parrondo_sweep_*.csv
+master_universe_trades_swing.csv
+funnel_report.txt
+intraday_sensitivity_results.txt
+series_b*.csv
+series_b.txt
+sens_results.txt
+swing_verify_results.txt

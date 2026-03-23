@@ -616,6 +616,7 @@ class TelegramBot:
         pnl_emoji = "\U0001f4c8" if pnl >= 0 else "\U0001f4c9"
         total_costs = summary.get("total_costs", 0)
         gross_pnl = summary.get("gross_pnl", pnl + total_costs)
+        guardrail_audit = summary.get("intraday_guardrail_audit", "")
 
         wr_line = f"Win Rate:    <code>{wins/trades*100:.0f}%</code>\n" if trades > 0 else ""
 
@@ -630,8 +631,12 @@ class TelegramBot:
         text += (
             f"<b>Net P&L:     <code>Rs {pnl:+,.0f}</code></b>\n\n"
             f"Trades:      <code>{trades}</code>  (Won: {wins})\n"
-            f"{wr_line}\n"
-            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            f"{wr_line}"
+        )
+        if guardrail_audit:
+            text += f"Intraday Guardrail: <code>{guardrail_audit}</code>\n"
+        text += (
+            f"\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
             f"\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
         )
         self.send_message(text)

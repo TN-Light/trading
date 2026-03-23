@@ -25,9 +25,21 @@ import os
 import time
 import signal as sig
 import argparse
+import psutil
 from datetime import datetime, date, time as dtime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
-from typing import Optional, Dict
+from concurrent import futures
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import atexit
+
+# Inject diagnostics
+try:
+    from prometheus.analysis.rr_diagnostic import SignalFunnelAnalyzer
+    global_funnel = SignalFunnelAnalyzer()
+    atexit.register(lambda: global_funnel.print_report() if global_funnel.stats.raw_signals > 0 else None)
+except ImportError:
+    global_funnel = None
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent
@@ -173,11 +185,29 @@ class Prometheus:
         self.mode = mode
         self.running = False
         self.symbols = get("market.indices", ["NIFTY 50", "NIFTY BANK"])
+        self.stock_symbols = get("market.stocks", [])  # F&O stocks for expanded scanning
+        self.all_symbols = self.symbols + self.stock_symbols  # combined for reporting
+
+        # Swing scan config (batched stock scanning)
+        self.swing_cfg = get("swing", {})
 
         # Multi-account paper trading (initialized on demand by --multi-account)
         self.multi_account = None
 
-        logger.info(f"Mode: {self.mode} | Capital: Rs {self.capital:,.0f} | Symbols: {self.symbols}")
+        # Daily intraday guardrail audit (included in end-of-day summary)
+        self._intraday_guardrail_audit = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "mode": "",
+            "tripped": False,
+            "reason": "Not active",
+        }
+
+        n_stocks = len(self.stock_symbols)
+        logger.info(
+            f"Mode: {self.mode} | Capital: Rs {self.capital:,.0f} | "
+            f"Indices: {len(self.symbols)} | Stocks: {n_stocks} | "
+            f"Total symbols: {len(self.all_symbols)}"
+        )
 
     @property
     def ai(self):
@@ -427,6 +457,80 @@ class Prometheus:
                     timeframe="15minute",
                 ))
 
+        # EMA 9/21 alignment (from daily data)
+        if len(data_daily) >= 25:
+            ema9 = calculate_ema(data_daily["close"], 9)
+            ema21 = calculate_ema(data_daily["close"], 21)
+            if not ema9.empty and not ema21.empty:
+                ema9_now = ema9.iloc[-1]
+                ema21_now = ema21.iloc[-1]
+                margin = spot * 0.005  # 0.5% margin for swing conviction
+                if ema9_now > ema21_now + margin:
+                    tech_signals.append(TechnicalSignal(
+                        name="ema",
+                        direction="bullish",
+                        strength=0.75,
+                        timeframe="day",
+                    ))
+                elif ema9_now < ema21_now - margin:
+                    tech_signals.append(TechnicalSignal(
+                        name="ema",
+                        direction="bearish",
+                        strength=0.75,
+                        timeframe="day",
+                    ))
+
+        # Volume Profile (POC) - Daily
+        if len(data_daily) >= 20:
+            vp = calculate_volume_profile(data_daily, num_bins=50, lookback=20)
+            if vp and "poc" in vp:
+                poc = vp["poc"]
+                dist = abs(spot - poc) / poc
+                strength = min(dist * 10 + 0.5, 0.9)  # scale strength by distance from POC
+                if spot > poc:
+                    tech_signals.append(TechnicalSignal(
+                        name="volume_profile",
+                        direction="bullish",
+                        strength=strength,
+                        timeframe="day",
+                    ))
+                elif spot < poc:
+                    tech_signals.append(TechnicalSignal(
+                        name="volume_profile",
+                        direction="bearish",
+                        strength=strength,
+                        timeframe="day",
+                    ))
+
+        # Fibonacci OTE - Daily
+        if len(data_daily) >= 20:
+            recent_tail = data_daily.tail(20)
+            idx_max = recent_tail["high"].idxmax()
+            idx_min = recent_tail["low"].idxmin()
+            
+            # Simple check to ensure indices are comparable
+            if isinstance(idx_max, type(idx_min)):
+                try:
+                    recent_high = recent_tail.loc[idx_max, "high"]
+                    recent_low = recent_tail.loc[idx_min, "low"]
+                    
+                    if recent_high > recent_low * 1.01:  # Need at least 1% move
+                        direction = "bullish" if idx_max > idx_min else "bearish"
+                        fib = fibonacci_ote_levels(recent_high, recent_low, direction)
+                        if fib:
+                            top = fib.get("ote_zone_top", 0)
+                            bot = fib.get("ote_zone_bottom", 0)
+                            # Check if spot is inside the OTE zone
+                            if bot <= spot <= top:
+                                tech_signals.append(TechnicalSignal(
+                                    name="fibonacci_ote",
+                                    direction=direction,
+                                    strength=0.85, # Strong signal when in OTE zone
+                                    timeframe="day",
+                                ))
+                except Exception as e:
+                    logger.debug(f"Fib OTE error for {symbol}: {e}")
+
         # RSI Divergence
         if not data_hourly.empty and len(data_hourly) > 44:
             div_result = detect_rsi_divergence(data_hourly, rsi_period=14)
@@ -500,14 +604,23 @@ class Prometheus:
                 logger.debug(f"AI analysis unavailable: {e}")
 
         # 6. Fuse signals
-        signal = self.fusion.fuse(
-            symbol=symbol,
-            spot_price=spot,
-            technical_signals=tech_signals,
-            oi_signals=oi_signals,
-            regime=regime,
-            ai_sentiment=ai_sentiment,
-        )
+        current_equity = self._get_current_equity()
+        bracket = self.risk.bracket_manager.get_bracket(current_equity)
+        swing_profile = self._resolve_capital_profile("swing", current_equity).get("profile", {})
+        old_conf = self.fusion.min_confluence_score
+        self.fusion.min_confluence_score = float(swing_profile.get("confluence_trending", old_conf))
+        try:
+            signal = self.fusion.fuse(
+                symbol=symbol,
+                spot_price=spot,
+                technical_signals=tech_signals,
+                oi_signals=oi_signals,
+                regime=regime,
+                ai_sentiment=ai_sentiment,
+                min_rr=float(swing_profile.get("min_rr", bracket.min_rr)),
+            )
+        finally:
+            self.fusion.min_confluence_score = old_conf
 
         # Attach ATR to signal for risk management
         if signal and atr_value > 0:
@@ -549,7 +662,6 @@ class Prometheus:
             data_bias = self.data.fetch_historical(symbol, days=10, interval="15minute")
         else:
             data_bias = self.data.fetch_historical(symbol, days=30, interval="60minute")
-        data_daily = self.data.fetch_historical(symbol, days=120, interval="day")
 
         if data_primary.empty:
             logger.warning(f"No intraday data for {symbol}")
@@ -651,17 +763,23 @@ class Prometheus:
                     timeframe=bar_interval,
                 ))
 
-        # 3. Regime from daily (for strategy selection)
-        regime = self.regime_detector.detect(data_daily) if not data_daily.empty else None
+        # 3. Regime from intraday data (short-term structure, not 90-day daily)
+        # For intraday, today's 5min price action determines regime — not 3-month trend
+        regime = self.regime_detector.detect(data_primary) if len(data_primary) >= 50 else None
 
         # 4. Fuse with Session 23 intraday weight overrides
         # Swap in a NEW dict with intraday-specific weights (avoids mutating class dict)
         saved_weights = self.fusion.SIGNAL_WEIGHTS
+        current_equity = self._get_current_equity()
+        bracket = self.risk.bracket_manager.get_bracket(current_equity)
+        intra_profile = self._resolve_capital_profile("intraday", current_equity).get("profile", {})
+        saved_conf = self.fusion.min_confluence_score
         intraday_weights = dict(saved_weights)
         intraday_weights["vwap"] = 1.0         # Session VWAP is primary
         intraday_weights["supertrend"] = 1.0   # Supertrend boosted
         intraday_weights["ema"] = 0.75          # EMA 9/21 alignment
         self.fusion.SIGNAL_WEIGHTS = intraday_weights
+        self.fusion.min_confluence_score = float(intra_profile.get("confluence_trending", saved_conf))
 
         try:
             signal = self.fusion.fuse(
@@ -671,10 +789,12 @@ class Prometheus:
                 oi_signals=[],
                 regime=regime,
                 ai_sentiment=None,
+                min_rr=float(intra_profile.get("min_rr", bracket.min_rr)),
             )
         finally:
             # Restore original weights (so swing analyze() is unaffected)
             self.fusion.SIGNAL_WEIGHTS = saved_weights
+            self.fusion.min_confluence_score = saved_conf
 
         # Attach ATR-based SL
         if signal and atr_value > 0:
@@ -1341,6 +1461,201 @@ class Prometheus:
             self.position_monitor.add_position(state)
             self._handle_state_persist(state)
 
+    def _get_current_equity(self) -> float:
+        """Get current account equity safely across broker implementations."""
+        try:
+            margins = self.broker.get_margins()
+            return float(margins.get("equity", self.initial_capital))
+        except Exception:
+            return float(self.initial_capital)
+
+    def _get_recent_closed_trades(self, limit: int, today_only: bool = True) -> List[Dict]:
+        """Return latest closed trades from PaperTrader history (most recent first)."""
+        if limit <= 0 or not isinstance(self.broker, PaperTrader):
+            return []
+
+        history = getattr(self.broker, "trade_history", []) or []
+        if not history:
+            return []
+
+        if not today_only:
+            return list(reversed(history[-limit:]))
+
+        today = datetime.now().date()
+        recent: List[Dict] = []
+        for trade in reversed(history):
+            ts = trade.get("timestamp", "")
+            try:
+                trade_dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                try:
+                    trade_dt = datetime.fromisoformat(str(ts))
+                except Exception:
+                    continue
+
+            if trade_dt.date() != today:
+                continue
+
+            recent.append(trade)
+            if len(recent) >= limit:
+                break
+
+        return recent
+
+    def _evaluate_intraday_pilot_guardrails(
+        self,
+        intraday_cfg: Dict,
+        session_peak_equity: float,
+    ) -> Dict[str, Any]:
+        """Evaluate pilot guardrails and return breach status plus message."""
+        v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg, dict) else {}
+        guard_cfg = v2_cfg.get("pilot_guardrails", {}) if isinstance(v2_cfg, dict) else {}
+
+        current_equity = self._get_current_equity()
+        peak_equity = max(float(session_peak_equity or current_equity), current_equity)
+
+        result: Dict[str, Any] = {
+            "enabled": bool(guard_cfg.get("enabled", False)),
+            "breach": False,
+            "reason": "",
+            "peak_equity": peak_equity,
+        }
+        if not result["enabled"]:
+            return result
+
+        breach_reasons: List[str] = []
+
+        max_dd_pct = float(guard_cfg.get("max_intraday_drawdown_pct", 10.0))
+        dd_from_peak_pct = 0.0
+        if peak_equity > 0:
+            dd_from_peak_pct = max(0.0, (peak_equity - current_equity) / peak_equity * 100.0)
+        if dd_from_peak_pct >= max_dd_pct:
+            breach_reasons.append(
+                f"drawdown {dd_from_peak_pct:.1f}% >= {max_dd_pct:.1f}%"
+            )
+
+        window_trades = int(guard_cfg.get("rolling_window_trades", 20))
+        min_pf = float(guard_cfg.get("min_rolling_pf", 1.10))
+        require_full_window = bool(guard_cfg.get("require_full_window", True))
+        today_only = bool(guard_cfg.get("today_only", True))
+
+        if window_trades > 0:
+            recent = self._get_recent_closed_trades(window_trades, today_only=today_only)
+            n_recent = len(recent)
+            enough = n_recent >= window_trades if require_full_window else n_recent > 0
+            if enough:
+                gains = sum(max(0.0, float(t.get("net_pnl", 0.0))) for t in recent)
+                losses = sum(abs(min(0.0, float(t.get("net_pnl", 0.0)))) for t in recent)
+                rolling_pf = (gains / losses) if losses > 0 else (float("inf") if gains > 0 else 0.0)
+                if rolling_pf < min_pf:
+                    breach_reasons.append(
+                        f"rolling PF {rolling_pf:.2f} < {min_pf:.2f} ({n_recent} trades)"
+                    )
+
+        if breach_reasons:
+            result["breach"] = True
+            result["reason"] = " | ".join(breach_reasons)
+
+        return result
+
+    def _get_capital_tier_key(self, capital: float) -> str:
+        """Resolve capital bracket key (tier1..tierN) from capital.brackets config."""
+        brackets_cfg = get("capital.brackets", {})
+        tiers: List[Tuple[float, str]] = []
+        if isinstance(brackets_cfg, dict):
+            for key, cfg in brackets_cfg.items():
+                if not isinstance(cfg, dict):
+                    continue
+                max_cap = float(cfg.get("max_capital", 0) or 0)
+                tiers.append((max_cap, str(key)))
+        if not tiers:
+            return "tier1"
+
+        tiers.sort(key=lambda x: x[0])
+        cap = float(capital or self.initial_capital)
+        for max_cap, key in tiers:
+            if cap <= max_cap:
+                return key
+        return tiers[-1][1]
+
+    def _resolve_capital_profile(self, mode: str, capital: float) -> Dict[str, Any]:
+        """Resolve bracket-specific profile for swing or intraday parameters."""
+        tier_key = self._get_capital_tier_key(capital)
+        if mode == "intraday":
+            root = get("intraday.v2.profiles", {})
+        else:
+            root = get("swing.profiles", {})
+
+        profile = {}
+        if isinstance(root, dict):
+            profile = root.get(tier_key, {})
+            if not isinstance(profile, dict):
+                profile = {}
+
+        return {
+            "tier": tier_key,
+            "profile": dict(profile),
+        }
+
+    def _reset_intraday_guardrail_audit(self, mode_label: str):
+        """Reset daily intraday guardrail audit state at market-open boundary."""
+        self._intraday_guardrail_audit = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "mode": mode_label,
+            "tripped": False,
+            "reason": "Not tripped",
+        }
+
+    def _mark_intraday_guardrail_breach(self, mode_label: str, reason: str):
+        """Mark intraday guardrail breach for end-of-day summary audit."""
+        self._intraday_guardrail_audit = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "mode": mode_label,
+            "tripped": True,
+            "reason": reason or "Guardrail breached",
+        }
+
+    def _get_intraday_guardrail_audit_line(self) -> str:
+        """Return compact daily audit line for Telegram summary."""
+        audit = self._intraday_guardrail_audit or {}
+        mode = audit.get("mode", "")
+        mode_prefix = f"{mode}: " if mode else ""
+
+        if audit.get("tripped", False):
+            return f"{mode_prefix}TRIPPED ({audit.get('reason', 'n/a')})"
+        return f"{mode_prefix}OK ({audit.get('reason', 'Not tripped')})"
+
+    def _send_intraday_reset_start_message(self, mode_label: str, intraday_cfg: Dict):
+        """Send explicit daily reset/start message with active bracket/profile/guardrails."""
+        current_equity = self._get_current_equity()
+        bracket = self.risk.bracket_manager.get_bracket(current_equity)
+        profile_info = self._resolve_capital_profile("intraday", current_equity)
+        tier_key = profile_info.get("tier", "tier1")
+        profile = profile_info.get("profile", {})
+
+        v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg, dict) else {}
+        guard_cfg = v2_cfg.get("pilot_guardrails", {}) if isinstance(v2_cfg, dict) else {}
+
+        rolling_n = int(guard_cfg.get("rolling_window_trades", 20))
+        min_pf = float(guard_cfg.get("min_rolling_pf", 1.10))
+        max_dd = float(guard_cfg.get("max_intraday_drawdown_pct", 10.0))
+        block_new = bool(guard_cfg.get("block_new_entries_on_breach", True))
+        force_sq = bool(guard_cfg.get("force_square_off_on_breach", True))
+
+        conf_t = float(profile.get("confluence_trending", v2_cfg.get("confluence_trending", 2.8)))
+        conf_s = float(profile.get("confluence_sideways", v2_cfg.get("confluence_sideways", 3.5)))
+        target_atr = float(profile.get("target_atr_mult", v2_cfg.get("target_atr_mult", 2.2)))
+        ts_bars = int(profile.get("time_stop_bars", v2_cfg.get("time_stop_bars", 14)))
+
+        self.telegram.send_message(
+            f"\U0001f9ed <b>INTRADAY DAILY RESET @ 09:15</b>\n"
+            f"Mode: {mode_label}\n"
+            f"Equity: Rs {current_equity:,.0f} | Bracket: {tier_key} ({bracket.name})\n"
+            f"Profile: conf(T/S) {conf_t:.1f}/{conf_s:.1f}, targetATR {target_atr:.1f}, timeStop {ts_bars}\n"
+            f"Guardrail: PF<{min_pf:.2f} over {rolling_n} trades OR DD>={max_dd:.1f}%\n"
+            f"Action on breach: block_new={block_new}, force_square_off={force_sq}"
+        )
+
     # ─────────────────────────────────────────────────────────────────────
     # FULL AUTO MODE
     # ─────────────────────────────────────────────────────────────────────
@@ -1687,17 +2002,30 @@ class Prometheus:
         _did_square_off = False
         _last_scan_time = None
         _did_send_daily_summary = False
+        _guardrail_breached = False
+        _guardrail_reason = ""
+        _did_send_reset_start_msg = False
 
         max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
         last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
         square_off_str = intraday_cfg.get("square_off_time", "15:15")
+        intra_profile_live = self._resolve_capital_profile("intraday", self._get_current_equity()).get("profile", {})
+        if "max_daily_trades" in intra_profile_live:
+            max_trades = int(intra_profile_live.get("max_daily_trades", max_trades))
+        if "entry_cutoff_time" in intra_profile_live:
+            last_entry_str = str(intra_profile_live.get("entry_cutoff_time", last_entry_str))
         last_entry_h, last_entry_m = map(int, last_entry_str.split(":"))
         square_off_h, square_off_m = map(int, square_off_str.split(":"))
         last_entry_time = dtime(last_entry_h, last_entry_m)
         square_off_time = dtime(square_off_h, square_off_m)
         intraday_instruments = intraday_cfg.get("instruments", self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
+        pilot_cfg = intraday_cfg.get("v2", {}).get("pilot_guardrails", {})
+        pilot_block_new = bool(pilot_cfg.get("block_new_entries_on_breach", True))
+        pilot_force_square_off = bool(pilot_cfg.get("force_square_off_on_breach", True))
+        _session_peak_equity = self._get_current_equity()
+        self._reset_intraday_guardrail_audit(mode_label)
 
         while self.running:
             try:
@@ -1710,6 +2038,30 @@ class Prometheus:
 
                 current_time = now.time()
 
+                if current_time >= dtime(9, 15) and not _did_send_reset_start_msg:
+                    self._send_intraday_reset_start_message(mode_label, intraday_cfg)
+                    _did_send_reset_start_msg = True
+
+                if current_time >= dtime(9, 15):
+                    guard_eval = self._evaluate_intraday_pilot_guardrails(
+                        intraday_cfg,
+                        _session_peak_equity,
+                    )
+                    _session_peak_equity = guard_eval.get("peak_equity", _session_peak_equity)
+                    if guard_eval.get("breach") and not _guardrail_breached:
+                        _guardrail_breached = True
+                        _guardrail_reason = guard_eval.get("reason", "pilot guardrail breached")
+                        self._mark_intraday_guardrail_breach(mode_label, _guardrail_reason)
+                        logger.warning(f"{mode_label}: pilot guardrail triggered — {_guardrail_reason}")
+                        self.telegram.send_message(
+                            f"\U0001f6d1 <b>INTRADAY PILOT GUARDRAIL</b>\n"
+                            f"{_guardrail_reason}\n"
+                            "Blocking new intraday entries for today."
+                        )
+                        if pilot_force_square_off and not _did_square_off:
+                            self._square_off_intraday_positions()
+                            _did_square_off = True
+
                 # Pre-market reset
                 if current_time < dtime(9, 15):
                     _today_traded_symbols.clear()
@@ -1717,6 +2069,11 @@ class Prometheus:
                     _did_square_off = False
                     _last_scan_time = None
                     _did_send_daily_summary = False
+                    _guardrail_breached = False
+                    _guardrail_reason = ""
+                    _did_send_reset_start_msg = False
+                    _session_peak_equity = self._get_current_equity()
+                    self._reset_intraday_guardrail_audit(mode_label)
                     self.dashboard.show_status_line(
                         f"{mode_label}: Pre-market. Scan starts at 9:45 AM."
                     )
@@ -1756,6 +2113,15 @@ class Prometheus:
                     self.dashboard.show_status_line(
                         f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
                         f"Square-off at {square_off_str}."
+                    )
+                    time.sleep(30)
+                    continue
+
+                if _guardrail_breached and pilot_block_new:
+                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Guardrail active ({_guardrail_reason}). "
+                        f"Monitoring {n_pos} position(s)."
                     )
                     time.sleep(30)
                     continue
@@ -1932,24 +2298,54 @@ class Prometheus:
         _intra_trades_today = 0
         _did_square_off = False
         _last_intra_scan = None
+        _intra_guardrail_breached = False
+        _intra_guardrail_reason = ""
+        _did_send_reset_start_msg = False
 
         intra_max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
         last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
         square_off_str = intraday_cfg.get("square_off_time", "15:15")
+        intra_profile_live = self._resolve_capital_profile("intraday", self._get_current_equity()).get("profile", {})
+        if "max_daily_trades" in intra_profile_live:
+            intra_max_trades = int(intra_profile_live.get("max_daily_trades", intra_max_trades))
+        if "entry_cutoff_time" in intra_profile_live:
+            last_entry_str = str(intra_profile_live.get("entry_cutoff_time", last_entry_str))
         last_entry_h, last_entry_m = map(int, last_entry_str.split(":"))
         square_off_h, square_off_m = map(int, square_off_str.split(":"))
         last_entry_time = dtime(last_entry_h, last_entry_m)
         square_off_time = dtime(square_off_h, square_off_m)
         intraday_instruments = intraday_cfg.get("instruments", self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
+        pilot_cfg = intraday_cfg.get("v2", {}).get("pilot_guardrails", {})
+        pilot_block_new = bool(pilot_cfg.get("block_new_entries_on_breach", True))
+        pilot_force_square_off = bool(pilot_cfg.get("force_square_off_on_breach", True))
+        _intra_session_peak_equity = self._get_current_equity()
+        self._reset_intraday_guardrail_audit(mode_label)
 
         # Swing state
-        _did_1pm_scan = False
-        _did_335pm_scan = False
+        _completed_index_scans = set()
+        _completed_stock_scans = set()
         _did_send_daily_summary = False
         _swing_traded_symbols = set()  # dedup: one swing trade per symbol per day
         _consecutive_errors = 0
+
+        # Dynamic Schedule Config
+        _idx_scan_times = []
+        for t_str in self.swing_cfg.get("index_scan_times", ["13:00", "15:35"]):
+            h, m = map(int, t_str.split(":"))
+            _idx_scan_times.append(dtime(h, m))
+            
+        _stk_scan_times = []
+        for t_str in self.swing_cfg.get("stock_scan_times", ["12:30", "15:00"]):
+            h, m = map(int, t_str.split(":"))
+            _stk_scan_times.append(dtime(h, m))
+
+        # Stock scan config (from swing section in settings.yaml)
+        _stock_batch_size = self.swing_cfg.get("stock_batch_size", 10)
+        _stock_batch_delay = self.swing_cfg.get("stock_batch_delay_seconds", 5)
+        _stock_conf_min = self.swing_cfg.get("stock_confidence_min", 0.70)
+        _stock_min_signals = self.swing_cfg.get("stock_min_signals", 3)
 
         while self.running:
             try:
@@ -1963,16 +2359,45 @@ class Prometheus:
 
                 current_time = now.time()
 
+                if current_time >= dtime(9, 15) and not _did_send_reset_start_msg:
+                    self._send_intraday_reset_start_message(mode_label, intraday_cfg)
+                    _did_send_reset_start_msg = True
+
+                if current_time >= dtime(9, 15):
+                    guard_eval = self._evaluate_intraday_pilot_guardrails(
+                        intraday_cfg,
+                        _intra_session_peak_equity,
+                    )
+                    _intra_session_peak_equity = guard_eval.get("peak_equity", _intra_session_peak_equity)
+                    if guard_eval.get("breach") and not _intra_guardrail_breached:
+                        _intra_guardrail_breached = True
+                        _intra_guardrail_reason = guard_eval.get("reason", "pilot guardrail breached")
+                        self._mark_intraday_guardrail_breach(mode_label, _intra_guardrail_reason)
+                        logger.warning(f"{mode_label}: intraday guardrail triggered — {_intra_guardrail_reason}")
+                        self.telegram.send_message(
+                            f"\U0001f6d1 <b>INTRADAY PILOT GUARDRAIL</b>\n"
+                            f"{_intra_guardrail_reason}\n"
+                            "Blocking new intraday entries for today."
+                        )
+                        if pilot_force_square_off and not _did_square_off:
+                            self._square_off_intraday_positions()
+                            _did_square_off = True
+
                 # Pre-market reset
                 if current_time < dtime(9, 15):
                     _intra_traded_symbols.clear()
                     _intra_trades_today = 0
                     _did_square_off = False
                     _last_intra_scan = None
-                    _did_1pm_scan = False
-                    _did_335pm_scan = False
+                    _intra_guardrail_breached = False
+                    _intra_guardrail_reason = ""
+                    _intra_session_peak_equity = self._get_current_equity()
+                    _completed_index_scans.clear()
+                    _completed_stock_scans.clear()
                     _did_send_daily_summary = False
                     _swing_traded_symbols.clear()
+                    _did_send_reset_start_msg = False
+                    self._reset_intraday_guardrail_audit(mode_label)
                     # Retry Telegram if it failed at startup
                     self.telegram.reconnect()
                     self.dashboard.show_status_line(
@@ -1996,63 +2421,73 @@ class Prometheus:
                     self._square_off_intraday_positions()
                     _did_square_off = True
 
-                # ── SWING SCAN #2 at 3:35 PM (but not after 4 PM — stale data guard) ──
-                if dtime(15, 35) <= current_time < dtime(16, 0) and not _did_335pm_scan:
-                    logger.info(f"{mode_label}: Swing scan #2 (3:35 PM)")
-                    for symbol in self.symbols:
-                        if symbol in _swing_traded_symbols:
-                            continue
-                        signal = self.analyze(symbol)
-                        if signal and signal.action != "HOLD":
-                            self.telegram.alert_new_signal(signal.to_dict())
-                            refined = self.refine_with_strategy(signal)
-                            position = self.order_manager.execute_signal(
-                                refined, confirm=False
-                            )
-                            self._dispatch_multi_account(refined)
-                            if position:
-                                _swing_traded_symbols.add(symbol)
-                                ts = self.order_manager.create_trailing_state(
-                                    position.position_id
-                                )
-                                if ts:
-                                    ts.trade_mode = "swing"
-                                    ts.bar_interval = "day"
-                                    self.position_monitor.add_position(ts)
-                                    self._handle_state_persist(ts)
-                    _did_335pm_scan = True
-                    time.sleep(60)
-                    continue
-
-                # ── SWING SCAN #1 at 1:00 PM (strict) ──
-                if dtime(13, 0) <= current_time < dtime(13, 5) and not _did_1pm_scan:
-                    logger.info(f"{mode_label}: Swing scan #1 (1:00 PM strict)")
-                    for symbol in self.symbols:
-                        signal = self.analyze(symbol)
-                        if signal and signal.action != "HOLD" and signal.confidence >= 0.80:
-                            n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
-                            if n_signals >= 4 and symbol not in _swing_traded_symbols:
+                # ── DYNAMIC SWING SCANS (INDICES) ──
+                for s_time in sorted(_idx_scan_times, reverse=True):
+                    # Close window definition (5 mins default, 25 mins for closing trade at 15:35)
+                    if s_time.hour == 15 and s_time.minute >= 15:
+                        w_end = dtime(16, 0)
+                    else:
+                        m_end = s_time.minute + 5
+                        w_end = dtime(s_time.hour + (m_end // 60), m_end % 60)
+                        
+                    if s_time <= current_time < w_end and s_time not in _completed_index_scans:
+                        logger.info(f"{mode_label}: Index Swing scan ({s_time.strftime('%H:%M')})")
+                        is_closing = (s_time.hour == 15 and s_time.minute >= 15)
+                        
+                        for symbol in self.symbols:
+                            if symbol in _swing_traded_symbols:
+                                continue
+                            signal = self.analyze(symbol)
+                            if signal and signal.action != "HOLD":
+                                # Strict filters for mid-day scans
+                                if not is_closing:
+                                    if signal.confidence < 0.80:
+                                        continue
+                                    n_sigs = len(signal.contributing_signals) if signal.contributing_signals else 0
+                                    if n_sigs < 4:
+                                        continue
+                                
                                 self.telegram.alert_new_signal(signal.to_dict())
                                 refined = self.refine_with_strategy(signal)
-                                position = self.order_manager.execute_signal(
-                                    refined, confirm=False
-                                )
+                                position = self.order_manager.execute_signal(refined, confirm=False)
                                 self._dispatch_multi_account(refined)
                                 if position:
                                     _swing_traded_symbols.add(symbol)
-                                    ts = self.order_manager.create_trailing_state(
-                                        position.position_id
-                                    )
+                                    ts = self.order_manager.create_trailing_state(position.position_id)
                                     if ts:
                                         ts.trade_mode = "swing"
                                         ts.bar_interval = "day"
                                         self.position_monitor.add_position(ts)
                                         self._handle_state_persist(ts)
-                    _did_1pm_scan = True
+                        _completed_index_scans.add(s_time)
+                        time.sleep(60) # Space out from other scans
+                        break # Only do one scan per iteration
+
+                # ── DYNAMIC SWING SCANS (STOCKS - BATCHED) ──
+                for s_time in sorted(_stk_scan_times, reverse=True):
+                    # Stock scans give 15 min window due to batch processing delays
+                    m_end = s_time.minute + 15
+                    w_end = dtime(s_time.hour + (m_end // 60), m_end % 60)
+                    
+                    if s_time <= current_time < w_end and s_time not in _completed_stock_scans:
+                        if self.stock_symbols:
+                            logger.info(f"{mode_label}: Stock Swing scan ({s_time.strftime('%H:%M')}, {len(self.stock_symbols)} stocks)")
+                            self._scan_stocks_batched(
+                                self.stock_symbols, _swing_traded_symbols,
+                                batch_size=_stock_batch_size,
+                                batch_delay=_stock_batch_delay,
+                                min_confidence=_stock_conf_min,
+                                min_signals=_stock_min_signals,
+                                mode_label=mode_label,
+                            )
+                        _completed_stock_scans.add(s_time)
+                        break
 
                 # ── INTRADAY SCAN (9:45-14:30) ──
                 if current_time < last_entry_time and not _did_square_off:
-                    if _intra_trades_today < intra_max_trades:
+                    if _intra_guardrail_breached and pilot_block_new:
+                        pass
+                    elif _intra_trades_today < intra_max_trades:
                         bar_interval = self._select_intraday_interval()
                         # Auto-match scan interval to bar interval
                         intra_scan_interval = 300 if bar_interval == "5minute" else 900
@@ -2103,10 +2538,19 @@ class Prometheus:
 
                 # Status
                 n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                completed_index_labels = " ".join(sorted(t.strftime('%H:%M') for t in _completed_index_scans))
+                completed_stock_labels = " ".join(sorted(t.strftime('%H:%M') for t in _completed_stock_scans))
+                stock_scan_status = f" | Stocks: {completed_stock_labels}" if self.stock_symbols and completed_stock_labels else ""
+                intra_guardrail_status = (
+                    f" | Intra guardrail: {_intra_guardrail_reason}"
+                    if _intra_guardrail_breached and pilot_block_new
+                    else ""
+                )
                 self.dashboard.show_status_line(
                     f"{mode_label}: {n_pos} pos | "
                     f"Intra: {_intra_trades_today}/{intra_max_trades} | "
-                    f"Swing scans: {'1PM ' if _did_1pm_scan else ''}{'3:35PM' if _did_335pm_scan else ''}"
+                    f"Swing: {completed_index_labels if completed_index_labels else 'pending'}"
+                    f"{stock_scan_status}{intra_guardrail_status}"
                 )
                 time.sleep(10)
                 _consecutive_errors = 0  # Reset on successful iteration
@@ -2201,6 +2645,14 @@ class Prometheus:
         recheck_interval = overrides.get(
             "recheck_bars", 5 if primary_interval == "day" else 10
         )
+        
+        # Capture current risk bracket
+        bracket = self.risk.bracket_manager.get_bracket(capital)
+
+        # Bracket-specific profile defaults (swing + intraday)
+        profile_mode = "intraday" if primary_interval in ("5minute", "15minute") else "swing"
+        profile_info = self._resolve_capital_profile(profile_mode, capital)
+        profile = profile_info.get("profile", {})
 
         # Parrondo regime transition tracking
         _prev_regime = [None]  # mutable container for nonlocal in closure
@@ -2496,6 +2948,13 @@ class Prometheus:
                                    atr, bias, min_confluence, indicators, regime_name="unknown"):
             """Trend-following signal: directional confluence → BS pricing → sizing."""
             ind = indicators
+            min_net_edge = float(overrides.get("min_net_edge", profile.get("min_net_edge", 1.5)))
+            require_vwap_align = bool(overrides.get("require_vwap_alignment", False))
+            require_ema_align = bool(overrides.get("require_ema_alignment", False))
+            require_supertrend_align = bool(overrides.get("require_supertrend_alignment", False))
+            require_volume_surge = bool(overrides.get("require_volume_surge", False))
+            breakout_lookback = int(overrides.get("breakout_lookback", 0) or 0)
+            breakout_atr_buffer = float(overrides.get("breakout_atr_buffer", 0.0) or 0.0)
 
             # --- Confluence scoring (using learned or default weights) ---
             bull_score = 0
@@ -2565,20 +3024,47 @@ class Prometheus:
             elif bias == "bearish":
                 bear_score += _w["signal_bias"]
 
-            # --- Directional decision ---
             net_bull = bull_score - bear_score
             net_bear = bear_score - bull_score
 
-            if bull_score >= min_confluence and net_bull >= 1.5:
+            if global_funnel:
+                global_funnel.record_raw()
+
+            if bull_score >= min_confluence and net_bull >= min_net_edge:
                 direction = "bullish"
                 score = bull_score
                 reasons = bull_reasons
-            elif bear_score >= min_confluence and net_bear >= 1.5:
+            elif bear_score >= min_confluence and net_bear >= min_net_edge:
                 direction = "bearish"
                 score = bear_score
                 reasons = bear_reasons
             else:
                 return None
+
+            # Optional V2 quality gates for intraday.
+            if require_vwap_align and ind["vwap_direction"] != direction:
+                return None
+            if require_ema_align and ind.get("ema_direction") != direction:
+                return None
+            if require_supertrend_align and ind.get("supertrend_direction") != direction:
+                return None
+            if require_volume_surge and not ind["volume_surge"]:
+                return None
+            if breakout_lookback > 0 and len(recent_window) > breakout_lookback:
+                prior = recent_window.iloc[-breakout_lookback-1:-1]
+                if not prior.empty:
+                    if direction == "bullish":
+                        breakout_level = float(prior["high"].max()) + atr * breakout_atr_buffer
+                        if current <= breakout_level:
+                            return None
+                    else:
+                        breakout_level = float(prior["low"].min()) - atr * breakout_atr_buffer
+                        if current >= breakout_level:
+                            return None
+                
+            if global_funnel:
+                global_funnel.record_confluence_pass()
+                global_funnel.record_regime_pass()  # Signal reached here, meaning it passed the regime filter in pro_signal_generator
 
             # Bias filter
             if bias == "bullish" and direction == "bearish":
@@ -2593,7 +3079,7 @@ class Prometheus:
             premium, delta, lot_size, strike, sigma, expiry_str = pricing
 
             # --- SL & TARGET ---
-            sl_atr_mult = 1.0 if capital < 50000 else (1.2 if capital < 100000 else 1.5)
+            sl_atr_mult = bracket.sl_atr_mult
 
             if ind["recent_sweep"] and ind["sweep_direction"] == direction:
                 sl_level = ind["recent_sweep"]["level"]
@@ -2606,21 +3092,15 @@ class Prometheus:
 
             sl_premium_drop = delta * sl_index_move
 
-            # For small accounts (<30K): cap absolute loss per trade
-            # Max loss = Rs 150 per trade → SL = premium - (max_loss / lot_size)
-            if capital < 30000:
-                max_loss_per_trade = 150  # Rs 150 hard cap
-                max_premium_drop = max_loss_per_trade / lot_size
-                sl_premium_drop = min(sl_premium_drop, max_premium_drop)
-                # No premium floor — let tight SL work
+            # Apply absolute loss per trade cap from bracket
+            max_loss_per_trade = bracket.max_loss_per_trade
+            max_premium_drop = max_loss_per_trade / lot_size
+            sl_premium_drop = min(sl_premium_drop, max_premium_drop)
+            
+            # Premium floor for wider stops on larger accounts, minimal floor for small
+            if capital < 50000:
                 premium_sl = premium - sl_premium_drop
-                premium_sl = max(premium_sl, 0.50)  # absolute minimum Rs 0.50
-            elif capital < 50000:
-                max_loss_per_trade = 300
-                max_premium_drop = max_loss_per_trade / lot_size
-                sl_premium_drop = min(sl_premium_drop, max_premium_drop)
-                premium_sl = premium - sl_premium_drop
-                premium_sl = max(premium_sl, premium * 0.25)
+                premium_sl = max(premium_sl, 0.50 if capital < 30000 else premium * 0.25)
             else:
                 premium_sl = max(premium - sl_premium_drop, premium * 0.35)
 
@@ -2632,14 +3112,8 @@ class Prometheus:
             o_target_atr = overrides.get("target_atr_mult", None)
             if o_target_atr is not None:
                 base_target = o_target_atr
-            elif capital < 30000:
-                base_target = 5.0   # Very high target — let trailing stop manage exit
-            elif capital < 50000:
-                base_target = 4.0
-            elif capital < 100000:
-                base_target = 2.5
             else:
-                base_target = 2.0
+                base_target = float(profile.get("target_atr_mult", bracket.base_target))
 
             if score >= 5.0:
                 target_multiplier = base_target + 1.0
@@ -2651,30 +3125,29 @@ class Prometheus:
             target_index_move = atr * target_multiplier
             premium_target = premium + delta * target_index_move
 
-            # Min R:R — higher for small accounts (tight SL = need high reward)
-            if capital < 30000:
-                min_rr = 3.5  # Rs 150 loss → need Rs 525+ target
-            elif capital < 50000:
-                min_rr = 2.5
-            elif capital < 100000:
-                min_rr = 2.0
-            else:
-                min_rr = 1.5
+            # Min R:R — from bracket configuration
+            min_rr = bracket.min_rr
 
             reward = premium_target - premium
             if risk_check > 0 and reward / risk_check < min_rr:
-                premium_target = premium + risk_check * min_rr
+                return None  # Reject trade if natural target doesn't offer min_rr
+                
+            if global_funnel:
+                global_funnel.record_rr_pass()
 
             # Kelly gate — adaptive win rate based on confluence score
             # Higher confluence → more confirming signals → higher expected WR
             # Base 30% at min confluence, scales to 45% at high confluence
-            kelly_base = overrides.get("kelly_wr", 0.30)
+            kelly_base = overrides.get("kelly_wr", profile.get("kelly_wr", 0.30))
             kelly_wr = min(0.50, kelly_base + score * 0.02)  # +2% per confluence point
             final_reward = premium_target - premium
             final_risk = premium - premium_sl
             ev = kelly_wr * final_reward - (1 - kelly_wr) * final_risk
             if ev <= 0:
                 return None
+                
+            if global_funnel:
+                global_funnel.record_kelly_pass()
 
             # --- Position sizing ---
             total_quantity = _size_position(premium, premium_sl, lot_size)
@@ -2685,6 +3158,8 @@ class Prometheus:
             o_time_stop = overrides.get("time_stop_bars", None)
             if o_time_stop is not None:
                 time_stop_bars = o_time_stop
+            elif "time_stop_bars" in profile:
+                time_stop_bars = int(profile.get("time_stop_bars", 7))
             elif primary_interval == "day":
                 time_stop_bars = 7 if capital < 50000 else (6 if capital < 100000 else 5)
             elif primary_interval == "5minute":
@@ -2692,7 +3167,7 @@ class Prometheus:
             else:
                 time_stop_bars = 16 if capital < 50000 else (12 if capital < 100000 else 10)
 
-            be_ratio = overrides.get("breakeven_ratio", 0.6)
+            be_ratio = overrides.get("breakeven_ratio", profile.get("breakeven_ratio", 0.6))
 
             # --- Signal features for regression training ---
             signal_features = {
@@ -3083,7 +3558,7 @@ class Prometheus:
                 if regime_value == "volatile":
                     # Capital preservation — skip trading in volatile regime
                     return None
-                elif regime_value in ("accumulation", "distribution"):
+                elif regime_value in ("accumulation", "distribution") and not overrides.get("intraday_v2_disable_mr", False):
                     # MEAN-REVERSION mode
                     mr_signal = _generate_mean_reversion_signal(
                         data_so_far, recent_window, current, prev_bar,
@@ -3092,14 +3567,14 @@ class Prometheus:
                     if mr_signal:
                         return mr_signal
                     # Fallback: trend with higher confluence
-                    conf_sideways = overrides.get("confluence_sideways", 3.5)
+                    conf_sideways = overrides.get("confluence_sideways", profile.get("confluence_sideways", 3.5))
                     return _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
                         atr, bias, conf_sideways, indicators, regime_name=regime_value
                     )
                 else:
                     # TREND mode (markup, markdown, unknown)
-                    conf_trending = overrides.get("confluence_trending", 3.0)
+                    conf_trending = overrides.get("confluence_trending", profile.get("confluence_trending", 3.0))
                     trend_sig = _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
                         atr, bias, conf_trending, indicators, regime_name=regime_value
@@ -3109,8 +3584,8 @@ class Prometheus:
                     return None
             else:
                 # NON-PARRONDO: per-bar regime for confluence threshold only
-                conf_trending = overrides.get("confluence_trending", 3.0)
-                conf_sideways = overrides.get("confluence_sideways", 3.5)
+                conf_trending = overrides.get("confluence_trending", profile.get("confluence_trending", 3.0))
+                conf_sideways = overrides.get("confluence_sideways", profile.get("confluence_sideways", 3.5))
                 if regime_value == "volatile":
                     # Capital preservation — skip volatile regime
                     return None
@@ -3146,6 +3621,17 @@ class Prometheus:
         vol_target: float = 0.0,
         dd_throttle: bool = True,
         equity_curve_filter: bool = False,
+        half_capacity_mode: bool = False,
+        half_capacity_alpha: float = 0.5,
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,
+        equity_ma_band: float = 0.05,
+        dsq_filter: bool = False,
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
     ):
         """
         Run a backtest on an arbitrary date-sliced DataFrame.
@@ -3221,6 +3707,17 @@ class Prometheus:
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
         )
 
         result = engine.run(
@@ -3229,6 +3726,10 @@ class Prometheus:
             strategy_name=strategy_name,
             warmup_bars=30,
         )
+
+        if global_funnel:
+            for _ in range(result.total_trades):
+                global_funnel.record_final_trade()
 
         if verbose:
             print(result.summary())
@@ -3270,9 +3771,12 @@ class Prometheus:
                         print(f"    {key}: {count}x")
 
                     # Count strategy mode distribution
-                    mr_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('mr_'))
                     trend_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('pro_'))
+                    mr_trades = sum(1 for t in engine.trades if getattr(t, 'strategy', '').startswith('mr_'))
                     print(f"  Strategy Split: {trend_trades} trend, {mr_trades} mean-reversion")
+
+        if global_funnel:
+            global_funnel.print_report()
 
         return result, engine
 
@@ -3288,6 +3792,19 @@ class Prometheus:
         strategy_name: str = "intraday",
         parrondo: bool = False,
         dd_throttle: bool = True,
+        vol_target: float = 0.0,
+        equity_curve_filter: bool = False,
+        half_capacity_mode: bool = False,
+        half_capacity_alpha: float = 0.5,
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,
+        equity_ma_band: float = 0.05,
+        dsq_filter: bool = False,
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
         param_overrides: dict = None,
         verbose: bool = True,
     ):
@@ -3312,8 +3829,12 @@ class Prometheus:
 
         # Intraday-specific overrides
         intraday_cfg = get("intraday", {})
+        intraday_v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg.get("v2", {}), dict) else {}
+        intraday_v2_enabled = intraday_v2_cfg.get("enabled", True)
+        intra_profile_info = self._resolve_capital_profile("intraday", capital)
+        intra_profile = intra_profile_info.get("profile", {})
         intraday_overrides = {
-            "breakeven_ratio": intraday_cfg.get("breakeven_ratio", 0.5),
+            "breakeven_ratio": intra_profile.get("breakeven_ratio", intraday_cfg.get("breakeven_ratio", 0.5)),
             # Force default weights + activate intraday-specific indicators
             "use_default_weights": True,
             "weight_overrides": {
@@ -3322,6 +3843,27 @@ class Prometheus:
                 "signal_vwap": 1.0,          # Boost session VWAP (key intraday indicator)
             },
         }
+        if intraday_v2_enabled:
+            intraday_overrides.update({
+                "confluence_trending": intra_profile.get("confluence_trending", intraday_v2_cfg.get("confluence_trending", 4.25)),
+                "confluence_sideways": intra_profile.get("confluence_sideways", intraday_v2_cfg.get("confluence_sideways", 5.0)),
+                "kelly_wr": intra_profile.get("kelly_wr", intraday_v2_cfg.get("kelly_wr", 0.40)),
+                "time_stop_bars": intra_profile.get("time_stop_bars", intraday_v2_cfg.get("time_stop_bars", 14)),
+                "target_atr_mult": intra_profile.get("target_atr_mult", intraday_v2_cfg.get("target_atr_mult", 2.2)),
+                "min_net_edge": intra_profile.get("min_net_edge", intraday_v2_cfg.get("min_net_edge", 2.0)),
+                "require_vwap_alignment": intraday_v2_cfg.get("require_vwap_alignment", True),
+                "require_ema_alignment": intraday_v2_cfg.get("require_ema_alignment", True),
+                "require_supertrend_alignment": intraday_v2_cfg.get("require_supertrend_alignment", True),
+                "require_volume_surge": intraday_v2_cfg.get("require_volume_surge", True),
+                "breakout_lookback": intraday_v2_cfg.get("breakout_lookback", 12),
+                "breakout_atr_buffer": intraday_v2_cfg.get("breakout_atr_buffer", 0.10),
+                "intraday_v2_disable_mr": intraday_v2_cfg.get("disable_mean_reversion", True),
+                "weight_overrides": {
+                    "signal_supertrend": intraday_v2_cfg.get("weight_supertrend", 1.25),
+                    "signal_ema": intraday_v2_cfg.get("weight_ema", 1.0),
+                    "signal_vwap": intraday_v2_cfg.get("weight_vwap", 1.25),
+                },
+            })
         intraday_overrides.update(overrides)
 
         # Create signal generator with intraday interval
@@ -3340,16 +3882,35 @@ class Prometheus:
         cost_cfg = get("backtest.costs", {})
         max_pos = 1 if self.initial_capital < 30000 else 2
         max_intra_trades = intraday_cfg.get("max_daily_trades", 4)
+        session_open_time = "09:45"
+        session_no_entry_time = intraday_cfg.get("last_entry_time", "14:30")
+        if intraday_v2_enabled:
+            max_intra_trades = int(intra_profile.get("max_daily_trades", intraday_v2_cfg.get("max_daily_trades", max_intra_trades)))
+            session_open_time = intra_profile.get("entry_start_time", intraday_v2_cfg.get("entry_start_time", session_open_time))
+            session_no_entry_time = intra_profile.get("entry_cutoff_time", intraday_v2_cfg.get("entry_cutoff_time", session_no_entry_time))
 
         engine = BacktestEngine(
             initial_capital=self.initial_capital,
             cost_config=cost_cfg,
             capital_tracker=capital_tracker,
             max_positions=max_pos,
+            vol_target=vol_target,
             dd_throttle=dd_throttle,
+            equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
             intraday_session=True,
-            session_open_time="09:45",
-            session_no_entry_time=intraday_cfg.get("last_entry_time", "14:30"),
+            session_open_time=session_open_time,
+            session_no_entry_time=session_no_entry_time,
             session_close_time=intraday_cfg.get("square_off_time", "15:15"),
             max_intraday_trades_per_day=max_intra_trades,
         )
@@ -3414,7 +3975,21 @@ class Prometheus:
         bar_interval: str = "auto",
         parrondo: bool = False,
         dd_throttle: bool = True,
+        vol_target: float = 0.0,
+        equity_curve_filter: bool = False,
+        half_capacity_mode: bool = False,
+        half_capacity_alpha: float = 0.5,
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,
+        equity_ma_band: float = 0.05,
+        dsq_filter: bool = False,
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
         param_overrides: Optional[Dict] = None,
+        force_refresh: bool = False,
     ):
         """Run intraday backtest — completely separate from swing backtest."""
         self.dashboard.show_header()
@@ -3431,13 +4006,17 @@ class Prometheus:
             days = 59
 
         # Fetch intraday data
-        data_intraday = self.data.fetch_historical(symbol, days=days, interval=bar_interval)
+        data_intraday = self.data.fetch_historical(
+            symbol, days=days, interval=bar_interval, force_refresh=force_refresh
+        )
         if data_intraday.empty:
             logger.error(f"No {bar_interval} data available for {symbol}. Check yfinance.")
             return
 
         # Fetch daily data separately for regime detection
-        data_daily = self.data.fetch_historical(symbol, days=max(days, 120), interval="day")
+        data_daily = self.data.fetch_historical(
+            symbol, days=max(days, 120), interval="day", force_refresh=force_refresh
+        )
 
         logger.info(f"Loaded: {len(data_intraday)} x {bar_interval}, {len(data_daily)} x daily bars")
 
@@ -3455,6 +4034,19 @@ class Prometheus:
             strategy_name=f"intraday_{bar_interval}",
             parrondo=parrondo,
             dd_throttle=dd_throttle,
+            vol_target=vol_target,
+            equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
             param_overrides=param_overrides,
         )
 
@@ -3467,6 +4059,21 @@ class Prometheus:
         train_pct: float = 0.65,
         parrondo: bool = False,
         dd_throttle: bool = True,
+        vol_target: float = 0.0,
+        equity_curve_filter: bool = False,
+        half_capacity_mode: bool = False,
+        half_capacity_alpha: float = 0.5,
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,
+        equity_ma_band: float = 0.05,
+        dsq_filter: bool = False,
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
+        param_overrides: Optional[Dict] = None,
+        force_refresh: bool = False,
     ):
         """Intraday walk-forward validation (percentage-split, ~60 day limit)."""
         self.dashboard.show_header()
@@ -3476,8 +4083,12 @@ class Prometheus:
         logger.info(f"Starting INTRADAY walk-forward: {symbol} ({bar_interval})")
 
         # Fetch max available intraday data
-        data_intraday = self.data.fetch_historical(symbol, days=59, interval=bar_interval)
-        data_daily = self.data.fetch_historical(symbol, days=180, interval="day")
+        data_intraday = self.data.fetch_historical(
+            symbol, days=59, interval=bar_interval, force_refresh=force_refresh
+        )
+        data_daily = self.data.fetch_historical(
+            symbol, days=180, interval="day", force_refresh=force_refresh
+        )
 
         if len(data_intraday) < 100:
             logger.error(f"Insufficient intraday data ({len(data_intraday)} bars). Need at least 100.")
@@ -3513,6 +4124,20 @@ class Prometheus:
             strategy_name="intraday_IS",
             parrondo=parrondo,
             dd_throttle=dd_throttle,
+            vol_target=vol_target,
+            equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
+            param_overrides=param_overrides,
         )
 
         # Out-of-sample
@@ -3525,6 +4150,20 @@ class Prometheus:
             strategy_name="intraday_OOS",
             parrondo=parrondo,
             dd_throttle=dd_throttle,
+            vol_target=vol_target,
+            equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
+            param_overrides=param_overrides,
         )
 
         # Comparison
@@ -3584,7 +4223,19 @@ class Prometheus:
         vol_target: float = 0.0,
         dd_throttle: bool = True,
         equity_curve_filter: bool = False,
+        half_capacity_mode: bool = False,
+        half_capacity_alpha: float = 0.5,
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,
+        equity_ma_band: float = 0.05,
+        dsq_filter: bool = False,
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
         param_overrides: Optional[Dict] = None,
+        force_refresh: bool = False,
     ):
         """Run backtest on historical data using professional signal stack."""
         self.dashboard.show_header()
@@ -3601,17 +4252,27 @@ class Prometheus:
         use_daily_primary = days > 59
         if use_daily_primary:
             logger.info(f"Long backtest ({days} days) — using DAILY bars as primary timeframe")
-            data_primary = self.data.fetch_historical(symbol, days=days, interval="day")
+            data_primary = self.data.fetch_historical(
+                symbol, days=days, interval="day", force_refresh=force_refresh
+            )
             # For hourly bias — yfinance gives ~730 days max
             hourly_days = min(days, 729)
-            data_hourly = self.data.fetch_historical(symbol, days=hourly_days, interval="60minute")
+            data_hourly = self.data.fetch_historical(
+                symbol, days=hourly_days, interval="60minute", force_refresh=force_refresh
+            )
             data_daily = data_primary  # same data
             primary_interval = "day"
         else:
             logger.info(f"Short backtest ({days} days) — using 15min bars as primary timeframe")
-            data_primary = self.data.fetch_historical(symbol, days=days, interval="15minute")
-            data_hourly = self.data.fetch_historical(symbol, days=days, interval="60minute")
-            data_daily = self.data.fetch_historical(symbol, days=max(days, 120), interval="day")
+            data_primary = self.data.fetch_historical(
+                symbol, days=days, interval="15minute", force_refresh=force_refresh
+            )
+            data_hourly = self.data.fetch_historical(
+                symbol, days=days, interval="60minute", force_refresh=force_refresh
+            )
+            data_daily = self.data.fetch_historical(
+                symbol, days=max(days, 120), interval="day", force_refresh=force_refresh
+            )
             primary_interval = "15minute"
 
             if data_primary.empty:
@@ -3751,11 +4412,22 @@ class Prometheus:
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
         )
 
         logger.info(f"Running backtest on {len(data_primary)} bars of {primary_interval} data..."
                      + (" [PARRONDO]" if parrondo else "")
-                     + (" [RISK-OVERLAYS]" if (vol_target or dd_throttle or equity_curve_filter) else ""))
+                 + (" [RISK-OVERLAYS]" if (vol_target or dd_throttle or equity_curve_filter or half_capacity_mode or dsq_filter or equity_ma_sizing) else ""))
 
         result = engine.run(
             data=data_primary,
@@ -3763,6 +4435,10 @@ class Prometheus:
             strategy_name=f"pro_{strategy}_{symbol.replace(' ', '_')}",
             warmup_bars=30,
         )
+
+        if global_funnel:
+            for _ in range(result.total_trades):
+                global_funnel.record_final_trade()
 
         # Display results
         self.dashboard.show_backtest_results(result)
@@ -3796,16 +4472,22 @@ class Prometheus:
 
         # Risk overlay stats
         ros = engine.risk_overlay_stats
-        if ros["signals_received"] > 0 and (vol_target or dd_throttle or equity_curve_filter):
+        if ros["signals_received"] > 0 and (vol_target or dd_throttle or equity_curve_filter or half_capacity_mode or dsq_filter or equity_ma_sizing):
             print("\n--- Risk Overlay Stats ---")
             print(f"  Signals received: {ros['signals_received']}")
             if equity_curve_filter:
                 print(f"  Equity-filtered (skipped): {ros['equity_filtered']} "
                       f"({ros['equity_filtered']/ros['signals_received']*100:.0f}%)")
+            if equity_ma_sizing:
+                print(f"  Equity-MA sized: {ros.get('ma_sized', 0)}")
             if vol_target:
                 print(f"  Vol-scaled: {ros['vol_scaled']} (target={vol_target*100:.0f}%)")
             if dd_throttle:
                 print(f"  DD-throttled: {ros['dd_throttled']}")
+            if half_capacity_mode:
+                print(f"  Half-capacity scaled: {ros.get('half_capacity_scaled', 0)} (alpha={half_capacity_alpha:.2f})")
+            if dsq_filter:
+                print(f"  DSQ-scaled: {ros.get('dsq_scaled', 0)} | DSQ-filtered: {ros.get('dsq_filtered', 0)}")
 
         # Exit reason analysis
         if engine.trades:
@@ -3882,6 +4564,18 @@ class Prometheus:
         vol_target: float = 0.0,
         dd_throttle: bool = True,
         equity_curve_filter: bool = False,
+        half_capacity_mode: bool = False,
+        half_capacity_alpha: float = 0.5,
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,
+        equity_ma_band: float = 0.05,
+        dsq_filter: bool = False,
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
+        force_refresh: bool = False,
     ):
         """
         Walk-forward validation: train on historical, test on unseen data.
@@ -3896,7 +4590,9 @@ class Prometheus:
 
         # Fetch maximum available daily data
         logger.info(f"Fetching maximum daily data for {symbol}...")
-        data_all = self.data.fetch_historical(symbol, days=6750, interval="day", force_refresh=True)
+        data_all = self.data.fetch_historical(
+            symbol, days=6750, interval="day", force_refresh=force_refresh
+        )
 
         if data_all.empty or len(data_all) < 100:
             logger.error(f"Insufficient data for {symbol}: {len(data_all)} bars")
@@ -3937,6 +4633,17 @@ class Prometheus:
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
         )
 
         # ── OUT-OF-SAMPLE ──
@@ -3952,6 +4659,17 @@ class Prometheus:
             vol_target=vol_target,
             dd_throttle=dd_throttle,
             equity_curve_filter=equity_curve_filter,
+            half_capacity_mode=half_capacity_mode,
+            half_capacity_alpha=half_capacity_alpha,
+            equity_ma_window=equity_ma_window,
+            equity_ma_sizing=equity_ma_sizing,
+            equity_ma_band=equity_ma_band,
+            dsq_filter=dsq_filter,
+            dsq_lookback=dsq_lookback,
+            dsq_baseline_window=dsq_baseline_window,
+            dsq_soft=dsq_soft,
+            dsq_hard=dsq_hard,
+            dsq_min_scalar=dsq_min_scalar,
         )
 
         # ── COMPARISON ──
@@ -4433,6 +5151,7 @@ class Prometheus:
         train_end: str = "2020-12-31",
         test_start: str = "2021-01-01",
         dd_throttle: bool = True,
+        force_refresh: bool = False,
     ):
         """
         Walk-forward validation using daily bars with intraday signal weights.
@@ -4460,7 +5179,7 @@ class Prometheus:
 
         logger.info(f"Fetching maximum daily data for {symbol}...")
         data_all = self.data.fetch_historical(
-            symbol, days=6750, interval="day", force_refresh=True
+            symbol, days=6750, interval="day", force_refresh=force_refresh
         )
 
         if data_all.empty or len(data_all) < 100:
@@ -4704,7 +5423,7 @@ class Prometheus:
 
         scan_results = []
 
-        for symbol in self.symbols:
+        for symbol in self.all_symbols:
             print(f"  Analyzing {symbol}...", end="", flush=True)
             signal = self.analyze(symbol)
 
@@ -4886,8 +5605,145 @@ class Prometheus:
         print("\n" + "=" * 60)
         print("  Setup complete! Start with: python main.py scan")
         print("=" * 60)
-
     # ─────────────────────────────────────────────────────────────────────
+    # HELPER: Batched Stock Swing Scan
+    # ─────────────────────────────────────────────────────────────────────
+    def _scan_stocks_batched(
+        self,
+        stocks: list,
+        traded_symbols: set,
+        batch_size: int = 10,
+        batch_delay: int = 5,
+        min_confidence: float = 0.70,
+        min_signals: int = 3,
+        mode_label: str = "COMBINED DRY",
+    ):
+        """
+        Scan F&O stocks in batches to avoid yfinance rate limits.
+        Uses same analyze() + regime detection pipeline as index scans.
+        """
+        REGIME_MULTIPLIER = {
+            "markup": 1.00, "markdown": 0.95, "accumulation": 0.75,
+            "distribution": 0.70, "volatile": 0.55, "unknown": 0.40,
+        }
+
+        actionable_signals = []
+        total_scanned = 0
+
+        import concurrent.futures
+        
+        # Helper to scan one symbol
+        def _scan_one(symbol):
+            if symbol in traded_symbols:
+                return None
+            try:
+                signal = self.analyze(symbol)
+                if not signal or signal.action == "HOLD":
+                    return None
+                    
+                data = self.data.fetch_historical(symbol, days=60, interval="day")
+                regime_str = "unknown"
+                if not data.empty:
+                    regime = self.regime_detector.detect(data)
+                    regime_str = regime.regime.value
+                    
+                regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
+                adj_confidence = signal.confidence * regime_mult
+                n_signals = len(signal.contributing_signals) if signal.contributing_signals else 0
+                
+                if adj_confidence >= min_confidence and n_signals >= min_signals:
+                    return {
+                        "symbol": symbol,
+                        "signal": signal,
+                        "adj_confidence": adj_confidence,
+                        "n_signals": n_signals,
+                        "regime_str": regime_str
+                    }
+            except Exception as e:
+                logger.debug(f"Stock scan failed for {symbol}: {e}")
+            return None
+
+        for batch_start in range(0, len(stocks), batch_size):
+            batch = stocks[batch_start:batch_start + batch_size]
+            batch_num = batch_start // batch_size + 1
+            total_batches = (len(stocks) + batch_size - 1) // batch_size
+            logger.info(
+                f"{mode_label}: Stock batch {batch_num}/{total_batches} "
+                f"({', '.join(batch[:3])}{'...' if len(batch) > 3 else ''})"
+            )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+                futures = {executor.submit(_scan_one, sym): sym for sym in batch}
+                for future in concurrent.futures.as_completed(futures):
+                    total_scanned += 1
+                    res = future.result()
+                    if not res: continue
+                    
+                    symbol = res["symbol"]
+                    signal = res["signal"]
+                    adj_conf = res["adj_confidence"]
+                    n_sigs = res["n_signals"]
+                    r_str = res["regime_str"]
+                    
+                    logger.info(
+                        f"  {symbol}: {signal.action} conf={adj_conf:.0%} "
+                        f"signals={n_sigs} regime={r_str}"
+                    )
+                    self.telegram.alert_new_signal({
+                        "action": signal.action,
+                        "symbol": symbol,
+                        "confidence": adj_conf,
+                        "entry_price": signal.entry_price,
+                        "stop_loss": signal.stop_loss,
+                        "target": signal.target,
+                        "risk_reward": signal.risk_reward,
+                        "regime": r_str,
+                        "reasoning": signal.reasoning,
+                    })
+
+                    refined = self.refine_with_strategy(signal)
+                    position = self.order_manager.execute_signal(refined, confirm=False)
+                    self._dispatch_multi_account(refined)
+                    
+                    if position:
+                        traded_symbols.add(symbol)
+                        ts = self.order_manager.create_trailing_state(position.position_id)
+                        if ts:
+                            ts.trade_mode = "swing"
+                            ts.bar_interval = "day"
+                            self.position_monitor.add_position(ts)
+                            self._handle_state_persist(ts)
+
+                    actionable_signals.append({
+                        "symbol": symbol,
+                        "action": signal.action,
+                        "adj_confidence": adj_conf,
+                        "regime": r_str,
+                        "n_signals": n_sigs,
+                    })
+
+            if batch_start + batch_size < len(stocks):
+                time.sleep(batch_delay)
+
+        # Summary to Telegram
+        if actionable_signals:
+            summary_lines = [
+                f"\U0001f4ca \u003cb\u003eSTOCK SCAN COMPLETE\u003c/b\u003e",
+                f"\u003ccode\u003e{datetime.now().strftime('%d %b %Y  %H:%M')}\u003ccode\u003e",
+                f"Scanned: {total_scanned} stocks | Signals: {len(actionable_signals)}",
+                "",
+            ]
+            for s in actionable_signals[:5]:
+                emoji = "\U0001f7e2" if "CE" in s["action"] else "\U0001f534"
+                summary_lines.append(
+                    f"{emoji} \u003cb\u003e{s['symbol']}\u003c/b\u003e {s['action']} "
+                    f"({s['adj_confidence']:.0%}) | {s['regime'].upper()}"
+                )
+            self.telegram.send_message("\n".join(summary_lines))
+        else:
+            logger.info(f"{mode_label}: Stock scan complete — {total_scanned} scanned, 0 actionable")
+
+
     # HELPERS
     # ─────────────────────────────────────────────────────────────────────
     def _send_daily_summary(self):
@@ -4902,6 +5758,7 @@ class Prometheus:
             "total_trades": state.trades_today,
             "winning_trades": winning,
             "equity": state.capital,
+            "intraday_guardrail_audit": self._get_intraday_guardrail_audit_line(),
         })
 
         # Multi-account summary
@@ -4931,6 +5788,7 @@ class Prometheus:
 
         tg.register_command("help", self._tg_cmd_help)
         tg.register_command("scan", self._tg_cmd_scan)
+        tg.register_command("scan_count", self._tg_cmd_scan_count)
         tg.register_command("status", self._tg_cmd_status)
         tg.register_command("pnl", self._tg_cmd_pnl)
         tg.register_command("regime", self._tg_cmd_regime)
@@ -4962,9 +5820,72 @@ class Prometheus:
             f"<i>Signals sent automatically during market hours</i>"
         )
 
+    def _tg_cmd_scan_count(self, args: str = "") -> str:
+        """Run a background scan and return the count of passing signals (Swing & Intraday)."""
+        self.telegram.send_message("🔍 Running deep signal count across all instruments... please wait 1-2 mins.")
+        
+        import concurrent.futures
+
+        def _scan_swing(symbol):
+            try:
+                signal = self.analyze(symbol)
+                if signal and signal.action != "HOLD":
+                    n_sigs = len(signal.contributing_signals) if signal.contributing_signals else 0
+                    if signal.confidence >= 0.65 and n_sigs >= 4 and signal.risk_reward >= 2.0:
+                        return f"• {symbol}: {signal.action} (Conf: {signal.confidence:.2f}, Sigs: {n_sigs}, R:R: {signal.risk_reward:.2f})"
+            except Exception as e:
+                logger.debug(f"/scan_count error on {symbol}: {e}")
+            return None
+
+        def _scan_intra(symbol):
+            try:
+                signal = self.analyze_intraday(symbol, "15minute")
+                if signal and signal.action != "HOLD":
+                    return f"• {symbol}: {signal.action} (Intraday 15m)"
+            except Exception as e:
+                pass
+            return None
+
+        swing_count = 0
+        swing_details = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            for ds in executor.map(_scan_swing, self.all_symbols):
+                if ds:
+                    swing_count += 1
+                    swing_details.append(ds)
+
+        intra_count = 0
+        intra_details = []
+        intraday_cfg = self.config.get("intraday", {})
+        intraday_symbols = intraday_cfg.get("instruments", self.symbols)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            for di in executor.map(_scan_intra, intraday_symbols):
+                if di:
+                    intra_count += 1
+                    intra_details.append(di)
+
+        res = f"📊 <b>LIVE SCAN RESULTS</b>\n\n"
+        res += f"<b>🦅 Swing Signals (>=65% Conf, 4+ Sigs): {swing_count}</b>\n"
+        if swing_details:
+            res += "\n".join(swing_details) + "\n"
+        
+        res += f"\n<b>⚡ Intraday Signals (15m bias): {intra_count}</b>\n"
+        if intra_details:
+            res += "\n".join(intra_details) + "\n"
+            
+        if swing_count == 0 and intra_count == 0:
+            res += "\n<i>No signals currently pass the 4-Gate System.</i>"
+            
+        return res
+
     def _tg_cmd_scan(self, args: str = "") -> str:
-        """Handle /scan command — run multi-index scanner with swing + intraday."""
-        self.telegram.send_message("\U0001f50e Scanning all indices (swing + intraday)... please wait.")
+        """Handle /scan command — run multi-index + stock scanner with swing + intraday."""
+        n_total = len(self.all_symbols)
+        self.telegram.send_message(
+            f"\U0001f50e Scanning {n_total} symbols "
+            f"({len(self.symbols)} indices + {len(self.stock_symbols)} stocks, "
+            f"swing + intraday)... please wait."
+        )
 
         # Regime multipliers (same as run_scan)
         REGIME_MULTIPLIER = {
@@ -4973,26 +5894,24 @@ class Prometheus:
         }
         SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
 
-        scan_results = []
-        for symbol in self.symbols:
+        def _scan_one_cmd(symbol):
             try:
                 signal = self.analyze(symbol)
                 if not signal:
-                    continue
-
+                    return None
+                    
                 data = self.data.fetch_historical(symbol, days=90, interval="day")
                 regime_str = "unknown"
                 if not data.empty:
                     regime = self.regime_detector.detect(data)
                     regime_str = regime.regime.value
-
+                    
                 raw_confidence = signal.confidence
                 regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
                 adj_confidence = raw_confidence * regime_mult
-
                 sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
-
-                scan_results.append({
+                
+                return {
                     "symbol": symbol,
                     "action": signal.action,
                     "raw_confidence": raw_confidence,
@@ -5006,9 +5925,15 @@ class Prometheus:
                     "reasoning": signal.reasoning,
                     "executable": symbol not in SIGNAL_ONLY,
                     "timeframe": "swing",
-                })
+                }
             except Exception as e:
                 logger.debug(f"Scan failed for {symbol}: {e}")
+                return None
+
+        scan_results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            for sres in executor.map(_scan_one_cmd, self.all_symbols):
+                if sres: scan_results.append(sres)
 
         # Intraday scan (during market hours only)
         from datetime import time as dtime
@@ -5020,27 +5945,24 @@ class Prometheus:
 
         if mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
             bar_interval = self._select_intraday_interval()
-            for symbol in intraday_instruments:
+            def _scan_intra_cmd(symbol):
                 try:
                     signal = self.analyze_intraday(symbol, bar_interval)
                     if not signal:
-                        continue
-
-                    data = self.data.fetch_historical(symbol, days=5, interval=bar_interval)
+                        return None
+                        
+                    intra_data = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
                     regime_str = "unknown"
-                    if not data.empty:
-                        data_daily = self.data.fetch_historical(symbol, days=90, interval="day")
-                        if not data_daily.empty:
-                            regime = self.regime_detector.detect(data_daily)
-                            regime_str = regime.regime.value
-
+                    if len(intra_data) >= 50:
+                        regime = self.regime_detector.detect(intra_data)
+                        regime_str = regime.regime.value
+                        
                     raw_confidence = signal.confidence
                     regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
                     adj_confidence = raw_confidence * regime_mult
-
                     sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
-
-                    scan_results.append({
+                    
+                    return {
                         "symbol": f"{symbol} (intraday {bar_interval})",
                         "action": signal.action,
                         "raw_confidence": raw_confidence,
@@ -5054,9 +5976,14 @@ class Prometheus:
                         "reasoning": getattr(signal, "reasoning", ""),
                         "executable": symbol not in SIGNAL_ONLY,
                         "timeframe": "intraday",
-                    })
+                    }
                 except Exception as e:
                     logger.debug(f"Intraday scan failed for {symbol}: {e}")
+                    return None
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                for sres in executor.map(_scan_intra_cmd, intraday_instruments):
+                    if sres: scan_results.append(sres)
 
         # Send formatted summary (handles empty case too)
         self.telegram.alert_scanner_summary(scan_results)
@@ -5307,6 +6234,24 @@ def main():
         help="Path to custom config file",
     )
     parser.add_argument(
+        "--data-source",
+        default="auto",
+        choices=["auto", "kite", "angelone", "yfinance"],
+        help="Historical data source mode (default: auto)",
+    )
+    parser.add_argument(
+        "--fetch-retries",
+        type=int,
+        default=2,
+        help="Retries per data source fetch attempt (default: 2)",
+    )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        default=False,
+        help="Bypass cached OHLCV and refetch from provider",
+    )
+    parser.add_argument(
         "--train-end",
         default="2020-12-31",
         help="End date for training period in walkforward mode (default: 2020-12-31)",
@@ -5366,6 +6311,72 @@ def main():
         help="Enable ALL institutional risk overlays (vol-target=0.15, dd-throttle, equity-filter)",
     )
     parser.add_argument(
+        "--half-capacity",
+        action="store_true",
+        default=False,
+        help="Enable sustainable half-capacity sizing (Parrondo-inspired capital preservation)",
+    )
+    parser.add_argument(
+        "--half-capacity-alpha",
+        type=float,
+        default=0.5,
+        help="Half-capacity utilization factor alpha in (0,1], default 0.5",
+    )
+    parser.add_argument(
+        "--equity-ma-window",
+        type=int,
+        default=50,
+        help="Equity curve MA window used by participation/sizing filters (default: 50)",
+    )
+    parser.add_argument(
+        "--equity-ma-sizing",
+        action="store_true",
+        default=False,
+        help="Scale position size by equity-vs-MA distance (defensive near MA)",
+    )
+    parser.add_argument(
+        "--equity-ma-band",
+        type=float,
+        default=0.05,
+        help="Band for equity-MA sizing interpolation (default: 0.05 = 5%%)",
+    )
+    parser.add_argument(
+        "--dsq-filter",
+        action="store_true",
+        default=False,
+        help="Enable Domain Shift Quotient (DSQ) regime mismatch risk scaling/filter",
+    )
+    parser.add_argument(
+        "--dsq-lookback",
+        type=int,
+        default=20,
+        help="Lookback bars for current volatility in DSQ (default: 20)",
+    )
+    parser.add_argument(
+        "--dsq-baseline-window",
+        type=int,
+        default=252,
+        help="Baseline bars for DSQ volatility reference (default: 252)",
+    )
+    parser.add_argument(
+        "--dsq-soft",
+        type=float,
+        default=0.25,
+        help="DSQ soft threshold where size starts reducing (default: 0.25)",
+    )
+    parser.add_argument(
+        "--dsq-hard",
+        type=float,
+        default=0.60,
+        help="DSQ hard threshold where trades are skipped (default: 0.60)",
+    )
+    parser.add_argument(
+        "--dsq-min-scalar",
+        type=float,
+        default=0.25,
+        help="Minimum size scalar near DSQ hard threshold (default: 0.25)",
+    )
+    parser.add_argument(
         "--high-quality",
         action="store_true",
         default=False,
@@ -5409,12 +6420,19 @@ def main():
         if args.vol_target == 0.0:
             args.vol_target = 0.15
         # Note: equity filter NOT enabled by default — too aggressive for small capital
+        args.half_capacity = True
+        args.equity_ma_sizing = True
+        args.dsq_filter = True
 
     # DD throttle always on — structural protection for small accounts
     args.dd_throttle = True
 
     # Initialize system
     prometheus = Prometheus(config_path=args.config)
+    prometheus.data.configure_historical_fetch(
+        source=args.data_source,
+        retries=args.fetch_retries,
+    )
 
     # Override mode from CLI (settings.yaml is default, CLI takes precedence)
     if args.mode in ("semi_auto", "full_auto", "dry_run"):
@@ -5471,11 +6489,34 @@ def main():
     elif args.mode == "backtest":
         if args.intraday:
             # ── INTRADAY BACKTEST (separate from swing) ──
+            intraday_overrides = {}
+            if args.high_quality:
+                intraday_overrides = {
+                    "confluence_trending": 4.5,
+                    "confluence_sideways": 5.5,
+                    "min_net_edge": 2.2,
+                    "kelly_wr": 0.42,
+                }
             prometheus.run_intraday_backtest(
                 symbol=args.symbol or "NIFTY 50",
                 days=min(args.days, 59),
                 parrondo=args.parrondo,
                 dd_throttle=args.dd_throttle,
+                vol_target=args.vol_target,
+                equity_curve_filter=args.equity_filter,
+                half_capacity_mode=args.half_capacity,
+                half_capacity_alpha=args.half_capacity_alpha,
+                equity_ma_window=args.equity_ma_window,
+                equity_ma_sizing=args.equity_ma_sizing,
+                equity_ma_band=args.equity_ma_band,
+                dsq_filter=args.dsq_filter,
+                dsq_lookback=args.dsq_lookback,
+                dsq_baseline_window=args.dsq_baseline_window,
+                dsq_soft=args.dsq_soft,
+                dsq_hard=args.dsq_hard,
+                dsq_min_scalar=args.dsq_min_scalar,
+                param_overrides=intraday_overrides if intraday_overrides else None,
+                force_refresh=args.force_refresh,
             )
         else:
             # ── SWING BACKTEST (LOCKED — do not modify) ──
@@ -5498,7 +6539,19 @@ def main():
                 vol_target=args.vol_target,
                 dd_throttle=args.dd_throttle,
                 equity_curve_filter=args.equity_filter,
+                half_capacity_mode=args.half_capacity,
+                half_capacity_alpha=args.half_capacity_alpha,
+                equity_ma_window=args.equity_ma_window,
+                equity_ma_sizing=args.equity_ma_sizing,
+                equity_ma_band=args.equity_ma_band,
+                dsq_filter=args.dsq_filter,
+                dsq_lookback=args.dsq_lookback,
+                dsq_baseline_window=args.dsq_baseline_window,
+                dsq_soft=args.dsq_soft,
+                dsq_hard=args.dsq_hard,
+                dsq_min_scalar=args.dsq_min_scalar,
                 param_overrides=hq_overrides if hq_overrides else None,
+                force_refresh=args.force_refresh,
             )
 
     elif args.mode == "signal":
@@ -5548,13 +6601,37 @@ def main():
                 train_end=args.train_end,
                 test_start=args.test_start,
                 dd_throttle=args.dd_throttle,
+                force_refresh=args.force_refresh,
             )
         elif args.intraday:
             # ── INTRADAY WALK-FORWARD (separate from swing) ──
+            intraday_overrides = {}
+            if args.high_quality:
+                intraday_overrides = {
+                    "confluence_trending": 4.5,
+                    "confluence_sideways": 5.5,
+                    "min_net_edge": 2.2,
+                    "kelly_wr": 0.42,
+                }
             prometheus.run_intraday_walkforward(
                 symbol=args.symbol or "NIFTY 50",
                 parrondo=args.parrondo,
                 dd_throttle=args.dd_throttle,
+                vol_target=args.vol_target,
+                equity_curve_filter=args.equity_filter,
+                half_capacity_mode=args.half_capacity,
+                half_capacity_alpha=args.half_capacity_alpha,
+                equity_ma_window=args.equity_ma_window,
+                equity_ma_sizing=args.equity_ma_sizing,
+                equity_ma_band=args.equity_ma_band,
+                dsq_filter=args.dsq_filter,
+                dsq_lookback=args.dsq_lookback,
+                dsq_baseline_window=args.dsq_baseline_window,
+                dsq_soft=args.dsq_soft,
+                dsq_hard=args.dsq_hard,
+                dsq_min_scalar=args.dsq_min_scalar,
+                param_overrides=intraday_overrides if intraday_overrides else None,
+                force_refresh=args.force_refresh,
             )
         else:
             # ── SWING WALK-FORWARD (LOCKED — do not modify) ──
@@ -5570,6 +6647,18 @@ def main():
                 vol_target=args.vol_target,
                 dd_throttle=args.dd_throttle,
                 equity_curve_filter=args.equity_filter,
+                half_capacity_mode=args.half_capacity,
+                half_capacity_alpha=args.half_capacity_alpha,
+                equity_ma_window=args.equity_ma_window,
+                equity_ma_sizing=args.equity_ma_sizing,
+                equity_ma_band=args.equity_ma_band,
+                dsq_filter=args.dsq_filter,
+                dsq_lookback=args.dsq_lookback,
+                dsq_baseline_window=args.dsq_baseline_window,
+                dsq_soft=args.dsq_soft,
+                dsq_hard=args.dsq_hard,
+                dsq_min_scalar=args.dsq_min_scalar,
+                force_refresh=args.force_refresh,
             )
 
     elif args.mode == "sensitivity":

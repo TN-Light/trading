@@ -14,6 +14,7 @@ Key principles:
 
 import pandas as pd
 import numpy as np
+import math
 from typing import Dict, List, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -90,6 +91,8 @@ class BacktestResult:
     drawdown_curve: List[float]
     monthly_returns: Dict[str, float]
     trades: List[Dict]
+    psr_pct: float = 0.0
+    min_track_record_len: int = 0
 
     def summary(self) -> str:
         """Human-readable summary."""
@@ -113,6 +116,8 @@ class BacktestResult:
             f"Sharpe Ratio: {self.sharpe_ratio:.2f}\n"
             f"Sortino Ratio: {self.sortino_ratio:.2f}\n"
             f"Calmar Ratio: {self.calmar_ratio:.2f}\n"
+            f"PSR (>0 Sharpe): {self.psr_pct:.1f}%\n"
+            f"Min Track Record (95%): {self.min_track_record_len} observations\n"
             f"Max Drawdown: {self.max_drawdown_pct:.1f}%\n"
             f"Max DD Duration: {self.max_drawdown_duration_days} days\n"
             f"{'─'*60}\n"
@@ -139,8 +144,9 @@ class ZerodhaCostModel:
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
         self.brokerage_per_order = cfg.get("options_brokerage", 20)
-        self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.0625) / 100
-        self.stt_futures_pct = cfg.get("stt_futures", 0.0125) / 100
+        # Correct Zerodha STT rates (options 0.10%, futures 0.01%)
+        self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.10) / 100
+        self.stt_futures_pct = cfg.get("stt_futures", 0.01) / 100
         self.transaction_charges_pct = cfg.get("transaction_charges", 0.053) / 100
         self.gst_pct = cfg.get("gst", 18.0) / 100
         self.sebi_charges_pct = cfg.get("sebi_charges", 0.0001) / 100
@@ -226,6 +232,17 @@ class BacktestEngine:
         vol_target: float = 0.0,       # Target annualized vol (e.g. 0.15 = 15%). 0 = disabled
         dd_throttle: bool = False,      # Reduce size during drawdowns
         equity_curve_filter: bool = False,  # Skip trades when equity < SMA
+        half_capacity_mode: bool = False,   # Parrondo-style sustainability cap (alpha)
+        half_capacity_alpha: float = 0.5,   # Target operating capacity (0, 1]
+        equity_ma_window: int = 50,
+        equity_ma_sizing: bool = False,     # Scale size by distance to equity MA
+        equity_ma_band: float = 0.05,       # +/- band around MA for sizing interpolation
+        dsq_filter: bool = False,            # Domain Shift Quotient based risk-off/scaling
+        dsq_lookback: int = 20,
+        dsq_baseline_window: int = 252,
+        dsq_soft: float = 0.25,
+        dsq_hard: float = 0.60,
+        dsq_min_scalar: float = 0.25,
         # ── Intraday session enforcement (opt-in, default off) ──
         intraday_session: bool = False,
         session_open_time: str = "09:45",      # Skip bars before this
@@ -255,11 +272,26 @@ class BacktestEngine:
         self.vol_target = vol_target
         self.dd_throttle = dd_throttle
         self.equity_curve_filter = equity_curve_filter
+        self.half_capacity_mode = half_capacity_mode
+        self.half_capacity_alpha = float(max(0.1, min(1.0, half_capacity_alpha)))
+        self.equity_ma_window = max(10, int(equity_ma_window))
+        self.equity_ma_sizing = equity_ma_sizing
+        self.equity_ma_band = float(max(0.01, min(0.20, equity_ma_band)))
+        self.dsq_filter = dsq_filter
+        self.dsq_lookback = max(10, int(dsq_lookback))
+        self.dsq_baseline_window = max(self.dsq_lookback + 20, int(dsq_baseline_window))
+        self.dsq_soft = float(max(0.05, dsq_soft))
+        self.dsq_hard = float(max(self.dsq_soft + 0.05, dsq_hard))
+        self.dsq_min_scalar = float(max(0.05, min(1.0, dsq_min_scalar)))
         self.risk_overlay_stats = {
             "signals_received": 0,
             "vol_scaled": 0,
             "dd_throttled": 0,
             "equity_filtered": 0,
+            "ma_sized": 0,
+            "half_capacity_scaled": 0,
+            "dsq_scaled": 0,
+            "dsq_filtered": 0,
         }
         # ── Intraday session ──
         self.intraday_session = intraday_session
@@ -272,6 +304,53 @@ class BacktestEngine:
             self._session_close_time = datetime.strptime(f"{h:02d}:{m:02d}", "%H:%M").time()
         self._max_intraday_trades_per_day = max_intraday_trades_per_day
 
+    @staticmethod
+    def _normal_cdf(x: float) -> float:
+        """Standard normal CDF using error function."""
+        return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+    def _compute_psr_and_min_trl(
+        self,
+        returns: np.ndarray,
+        sharpe: float,
+        benchmark_sharpe: float = 0.0,
+        confidence: float = 0.95,
+    ) -> Tuple[float, int]:
+        """
+        Compute Probabilistic Sharpe Ratio (PSR) and Minimum Track Record Length.
+
+        Uses Bailey & Lopez de Prado finite-sample correction with skew/kurtosis.
+        """
+        n = len(returns)
+        if n < 3 or not np.isfinite(sharpe):
+            return 0.0, 0
+
+        mean = float(np.mean(returns))
+        std = float(np.std(returns, ddof=1))
+        if std <= 1e-12:
+            return 0.0, 0
+
+        centered = (returns - mean) / std
+        skew = float(np.mean(centered ** 3))
+        kurt = float(np.mean(centered ** 4))
+
+        denom_term = 1.0 - skew * sharpe + ((kurt - 1.0) / 4.0) * (sharpe ** 2)
+        denom_term = max(denom_term, 1e-9)
+
+        z_psr = (sharpe - benchmark_sharpe) * math.sqrt(max(n - 1, 1) / denom_term)
+        psr = self._normal_cdf(z_psr)
+
+        # Inverse CDF approximation via numpy percentile of standard normal samples would be expensive;
+        # use common z-scores for target confidence.
+        z_conf = 1.645 if confidence >= 0.95 and confidence < 0.975 else (1.96 if confidence >= 0.975 else 1.282)
+        diff = sharpe - benchmark_sharpe
+        if abs(diff) <= 1e-9:
+            min_trl = 0
+        else:
+            min_trl = int(math.ceil(1.0 + (z_conf ** 2) * denom_term / (diff ** 2)))
+
+        return round(psr * 100.0, 1), max(min_trl, 0)
+
     def _sync_capital(self, capital: float):
         """Keep current_capital and external tracker in sync (including peak for DD sizing)."""
         self.current_capital = capital
@@ -279,6 +358,35 @@ class BacktestEngine:
             self._capital_tracker["capital"] = capital
             if capital > self._capital_tracker.get("peak", capital):
                 self._capital_tracker["peak"] = capital
+
+    def _compute_dsq(self, data_so_far: pd.DataFrame) -> Optional[Tuple[float, float, float]]:
+        """
+        Compute Domain Shift Quotient from realized volatility.
+
+        Returns (dsq, current_vol, baseline_vol) or None if insufficient history.
+        """
+        if "close" not in data_so_far.columns or len(data_so_far) < self.dsq_lookback + 30:
+            return None
+
+        returns = data_so_far["close"].pct_change().dropna().values
+        if len(returns) < self.dsq_lookback + 20:
+            return None
+
+        current_slice = returns[-self.dsq_lookback:]
+        prior = returns[:-self.dsq_lookback]
+        if len(prior) < 20:
+            return None
+
+        if len(prior) > self.dsq_baseline_window:
+            prior = prior[-self.dsq_baseline_window:]
+
+        current_vol = float(np.std(current_slice)) * np.sqrt(252)
+        baseline_vol = float(np.std(prior)) * np.sqrt(252)
+        if baseline_vol <= 1e-6:
+            return None
+
+        dsq = abs(current_vol - baseline_vol) / baseline_vol
+        return float(dsq), current_vol, baseline_vol
 
     def _apply_risk_overlays(self, signal: Dict, data_so_far: pd.DataFrame, capital: float) -> Optional[Dict]:
         """
@@ -293,14 +401,51 @@ class BacktestEngine:
 
         # ── 1. Equity Curve Filter ──
         # If equity is below its own moving average, system is in a losing regime → sit out
-        if self.equity_curve_filter and len(self.equity_curve) >= 50:
-            eq_sma = np.mean(self.equity_curve[-50:])
-            if self.equity_curve[-1] < eq_sma:
-                self.risk_overlay_stats["equity_filtered"] += 1
-                return None
+        eq_sma = None
+        eq_dist = None
+        if len(self.equity_curve) >= self.equity_ma_window:
+            eq_sma = float(np.mean(self.equity_curve[-self.equity_ma_window:]))
+            if eq_sma > 0:
+                eq_dist = (self.equity_curve[-1] - eq_sma) / eq_sma
+
+        if self.equity_curve_filter and eq_sma is not None and self.equity_curve[-1] < eq_sma:
+            self.risk_overlay_stats["equity_filtered"] += 1
+            return None
 
         qty = signal.get("quantity", 1)
         original_qty = qty
+
+        # ── 1.5 Equity MA Sizing Modulation ──
+        # Scale exposure by distance from equity MA (defensive near/under MA).
+        if self.equity_ma_sizing and eq_dist is not None:
+            dist = max(-self.equity_ma_band, min(self.equity_ma_band, eq_dist))
+            # Maps [-band, +band] -> [0.25, 1.00]
+            ma_scalar = 0.25 + 0.75 * ((dist + self.equity_ma_band) / (2 * self.equity_ma_band))
+            qty = max(1, int(qty * ma_scalar))
+            if ma_scalar < 0.999:
+                self.risk_overlay_stats["ma_sized"] += 1
+
+        # ── 1.6 Half-Capacity Rule ──
+        # Enforces sustainable utilization (Parrondo-inspired: avoid over-extraction).
+        if self.half_capacity_mode and self.half_capacity_alpha < 0.999:
+            qty = max(1, int(qty * self.half_capacity_alpha))
+            self.risk_overlay_stats["half_capacity_scaled"] += 1
+
+        # ── 1.7 Domain Shift Quotient (DSQ) ──
+        # If current volatility regime diverges too far from baseline, reduce or skip risk.
+        if self.dsq_filter:
+            dsq_info = self._compute_dsq(data_so_far)
+            if dsq_info is not None:
+                dsq, _, _ = dsq_info
+                if dsq >= self.dsq_hard:
+                    self.risk_overlay_stats["dsq_filtered"] += 1
+                    return None
+                if dsq > self.dsq_soft:
+                    frac = (dsq - self.dsq_soft) / (self.dsq_hard - self.dsq_soft)
+                    frac = max(0.0, min(1.0, frac))
+                    dsq_scalar = 1.0 - (1.0 - self.dsq_min_scalar) * frac
+                    qty = max(1, int(qty * dsq_scalar))
+                    self.risk_overlay_stats["dsq_scaled"] += 1
 
         # ── 2. Volatility Targeting ──
         # Scale position size so portfolio volatility stays constant
@@ -571,16 +716,15 @@ class BacktestEngine:
         is_options = signal.get("instrument_type") == "options"
         if is_options:
             delta = signal.get("delta", 0.5)
+            if signal.get("direction") == "bearish":
+                delta = -abs(delta)
             signal_spot = signal.get("signal_spot", 0)
             bar_open = bar["open"]
             original_premium = signal.get("entry_price", 0)
 
             if signal_spot > 0 and original_premium > 0:
                 spot_diff = bar_open - signal_spot
-                if signal.get("direction") == "bullish":
-                    adjusted_premium = original_premium + delta * spot_diff
-                else:
-                    adjusted_premium = original_premium - delta * spot_diff
+                adjusted_premium = original_premium + delta * spot_diff
                 adjusted_premium = max(adjusted_premium, original_premium * 0.5)
                 adjusted_premium = max(adjusted_premium, 1.0)
                 adjusted_signal = signal.copy()
@@ -620,6 +764,10 @@ class BacktestEngine:
             else:
                 premium_entry += slippage  # Buying put — also pay more (you're buying)
 
+            delta_signed = signal.get("delta", 0.5)
+            if signal.get("direction") == "bearish":
+                delta_signed = -abs(delta_signed)
+
             pos = {
                 "entry_time": timestamp,
                 "symbol": signal.get("symbol", "NIFTY"),
@@ -630,7 +778,7 @@ class BacktestEngine:
                 "quantity": signal.get("quantity", 1),
                 "strategy": signal.get("strategy", "default"),
                 "instrument_type": "options",
-                "delta": signal.get("delta", 0.5),
+                "delta": delta_signed,
                 "current_premium": premium_entry,
                 "prev_close": bar["close"],
                 "max_bars": signal.get("max_bars", 0),
@@ -712,13 +860,12 @@ class BacktestEngine:
 
         # Re-price option premium using delta approximation
         delta = signal.get("delta", 0.5)
+        if direction == "bearish":
+            delta = -abs(delta)
         original_premium = signal.get("entry_price", 0)
         spot_diff = fill_spot - signal_spot
 
-        if direction == "bullish":
-            adjusted_premium = original_premium + delta * spot_diff
-        else:
-            adjusted_premium = original_premium - delta * spot_diff
+        adjusted_premium = original_premium + delta * spot_diff
 
         # Floor: don't go below 50% of original or 1.0
         adjusted_premium = max(adjusted_premium, original_premium * 0.5)
@@ -1152,6 +1299,7 @@ class BacktestEngine:
                 win_rate=0, avg_win=0, avg_loss=0, profit_factor=0,
                 max_drawdown_pct=0, max_drawdown_duration_days=0,
                 sharpe_ratio=0, sortino_ratio=0, calmar_ratio=0, alpha_pct=0,
+                psr_pct=0, min_track_record_len=0,
                 avg_trade_pnl=0, avg_hold_duration_min=0, total_costs=0,
                 equity_curve=self.equity_curve, drawdown_curve=[],
                 monthly_returns={}, trades=[]
@@ -1246,6 +1394,19 @@ class BacktestEngine:
             sharpe = 0
             sortino = 0
 
+        # Statistical significance for low-frequency strategies
+        if len(self.trades) > 1:
+            non_zero_returns = np.diff(equity) / equity[:-1]
+            non_zero_returns = non_zero_returns[non_zero_returns != 0]
+            psr_pct, min_trl = self._compute_psr_and_min_trl(
+                non_zero_returns,
+                sharpe,
+                benchmark_sharpe=0.0,
+                confidence=0.95,
+            )
+        else:
+            psr_pct, min_trl = 0.0, 0
+
         calmar = annual_return / max_drawdown if max_drawdown > 0 else 0
 
         # Compute hold duration from timestamps
@@ -1312,6 +1473,8 @@ class BacktestEngine:
             sortino_ratio=round(sortino, 2),
             calmar_ratio=round(calmar, 2),
             alpha_pct=round(alpha, 2),
+            psr_pct=psr_pct,
+            min_track_record_len=min_trl,
             avg_trade_pnl=round(np.mean([t.net_pnl for t in self.trades]), 2),
             avg_hold_duration_min=round(avg_hold, 1),
             total_costs=round(total_costs, 2),

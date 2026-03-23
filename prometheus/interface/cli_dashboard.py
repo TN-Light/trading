@@ -484,3 +484,35 @@ class CLIDashboard:
 
         self.console.print()
         self.console.print(table)
+
+    def show_bracket_status(self, bracket_info: Dict, funnel_stats: Optional[Dict] = None):
+        """Display current capital bracket, RR parameters, and funnel stats."""
+        b_name = bracket_info.get("name", "UNKNOWN")
+        min_rr = bracket_info.get("min_rr", 0)
+        max_loss = bracket_info.get("max_loss_per_trade", 0)
+        cap = bracket_info.get("capital", 0)
+        
+        if not self.console:
+            print(f"\nBracket: {b_name} | Capital: Rs {cap:,.0f} | Min RR: {min_rr} | Max Risk/Trade: Rs {max_loss:,.0f}")
+            if funnel_stats:
+                print(f"Funnel: Raw {funnel_stats.get('raw', 0)} -> RR Pass {funnel_stats.get('rr_pass', 0)} -> Executed {funnel_stats.get('final', 0)}")
+            return
+
+        panel_text = (
+            f"[bold cyan]Active Bracket:[/bold cyan] [bold]{b_name}[/bold] (Capital: Rs {cap:,.0f})\n"
+            f"[bold cyan]Min R:R:[/bold cyan] {min_rr}x | "
+            f"[bold cyan]Max Risk/Trade:[/bold cyan] Rs {max_loss:,.0f}"
+        )
+        
+        if funnel_stats:
+            raw = funnel_stats.get('raw', 0)
+            rr_pass = funnel_stats.get('rr_pass', 0)
+            final = funnel_stats.get('final', 0)
+            panel_text += f"\n[bold cyan]Live Funnel:[/bold cyan] {raw} Raw -> {rr_pass} Passed RR -> {final} Final Trades"
+            
+        self.console.print(Panel(
+            panel_text,
+            title="[bold yellow]Capital Allocation & RR[/bold yellow]",
+            border_style="yellow",
+            box=box.ROUNDED,
+        ))

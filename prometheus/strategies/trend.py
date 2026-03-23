@@ -109,7 +109,9 @@ class TrendStrategy:
         regime: RegimeState,
         oi_signals: List[OISignal],
         oi_metrics: Dict,
-        options_chain: Optional[pd.DataFrame] = None
+        options_chain: Optional[pd.DataFrame] = None,
+        min_rr: Optional[float] = None,
+        max_loss_per_trade: Optional[float] = None
     ) -> Optional[TradeSetup]:
         """
         Generate a trend trade setup if conditions are met.
@@ -152,13 +154,15 @@ class TrendStrategy:
         entry_price_index = spot_price
         atr = calculate_atr(df_15min).iloc[-1] if len(df_15min) >= 14 else spot_price * 0.01
 
+        target_rr = min_rr if min_rr is not None else self.min_rr
+
         if direction == "bullish":
             sl_index = entry_price_index - min(2 * atr, self.max_sl_points)
-            target_index = entry_price_index + min(2 * atr, self.max_sl_points) * self.min_rr
+            target_index = entry_price_index + min(2 * atr, self.max_sl_points) * target_rr
             option_type = "CE"
         else:
             sl_index = entry_price_index + min(2 * atr, self.max_sl_points)
-            target_index = entry_price_index - min(2 * atr, self.max_sl_points) * self.min_rr
+            target_index = entry_price_index - min(2 * atr, self.max_sl_points) * target_rr
             option_type = "PE"
 
         # Step 6: Select option strike
@@ -196,7 +200,8 @@ class TrendStrategy:
         risk_per_lot = (premium - option_sl) * lot_size
         reward_per_lot = (option_target - premium) * lot_size
 
-        lots = max(1, int(self.max_risk_per_trade / risk_per_lot)) if risk_per_lot > 0 else 1
+        max_risk = max_loss_per_trade if max_loss_per_trade is not None else self.max_risk_per_trade
+        lots = max(1, int(max_risk / risk_per_lot)) if risk_per_lot > 0 else 1
         total_cost = premium * lot_size * lots
 
         # Final capital check
@@ -207,8 +212,8 @@ class TrendStrategy:
         reward_amount = reward_per_lot * lots
         rr = reward_amount / risk_amount if risk_amount > 0 else 0
 
-        if rr < self.min_rr:
-            logger.debug(f"Trend: R:R {rr:.1f} < minimum {self.min_rr}. Skip.")
+        if rr < target_rr:
+            logger.debug(f"Trend: R:R {rr:.1f} < minimum {target_rr}. Skip.")
             return None
 
         # Step 9: Build signal strength

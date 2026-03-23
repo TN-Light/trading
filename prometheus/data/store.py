@@ -246,7 +246,11 @@ class DataStore:
 
         if not df.empty:
             df = df.sort_values("timestamp").reset_index(drop=True)
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            # Mixed historical rows can contain both tz-aware and tz-naive strings.
+            # Parse robustly in UTC and then store as tz-naive for downstream compatibility.
+            ts = pd.to_datetime(df["timestamp"], errors="coerce", format="mixed", utc=True)
+            df["timestamp"] = ts.dt.tz_localize(None)
+            df = df.dropna(subset=["timestamp"]).reset_index(drop=True)
         return df
 
     # -----------------------------------------------------------------------

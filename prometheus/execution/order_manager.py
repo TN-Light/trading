@@ -100,14 +100,24 @@ class OrderManager:
         if action == "HOLD":
             return None
 
-        # Step 1: Risk pre-check
+        # Step 1: Position sizing via risk-based calculation (must precede risk check)
+        lot_size = get_lot_size(symbol)
+        sizing = self.risk.calculate_position_size(entry, sl, lot_size)
+        quantity = sizing.get("quantity", lot_size)
+        if quantity <= 0:
+            logger.warning(
+                f"Trade REJECTED: risk budget insufficient ({sizing.get('error', 'sizing failed')})"
+            )
+            return None
+
+        # Step 2: Risk pre-check with true size/cost
         risk_check = self.risk.pre_trade_check({
             "symbol": symbol,
             "direction": direction,
             "entry_price": entry,
             "stop_loss": sl,
-            "quantity": 0,
-            "cost": entry * get_lot_size(symbol),
+            "quantity": quantity,
+            "cost": entry * quantity,
         })
 
         if not risk_check.approved:
@@ -116,13 +126,6 @@ class OrderManager:
                 f"(violations: {risk_check.violations})"
             )
             return None
-
-        # Step 2: Position sizing via risk-based calculation
-        lot_size = get_lot_size(symbol)
-        sizing = self.risk.calculate_position_size(entry, sl, lot_size)
-        quantity = sizing.get("quantity", lot_size)
-        if quantity <= 0:
-            quantity = lot_size  # minimum 1 lot
 
         # Step 3: Build orders based on action type
         if action in ("BUY_CE", "BUY_PE"):

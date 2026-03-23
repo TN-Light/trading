@@ -18,6 +18,49 @@ capital:
   reserved_cash: 0.15       # 15% buffer (small capital needs more deployed)
   max_single_trade: 0.45    # max 45% in one trade
   max_correlated_exposure: 0.50  # max 50% in correlated positions
+  
+  # Capital Brackets Configuration (Dynamic Position Sizing & RR)
+  brackets:
+    tier1:
+      name: "15K Strict Preservation"
+      max_capital: 29999
+      max_loss_per_trade: 150
+      min_rr: 3.5
+      base_target: 5.0
+      sl_atr_mult: 1.0
+      min_margin: 0
+    tier2:
+      name: "30K Balanced Growth"
+      max_capital: 49999
+      max_loss_per_trade: 300
+      min_rr: 2.5
+      base_target: 4.0
+      sl_atr_mult: 1.0
+      min_margin: 30000
+    tier3:
+      name: "50K Standard"
+      max_capital: 99999
+      max_loss_per_trade: 500
+      min_rr: 2.0
+      base_target: 2.5
+      sl_atr_mult: 1.2
+      min_margin: 50000
+    tier4:
+      name: "1L Advanced"
+      max_capital: 199999
+      max_loss_per_trade: 1000
+      min_rr: 1.5
+      base_target: 2.0
+      sl_atr_mult: 1.5
+      min_margin: 100000
+    tier5:
+      name: "2L+ Institutional"
+      max_capital: 99999999
+      max_loss_per_trade: 2000
+      min_rr: 1.5
+      base_target: 2.0
+      sl_atr_mult: 1.5
+      min_margin: 200000
 
 # ---------------------------------------------------------------------------
 # Market Configuration
@@ -31,12 +74,120 @@ market:
     - "NIFTY IT"
     - "NIFTY MIDCAP SELECT"
     - "SENSEX"
+  # 40+ liquid F&O stocks for swing scanning (~25 trades/month target)
+  stocks:
+    # Banks
+    - "HDFCBANK"
+    - "ICICIBANK"
+    - "SBIN"
+    - "AXISBANK"
+    - "KOTAKBANK"
+    - "INDUSINDBK"
+    - "PNB"
+    - "IDFCFIRSTB"
+    # IT
+    - "TCS"
+    - "INFY"
+    - "WIPRO"
+    - "HCLTECH"
+    - "TECHM"
+    - "LTIM"
+    # Auto (TATAMOTORS demerged Oct 2025 → TATAMOTORS=CV, TMPV=PV+JLR)
+    - "TATAMOTORS"
+    - "TMPV"
+    - "M&M"
+    - "MARUTI"
+    - "BAJAJ-AUTO"
+    - "HEROMOTOCO"
+    # Energy & Infra
+    - "RELIANCE"
+    - "ONGC"
+    - "NTPC"
+    - "POWERGRID"
+    - "ADANIENT"
+    - "ADANIPORTS"
+    # Pharma
+    - "SUNPHARMA"
+    - "DRREDDY"
+    - "CIPLA"
+    - "DIVISLAB"
+    # FMCG
+    - "ITC"
+    - "HINDUNILVR"
+    - "NESTLEIND"
+    - "BRITANNIA"
+    # Finance (non-bank)
+    - "BAJFINANCE"
+    - "BAJAJFINSV"
+    - "SBILIFE"
+    - "HDFCLIFE"
+    # Metals & Cement
+    - "TATASTEEL"
+    - "JSWSTEEL"
+    - "HINDALCO"
+    - "ULTRACEMCO"
+    # Others
+    - "LT"
+    - "TITAN"
+    - "ASIANPAINT"
   trading_hours:
     start: "09:15"
     end: "15:30"
     pre_open_start: "09:00"
     pre_open_end: "09:08"
   holidays_calendar: "india_nse"  # auto-loaded
+
+# ---------------------------------------------------------------------------
+# Swing Scan Scheduling
+# ---------------------------------------------------------------------------
+swing:
+  index_scan_times: ["13:00", "15:35"]     # existing index scan windows
+  stock_scan_times: ["12:30", "15:00"]     # staggered stock scan windows
+  stock_confidence_min: 0.70               # slightly relaxed for stocks (vs 0.80 index)
+  stock_min_signals: 3                     # min contributing signals for stocks (vs 4 index)
+  stock_batch_size: 10                     # scan 10 stocks at a time
+  stock_batch_delay_seconds: 5             # 5s between batches (yfinance rate limit)
+  profiles:
+    tier1:
+      confluence_trending: 3.4
+      confluence_sideways: 4.0
+      min_net_edge: 1.8
+      kelly_wr: 0.33
+      target_atr_mult: 5.0
+      time_stop_bars: 7
+      breakeven_ratio: 0.6
+    tier2:
+      confluence_trending: 3.2
+      confluence_sideways: 3.8
+      min_net_edge: 1.7
+      kelly_wr: 0.34
+      target_atr_mult: 4.0
+      time_stop_bars: 7
+      breakeven_ratio: 0.6
+    tier3:
+      confluence_trending: 3.0
+      confluence_sideways: 3.6
+      min_net_edge: 1.6
+      kelly_wr: 0.35
+      target_atr_mult: 3.0
+      time_stop_bars: 6
+      breakeven_ratio: 0.6
+    tier4:
+      confluence_trending: 2.8
+      confluence_sideways: 3.4
+      min_net_edge: 1.5
+      kelly_wr: 0.36
+      target_atr_mult: 2.5
+      time_stop_bars: 5
+      breakeven_ratio: 0.55
+    tier5:
+      confluence_trending: 2.6
+      confluence_sideways: 3.2
+      min_net_edge: 1.4
+      kelly_wr: 0.36
+      target_atr_mult: 2.2
+      time_stop_bars: 5
+      breakeven_ratio: 0.55
 
 # ---------------------------------------------------------------------------
 # Broker Configuration — Zerodha Kite Connect
@@ -81,7 +232,7 @@ signals:
     macd_crossover: 0.20      # lowest priority
 
   # Minimum confluence score to generate a signal (0 to 1)
-  min_confluence: 0.65
+  min_confluence: 3.0  # on 0-10 scale (spec: hard gate at 3.0)
 
   # Multi-timeframe config
   timeframes:
@@ -180,7 +331,7 @@ risk:
   # Daily limits
   max_daily_loss: 5000           # INR — hard stop, no trading after this
   max_daily_loss_pct: 3.0        # % of capital
-  max_daily_trades: 6            # prevent overtrading
+  max_daily_trades: 10           # increased for expanded watchlist (40+ stocks)
 
   # Weekly limits
   max_weekly_loss: 10000         # INR
@@ -221,12 +372,13 @@ backtest:
     equity_delivery_brokerage: 0  # zero
     intraday_brokerage: 20        # flat Rs 20 or 0.03%
     options_brokerage: 20         # flat Rs 20 per order
-    stt_options_sell: 0.0625      # 0.0625% on sell side
-    stt_futures: 0.0125           # 0.0125% on sell side
+    stt_options_sell: 0.10        # 0.10% on sell side (correct spec)
+    stt_futures: 0.01             # 0.01% on sell side (correct spec)
     transaction_charges: 0.053    # NSE: 0.053%
     gst: 18.0                     # 18% on brokerage + transaction
     sebi_charges: 0.0001          # Rs 10 per crore
     stamp_duty: 0.003             # 0.003% on buy side
+    slippage_pct: 0.15            # 0.15% realistic options slippage (paper/backtest parity)
 
 # ---------------------------------------------------------------------------
 # Interface
@@ -280,9 +432,80 @@ intraday:
   time_stop_bars_15min: 16           # Session 23: ~4 hours in 15-min bars (was 20)
   breakeven_ratio: 0.5              # Faster breakeven for intraday
   trailing_poll_seconds: 10         # Faster polling than swing (15s)
+  v2:
+    enabled: true
+    entry_start_time: "10:00"
+    entry_cutoff_time: "13:45"
+    max_daily_trades: 3
+    confluence_trending: 2.8
+    confluence_sideways: 3.5
+    kelly_wr: 0.40
+    target_atr_mult: 2.2
+    time_stop_bars: 14
+    min_net_edge: 1.4
+    require_vwap_alignment: true
+    require_ema_alignment: true
+    require_supertrend_alignment: true
+    require_volume_surge: false
+    breakout_lookback: 0
+    breakout_atr_buffer: 0.10
+    disable_mean_reversion: true
+    weight_supertrend: 1.25
+    weight_ema: 1.0
+    weight_vwap: 1.25
+    pilot_guardrails:
+      enabled: true
+      rolling_window_trades: 20
+      min_rolling_pf: 1.10
+      require_full_window: true
+      today_only: true
+      max_intraday_drawdown_pct: 10.0
+      block_new_entries_on_breach: true
+      force_square_off_on_breach: true
+    profiles:
+      tier1:
+        confluence_trending: 3.0
+        confluence_sideways: 3.8
+        min_net_edge: 1.6
+        kelly_wr: 0.38
+        target_atr_mult: 2.0
+        time_stop_bars: 14
+        max_daily_trades: 2
+      tier2:
+        confluence_trending: 2.9
+        confluence_sideways: 3.6
+        min_net_edge: 1.5
+        kelly_wr: 0.40
+        target_atr_mult: 2.2
+        time_stop_bars: 14
+        max_daily_trades: 3
+      tier3:
+        confluence_trending: 2.8
+        confluence_sideways: 3.5
+        min_net_edge: 1.4
+        kelly_wr: 0.40
+        target_atr_mult: 2.4
+        time_stop_bars: 13
+        max_daily_trades: 3
+      tier4:
+        confluence_trending: 2.7
+        confluence_sideways: 3.3
+        min_net_edge: 1.3
+        kelly_wr: 0.42
+        target_atr_mult: 2.6
+        time_stop_bars: 12
+        max_daily_trades: 4
+      tier5:
+        confluence_trending: 2.6
+        confluence_sideways: 3.2
+        min_net_edge: 1.2
+        kelly_wr: 0.42
+        target_atr_mult: 2.8
+        time_stop_bars: 12
+        max_daily_trades: 5
   instruments:                      # Instruments for intraday
-    - "NIFTY 50"
     - "NIFTY BANK"
+    - "SENSEX"
 
 # ---------------------------------------------------------------------------
 # Multi-Account Paper Trading

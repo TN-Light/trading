@@ -171,3 +171,27 @@ Core: pandas, numpy, scipy, PyYAML, loguru, rich, requests, yfinance
 AI (optional): ollama, transformers, torch, sentence-transformers
 Broker (optional): kiteconnect
 Alerts (optional): python-telegram-bot
+
+## Session 25 Updates (March 23, 2026)
+
+- Fixed live loop status rendering bug in `main.py` where removed scan flags were still referenced (`_did_1pm_scan`, `_did_335pm_scan`, `_did_1230_stock_scan`, `_did_300pm_stock_scan`).
+- Status line now reports completed dynamic scan windows from `_completed_index_scans` and `_completed_stock_scans`.
+- Hardened OHLCV cleaning in `data/engine.py`:
+  - Handles both tz-naive and tz-aware timestamps deterministically
+  - Always stores IST-naive timestamps
+  - Drops invalid timestamps before dedupe/sort
+- Fixed staged integration tests in `prometheus/tests/test_integration.py`:
+  - Correct `TechnicalSignal` construction with required `timeframe`
+  - Correct timezone assertion for cleaned timestamps
+- Added artifact guardrails in `.gitignore` for generated reports/results (`prometheus/reports`, trade/loss CSVs, pattern JSONs, sweep outputs, and summary txt files).
+
+### Validation (Session 25)
+
+- `python -m pytest -q prometheus/tests/test_integration.py` now passes after fixes.
+- `python prometheus/main.py backtest --days 120` runs successfully end-to-end.
+- `python prometheus/main.py backtest --days 365 --parrondo` runs successfully end-to-end.
+
+### Outstanding Cleanup (Not yet applied)
+
+- Current index already contains many staged generated artifacts from prior runs.
+- Keep source changes; remove generated outputs before final commit.

@@ -24,6 +24,7 @@ from datetime import datetime, date, timedelta
 from enum import Enum
 
 from prometheus.utils.logger import logger, log_risk
+from prometheus.risk.position_sizer import CapitalBracketManager
 
 
 class RiskViolation(Enum):
@@ -81,6 +82,10 @@ class RiskManager:
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.peak_capital = initial_capital
+        
+        # Initialize the bracket manager
+        from prometheus.config import get_capital_config
+        self.bracket_manager = CapitalBracketManager(get_capital_config())
 
         # Daily limits
         self.max_daily_loss = config.get("max_daily_loss", 5000)
@@ -164,10 +169,15 @@ class RiskManager:
             violations.append("Market is closed. No trading outside 9:15-15:30 IST.")
 
         # 3. Daily loss limit (only triggers on LOSSES, not profits)
-        if self._daily_pnl <= -self.max_daily_loss:
+        # Check dynamic max loss limit depending on the current capital bracket
+        bracket = self.bracket_manager.get_bracket(self.current_capital)
+        # Use stricter of configured limit and bracket-derived cap
+        dynamic_max_loss = min(self.max_daily_loss, bracket.max_loss_per_trade * 2)
+
+        if self._daily_pnl <= -dynamic_max_loss:
             violations.append(
                 f"Daily loss limit reached: Rs {self._daily_pnl:.0f} "
-                f"(limit: Rs -{self.max_daily_loss})"
+                f"(limit: Rs -{dynamic_max_loss:.0f} for {bracket.name})"
             )
 
         daily_loss_pct = (-self._daily_pnl / self.current_capital * 100) if self._daily_pnl < 0 else 0
@@ -244,6 +254,10 @@ class RiskManager:
                 f"(limit: {self.max_correlated_pct}%)"
             )
 
+        # 10b. Block duplicate instrument positions outright
+        if any(p.get("symbol") == trade.get("symbol") for p in self._open_positions):
+            violations.append("Duplicate instrument position not allowed (symbol already open)")
+
         # Warnings (non-blocking)
         if trade_cost > max_position_value * 0.8:
             warnings.append(f"Position size near limit ({trade_cost/max_position_value*100:.0f}%)")
@@ -285,19 +299,36 @@ class RiskManager:
         Then round down to nearest lot.
         """
         risk_amount = self.current_capital * risk_per_trade_pct / 100
+        # Enforce bracket max loss per trade as a hard ceiling
+        bracket = self.bracket_manager.get_bracket(self.current_capital)
+        risk_amount = min(risk_amount, bracket.max_loss_per_trade)
         risk_per_unit = abs(entry_price - stop_loss)
 
         if risk_per_unit <= 0:
             return {"lots": 0, "quantity": 0, "risk_amount": 0, "error": "Invalid SL"}
 
         max_units = risk_amount / risk_per_unit
-        lots = max(1, int(max_units / lot_size))
+        lots = int(max_units / lot_size)  # ALWAYS round down
+        if lots < 1:
+            return {
+                "lots": 0,
+                "quantity": 0,
+                "risk_amount": 0,
+                "error": "Risk budget insufficient for 1 lot"
+            }
 
         # Cap by max position size
         max_cost = self.current_capital * self.max_single_position_pct / 100
         position_cost = entry_price * lot_size * lots
         if position_cost > max_cost:
-            lots = max(1, int(max_cost / (entry_price * lot_size)))
+            lots = int(max_cost / (entry_price * lot_size))
+            if lots < 1:
+                return {
+                    "lots": 0,
+                    "quantity": 0,
+                    "risk_amount": 0,
+                    "error": "Position cost would breach max_single_position_pct"
+                }
 
         actual_risk = risk_per_unit * lot_size * lots
 
