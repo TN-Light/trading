@@ -74,6 +74,12 @@ market:
     - "NIFTY IT"
     - "NIFTY MIDCAP SELECT"
     - "SENSEX"
+  # Lot-size overrides for affordability logic (fallback uses exchange utility mapping)
+  lot_sizes:
+    "NIFTY 50": 50
+    "NIFTY BANK": 15
+    "SENSEX": 10
+    "NIFTY FIN SERVICE": 40
   # 40+ liquid F&O stocks for swing scanning (~25 trades/month target)
   stocks:
     # Banks
@@ -503,10 +509,10 @@ intraday:
         target_atr_mult: 2.8
         time_stop_bars: 12
         max_daily_trades: 5
-  instruments:                      # Instruments for intraday
-    - "NIFTY 50"
+  instruments:                      # Instruments for intraday scans
     - "NIFTY BANK"
-    - "SENSEX"
+  allowed_instruments:              # Runtime performance gate (deployment allowlist)
+    - "NIFTY BANK"
 
 # ---------------------------------------------------------------------------
 # Multi-Account Paper Trading

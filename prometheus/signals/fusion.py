@@ -193,6 +193,8 @@ class SignalFusionEngine:
                 action="HOLD",
                 direction="neutral",
                 confidence=max(bullish_pct, bearish_pct),
+                regime=regime.regime.value,
+                strategy=(regime.recommended_strategies[0] if regime.recommended_strategies else "trend"),
                 reasoning=f"Insufficient confluence score {confluence_score:.2f} (threshold {self.min_confluence_score:.1f})",
                 contributing_signals=contributing,
             )
@@ -220,6 +222,8 @@ class SignalFusionEngine:
                 stop_loss=sl,
                 target=target,
                 risk_reward=rr,
+                regime=regime.regime.value,
+                strategy=(regime.recommended_strategies[0] if regime.recommended_strategies else "trend"),
                 reasoning=f"R:R too low ({rr:.1f}x, minimum {target_rr}x required)",
                 contributing_signals=contributing,
             )

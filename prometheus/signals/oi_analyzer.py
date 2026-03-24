@@ -110,16 +110,26 @@ class OIAnalyzer:
 
     def _calculate_pcr(self, calls: pd.DataFrame, puts: pd.DataFrame) -> Dict:
         """Calculate various PCR metrics."""
-        call_oi_total = calls["oi"].sum()
-        put_oi_total = puts["oi"].sum()
-        call_vol_total = calls["volume"].sum()
-        put_vol_total = puts["volume"].sum()
+        def _to_scalar(value) -> float:
+            if isinstance(value, pd.Series):
+                return float(pd.to_numeric(value, errors="coerce").fillna(0).sum())
+            if isinstance(value, np.ndarray):
+                return float(np.nansum(value))
+            try:
+                return float(value)
+            except Exception:
+                return 0.0
+
+        call_oi_total = _to_scalar(calls["oi"].sum())
+        put_oi_total = _to_scalar(puts["oi"].sum())
+        call_vol_total = _to_scalar(calls["volume"].sum())
+        put_vol_total = _to_scalar(puts["volume"].sum())
 
         return {
             "oi": pcr_ratio(put_oi_total, call_oi_total),
             "volume": pcr_ratio(put_vol_total, call_vol_total) if call_vol_total > 0 else 0,
-            "call_oi_total": int(call_oi_total),
-            "put_oi_total": int(put_oi_total),
+            "call_oi_total": int(round(call_oi_total)),
+            "put_oi_total": int(round(put_oi_total)),
         }
 
     def _interpret_pcr(self, pcr: Dict) -> Optional[OISignal]:

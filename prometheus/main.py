@@ -25,6 +25,7 @@ import os
 import time
 import signal as sig
 import argparse
+import threading
 import psutil
 from datetime import datetime, date, time as dtime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
@@ -201,6 +202,10 @@ class Prometheus:
             "tripped": False,
             "reason": "Not active",
         }
+        # Avoid Telegram spam for repeated identical rejection reasons.
+        self._last_trade_reject_alerts: Dict[Tuple[str, str], datetime] = {}
+        self._scan_lock = threading.Lock()
+        self._scan_in_progress = False
 
         n_stocks = len(self.stock_symbols)
         logger.info(
@@ -303,45 +308,249 @@ class Prometheus:
 
     def _dispatch_multi_account(self, refined_signal, is_intraday: bool = False,
                                bar_interval: str = "15minute"):
-        """If multi-account is initialized, dispatch signal to all accounts."""
-        if self.multi_account is not None:
-            # Sync primary broker's price feed to all multi-account traders
-            if isinstance(self.broker, PaperTrader) and self.broker._price_feed:
-                self.multi_account.update_all_prices(self.broker._price_feed)
-            results = self.multi_account.dispatch_signal(refined_signal, confirm=False)
-            opened = sum(1 for v in results.values() if v)
-            if opened:
-                logger.info(f"Multi-account: {opened}/{len(results)} accounts opened positions")
-            # Register multi-account positions with PositionMonitor for trailing stops
-            if self.position_monitor:
-                for label, did_open in results.items():
-                    if did_open:
-                        stack = self.multi_account.get_stack(label)
-                        if stack:
-                            # Find the most recent position opened by this stack
-                            managed = list(stack.order_manager.managed_positions.values())
-                            if managed:
-                                last = managed[-1]
-                                ts = stack.order_manager.create_trailing_state(
-                                    last.position_id
-                                )
-                                if ts:
-                                    # Tag with account label for exit routing
-                                    ts._multi_account_label = label
-                                    # Copy intraday tags from caller
-                                    if is_intraday:
-                                        ts.trade_mode = "intraday"
-                                        ts.bar_interval = bar_interval
-                                        intraday_cfg = get("intraday", {})
-                                        bi_key = ts.bar_interval.replace("minute", "min")
-                                        ts.max_bars = intraday_cfg.get(
-                                            f"time_stop_bars_{bi_key}",
-                                            intraday_cfg.get("time_stop_bars_15min", 20)
-                                        )
-                                        ts.breakeven_ratio = intraday_cfg.get(
-                                            "breakeven_ratio", 0.5
-                                        )
-                                    self.position_monitor.add_position(ts)
+        """Dispatch capital-routed strike candidates to each account stack."""
+        if self.multi_account is None:
+            return
+
+        # Sync primary broker's price feed to all multi-account traders
+        if isinstance(self.broker, PaperTrader) and self.broker._price_feed:
+            self.multi_account.update_all_prices(self.broker._price_feed)
+
+        candidates = self._build_multi_strike_candidates(refined_signal)
+        if not candidates:
+            logger.info("Multi-account: no priced strike candidates available")
+            return
+
+        results = {}
+        skipped = {}
+
+        for label, stack in self.multi_account.stacks.items():
+            capital = float(stack.config.initial_capital)
+            routed = self._route_candidates_for_capital(candidates, capital)
+            if not routed:
+                skipped[label] = "No affordable strike (cost/risk constraints)"
+                results[label] = False
+                continue
+
+            # Ranked best-to-worst signal view for each account.
+            ranked_signal = dict(refined_signal)
+            ranked_signal["account_label"] = label
+            ranked_signal["account_capital"] = capital
+            ranked_signal["eligible_strikes"] = routed
+            self.telegram.alert_new_signal(ranked_signal)
+
+            execution_signal = self._build_execution_signal_from_candidate(
+                refined_signal, routed[0]
+            )
+
+            try:
+                position = stack.order_manager.execute_signal(execution_signal, confirm=False)
+                results[label] = position is not None
+                if not position:
+                    reason = getattr(stack.order_manager, "last_execution_error", "Rejected")
+                    skipped[label] = reason
+                    logger.info(f"[{label}] skipped: {reason}")
+                else:
+                    logger.info(f"[{label}] Position opened: {position.position_id}")
+            except Exception as e:
+                logger.error(f"[{label}] Signal dispatch error: {e}")
+                skipped[label] = str(e)
+                results[label] = False
+
+        opened = sum(1 for v in results.values() if v)
+        if opened:
+            logger.info(f"Multi-account: {opened}/{len(results)} accounts opened positions")
+
+        for label, reason in skipped.items():
+            key = (f"multi:{label}", reason)
+            now = datetime.now()
+            prev = self._last_trade_reject_alerts.get(key)
+            if prev and (now - prev).total_seconds() < 300:
+                continue
+            self._last_trade_reject_alerts[key] = now
+            self.telegram.send_message(
+                f"⚠️ <b>SIGNAL SKIPPED — {label}</b>\n{reason}"
+            )
+
+        # Register multi-account positions with PositionMonitor for trailing stops
+        if self.position_monitor:
+            for label, did_open in results.items():
+                if did_open:
+                    stack = self.multi_account.get_stack(label)
+                    if stack:
+                        managed = list(stack.order_manager.managed_positions.values())
+                        if managed:
+                            last = managed[-1]
+                            ts = stack.order_manager.create_trailing_state(last.position_id)
+                            if ts:
+                                ts._multi_account_label = label
+                                if is_intraday:
+                                    ts.trade_mode = "intraday"
+                                    ts.bar_interval = bar_interval
+                                    intraday_cfg = get("intraday", {})
+                                    bi_key = ts.bar_interval.replace("minute", "min")
+                                    ts.max_bars = intraday_cfg.get(
+                                        f"time_stop_bars_{bi_key}",
+                                        intraday_cfg.get("time_stop_bars_15min", 20)
+                                    )
+                                    ts.breakeven_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
+                                self.position_monitor.add_position(ts)
+
+    def _get_lot_size_override(self, symbol: str) -> int:
+        """Resolve lot size from settings override first, then market utility default."""
+        lot_overrides = get("market.lot_sizes", {})
+        if isinstance(lot_overrides, dict):
+            candidates = [symbol, symbol.replace(" ", ""), symbol.upper(), symbol.replace(" ", "").upper()]
+            for key in candidates:
+                val = lot_overrides.get(key)
+                if val:
+                    try:
+                        iv = int(val)
+                        if iv > 0:
+                            return iv
+                    except Exception:
+                        pass
+        return int(get_lot_size(symbol))
+
+    def _build_multi_strike_candidates(self, refined_signal: Dict) -> List[Dict]:
+        """Generate OTM->ATM->ITM strike candidates with cost/risk metadata."""
+        action = refined_signal.get("action", "HOLD")
+        symbol = refined_signal.get("symbol", "")
+        if action == "HOLD" or not symbol:
+            return []
+
+        option_type = refined_signal.get("option_type", "")
+        if not option_type:
+            option_type = "CE" if "CE" in action else "PE" if "PE" in action else ""
+        if option_type not in ("CE", "PE"):
+            return []
+
+        # Spot fallback from latest daily close.
+        spot = 0.0
+        try:
+            data = self.data.fetch_historical(symbol, days=5, interval="day")
+            if data is not None and not data.empty:
+                spot = float(data["close"].iloc[-1])
+        except Exception:
+            pass
+        if spot <= 0:
+            return []
+
+        interval = get_strike_interval(symbol)
+        atm = get_atm_strike(spot, symbol)
+        offsets = [2, 1, 0, -1, -2] if option_type == "CE" else [-2, -1, 0, 1, 2]
+
+        base_entry = float(refined_signal.get("entry_price", 0) or 0)
+        base_sl = float(refined_signal.get("stop_loss", 0) or 0)
+        base_target = float(refined_signal.get("target", 0) or 0)
+        sl_loss_frac = 0.5
+        tgt_gain_frac = 0.8
+        if base_entry > 0:
+            if base_sl > 0:
+                sl_loss_frac = min(max((base_entry - base_sl) / base_entry, 0.05), 0.9)
+            if base_target > base_entry:
+                tgt_gain_frac = min(max((base_target - base_entry) / base_entry, 0.2), 3.0)
+
+        chain = self.data.fetch_options_chain(symbol)
+        dte = max(days_to_expiry(symbol), 1)
+        lot_size = self._get_lot_size_override(symbol)
+        cap_labels = [("15K", 15000), ("30K", 30000), ("50K", 50000), ("1L", 100000), ("2L", 200000)]
+
+        out = []
+        for off in offsets:
+            strike = float(atm + off * interval)
+            try:
+                premium = float(self.trend._estimate_premium(chain, strike, option_type, spot, dte))
+            except Exception:
+                premium = 0.0
+            if premium <= 0:
+                continue
+
+            entry = round(premium, 2)
+            stop_loss = round(max(0.5, premium * (1.0 - sl_loss_frac)), 2)
+            target = round(max(entry + 0.5, premium * (1.0 + tgt_gain_frac)), 2)
+            risk_per_lot = max(0.0, (entry - stop_loss) * lot_size)
+            reward_per_lot = max(0.0, (target - entry) * lot_size)
+            rr = (reward_per_lot / risk_per_lot) if risk_per_lot > 0 else 0.0
+            lot_cost = entry * lot_size
+            min_capital = lot_cost * 1.2
+
+            if option_type == "CE":
+                tier = "OTM" if off > 0 else "ATM" if off == 0 else "ITM"
+            else:
+                tier = "OTM" if off < 0 else "ATM" if off == 0 else "ITM"
+
+            eligible = []
+            for lbl, cap in cap_labels:
+                bracket = self.risk.bracket_manager.get_bracket(cap)
+                if min_capital <= cap * 0.8 and risk_per_lot <= bracket.max_loss_per_trade:
+                    eligible.append(lbl)
+
+            score = rr * 100.0 - (min_capital / max(self.capital, 1.0))
+            out.append({
+                "strike": int(round(strike)),
+                "option_type": option_type,
+                "instrument": f"{symbol} {int(round(strike))} {option_type}",
+                "entry_price": entry,
+                "stop_loss": stop_loss,
+                "target": target,
+                "risk_reward": round(rr, 2),
+                "lot_size": int(lot_size),
+                "lot_cost": round(lot_cost, 2),
+                "min_capital_required": round(min_capital, 2),
+                "risk_amount_1lot": round(risk_per_lot, 2),
+                "reward_amount_1lot": round(reward_per_lot, 2),
+                "strike_tier": tier,
+                "offset": int(off),
+                "eligible_brackets": eligible,
+                "score": score,
+            })
+
+        out.sort(key=lambda x: (x["score"], x["risk_reward"], -x["min_capital_required"]), reverse=True)
+        return out
+
+    def _route_candidates_for_capital(self, candidates: List[Dict], capital: float) -> List[Dict]:
+        """Filter and rank candidates for one account capital bracket."""
+        bracket = self.risk.bracket_manager.get_bracket(capital)
+        affordability_cap = capital * 0.8
+        eligible = []
+        for c in candidates:
+            if c["min_capital_required"] > affordability_cap:
+                continue
+            if c["risk_amount_1lot"] > bracket.max_loss_per_trade:
+                continue
+
+            max_lots_afford = int(affordability_cap // max(c["lot_cost"], 1.0))
+            max_lots_risk = int(bracket.max_loss_per_trade // max(c["risk_amount_1lot"], 1.0))
+            max_lots = min(max_lots_afford, max_lots_risk)
+            if max_lots < 1:
+                continue
+
+            cc = dict(c)
+            cc["recommended_lots"] = int(max_lots)
+            eligible.append(cc)
+
+        eligible.sort(key=lambda x: (x["score"], x["risk_reward"], x["recommended_lots"]), reverse=True)
+        return eligible
+
+    def _build_execution_signal_from_candidate(self, base_signal: Dict, candidate: Dict) -> Dict:
+        """Create executable signal payload from ranked candidate metadata."""
+        out = dict(base_signal)
+        out["strike"] = candidate["strike"]
+        out["option_type"] = candidate["option_type"]
+        out["instrument"] = candidate["instrument"]
+        out["entry_price"] = candidate["entry_price"]
+        out["stop_loss"] = candidate["stop_loss"]
+        out["target"] = candidate["target"]
+        out["risk_reward"] = candidate["risk_reward"]
+        out["lot_size"] = candidate["lot_size"]
+        out["lot_cost"] = candidate["lot_cost"]
+        out["min_capital_required"] = candidate["min_capital_required"]
+        out["risk_amount_1lot"] = candidate["risk_amount_1lot"]
+        out["reward_amount_1lot"] = candidate["reward_amount_1lot"]
+        out["strike_tier"] = candidate["strike_tier"]
+        out["lots"] = int(candidate.get("recommended_lots", 1))
+        return out
 
     def _feed_real_premium(self, refined_signal: Dict):
         """
@@ -764,8 +973,9 @@ class Prometheus:
                 ))
 
         # 3. Regime from intraday data (short-term structure, not 90-day daily)
-        # For intraday, today's 5min price action determines regime — not 3-month trend
-        regime = self.regime_detector.detect(data_primary) if len(data_primary) >= 50 else None
+        # Use VIX as volatility anchor so intraday bar frequency does not skew regime volatility state.
+        intraday_vix = self.data.get_vix()
+        regime = self.regime_detector.detect(data_primary, vix=intraday_vix) if len(data_primary) >= 50 else None
 
         # 4. Fuse with Session 23 intraday weight overrides
         # Swap in a NEW dict with intraday-specific weights (avoids mutating class dict)
@@ -817,6 +1027,25 @@ class Prometheus:
         vix = self.data.get_vix()
         threshold = intraday_cfg.get("vix_threshold_5min", 18.0)
         return "5minute" if vix > threshold else "15minute"
+
+    def _get_intraday_instruments(self, fallback: Optional[List[str]] = None) -> List[str]:
+        """Resolve intraday symbols with optional performance gate allowlist."""
+        intraday_cfg = get("intraday", {})
+        base_symbols = intraday_cfg.get("instruments", fallback or self.symbols)
+        allowlist = intraday_cfg.get("allowed_instruments", [])
+
+        if not allowlist:
+            return list(base_symbols)
+
+        allowed = set(allowlist)
+        filtered = [sym for sym in base_symbols if sym in allowed]
+        if not filtered:
+            logger.warning(
+                "Intraday allowlist is configured but no symbols overlap with intraday.instruments; "
+                "falling back to unfiltered intraday.instruments"
+            )
+            return list(base_symbols)
+        return filtered
 
     def scan_all(self) -> list:
         """Scan all configured symbols and return signals."""
@@ -981,7 +1210,7 @@ class Prometheus:
 
                             if signal.action != "HOLD":
                                 refined = self.refine_with_strategy(signal)
-                                self.telegram.alert_new_signal(refined)
+                                self._alert_signal(refined)
 
                             # Show regime
                             data = self.data.fetch_historical(symbol, days=60, interval="day")
@@ -1110,11 +1339,11 @@ class Prometheus:
                                     f"High-confluence ({signal.confidence:.0%}, "
                                     f"{n_signals} indicators) on <b>{symbol}</b>"
                                 )
-                                self.telegram.alert_new_signal(refined)
+                                self._alert_signal(refined)
 
                                 if symbol not in _today_traded_symbols:
-                                    position = self.order_manager.execute_signal(
-                                        refined, confirm=False
+                                    position = self._execute_signal_with_feedback(
+                                        refined, confirm=False, context="mid-day"
                                     )
                                     self._dispatch_multi_account(refined)
                                     if position:
@@ -1146,11 +1375,11 @@ class Prometheus:
                             if signal.action != "HOLD" and symbol not in _today_traded_symbols:
                                 # Refine through strategy module for strike/premium/sizing
                                 refined = self.refine_with_strategy(signal)
-                                self.telegram.alert_new_signal(refined)
+                                self._alert_signal(refined)
 
                                 # Execute in paper mode
-                                position = self.order_manager.execute_signal(
-                                    refined, confirm=False
+                                position = self._execute_signal_with_feedback(
+                                    refined, confirm=False, context="post-close"
                                 )
                                 self._dispatch_multi_account(refined)
 
@@ -1656,6 +1885,41 @@ class Prometheus:
             f"Action on breach: block_new={block_new}, force_square_off={force_sq}"
         )
 
+    def _execute_signal_with_feedback(
+        self,
+        refined_signal: Dict,
+        confirm: bool = False,
+        context: str = "",
+    ):
+        """Execute signal and publish rejection reason (throttled) when not executed."""
+        position = self.order_manager.execute_signal(refined_signal, confirm=confirm)
+        if position:
+            return position
+
+        reason = getattr(self.order_manager, "last_execution_error", "") or "Rejected by risk/execution checks"
+        symbol = refined_signal.get("symbol", "UNKNOWN")
+        key = (symbol, reason)
+        now = datetime.now()
+        prev = self._last_trade_reject_alerts.get(key)
+
+        # 5-minute cooldown for identical symbol+reason alert pair
+        if prev and (now - prev).total_seconds() < 300:
+            return None
+
+        self._last_trade_reject_alerts[key] = now
+        ctx = f" ({context})" if context else ""
+        self.telegram.send_message(
+            f"\u26a0\ufe0f <b>PAPER TRADE NOT EXECUTED{ctx}</b>\n"
+            f"{symbol}: {reason}"
+        )
+        return None
+
+    def _alert_signal(self, refined_signal: Dict):
+        """Send generic signal alert only for single-account mode."""
+        if self.multi_account is not None:
+            return
+        self.telegram.alert_new_signal(refined_signal)
+
     # ─────────────────────────────────────────────────────────────────────
     # FULL AUTO MODE
     # ─────────────────────────────────────────────────────────────────────
@@ -1728,9 +1992,9 @@ class Prometheus:
                             if signal.confidence >= 0.80 and n_signals >= 4:
                                 if symbol not in _today_traded_symbols:
                                     refined = self.refine_with_strategy(signal)
-                                    self.telegram.alert_new_signal(refined)
-                                    position = self.order_manager.execute_signal(
-                                        refined, confirm=False
+                                    self._alert_signal(refined)
+                                    position = self._execute_signal_with_feedback(
+                                        refined, confirm=False, context=mode_label
                                     )
                                     self._dispatch_multi_account(refined)
                                     if position:
@@ -1751,9 +2015,9 @@ class Prometheus:
                         signal = self.analyze(symbol)
                         if signal and signal.action != "HOLD" and symbol not in _today_traded_symbols:
                             refined = self.refine_with_strategy(signal)
-                            self.telegram.alert_new_signal(refined)
-                            position = self.order_manager.execute_signal(
-                                refined, confirm=False
+                            self._alert_signal(refined)
+                            position = self._execute_signal_with_feedback(
+                                refined, confirm=False, context=mode_label
                             )
                             self._dispatch_multi_account(refined)
                             if position:
@@ -1878,8 +2142,8 @@ class Prometheus:
                                     refined, timeout=confirm_timeout
                                 )
                                 if confirmed:
-                                    position = self.order_manager.execute_signal(
-                                        refined, confirm=False
+                                    position = self._execute_signal_with_feedback(
+                                        refined, confirm=False, context="SEMI-AUTO"
                                     )
                                     if position:
                                         _today_traded_symbols.add(symbol)
@@ -1902,8 +2166,8 @@ class Prometheus:
                                 refined, timeout=confirm_timeout
                             )
                             if confirmed:
-                                position = self.order_manager.execute_signal(
-                                    refined, confirm=False
+                                position = self._execute_signal_with_feedback(
+                                    refined, confirm=False, context="SEMI-AUTO"
                                 )
                                 if position:
                                     _today_traded_symbols.add(symbol)
@@ -2019,7 +2283,7 @@ class Prometheus:
         square_off_h, square_off_m = map(int, square_off_str.split(":"))
         last_entry_time = dtime(last_entry_h, last_entry_m)
         square_off_time = dtime(square_off_h, square_off_m)
-        intraday_instruments = intraday_cfg.get("instruments", self.symbols)
+        intraday_instruments = self._get_intraday_instruments(self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
         pilot_cfg = intraday_cfg.get("v2", {}).get("pilot_guardrails", {})
         pilot_block_new = bool(pilot_cfg.get("block_new_entries_on_breach", True))
@@ -2153,10 +2417,10 @@ class Prometheus:
                     signal = self.analyze_intraday(symbol, bar_interval)
                     if signal and signal.action != "HOLD":
                         refined = self.refine_with_strategy(signal)
-                        self.telegram.alert_new_signal(refined)
+                        self._alert_signal(refined)
 
-                        position = self.order_manager.execute_signal(
-                            refined, confirm=False
+                        position = self._execute_signal_with_feedback(
+                            refined, confirm=False, context=mode_label
                         )
                         self._dispatch_multi_account(
                             refined, is_intraday=True,
@@ -2315,7 +2579,7 @@ class Prometheus:
         square_off_h, square_off_m = map(int, square_off_str.split(":"))
         last_entry_time = dtime(last_entry_h, last_entry_m)
         square_off_time = dtime(square_off_h, square_off_m)
-        intraday_instruments = intraday_cfg.get("instruments", self.symbols)
+        intraday_instruments = self._get_intraday_instruments(self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
         pilot_cfg = intraday_cfg.get("v2", {}).get("pilot_guardrails", {})
         pilot_block_new = bool(pilot_cfg.get("block_new_entries_on_breach", True))
@@ -2448,8 +2712,10 @@ class Prometheus:
                                         continue
                                 
                                 refined = self.refine_with_strategy(signal)
-                                self.telegram.alert_new_signal(refined)
-                                position = self.order_manager.execute_signal(refined, confirm=False)
+                                self._alert_signal(refined)
+                                position = self._execute_signal_with_feedback(
+                                    refined, confirm=False, context=f"{mode_label} swing"
+                                )
                                 self._dispatch_multi_account(refined)
                                 if position:
                                     _swing_traded_symbols.add(symbol)
@@ -2500,9 +2766,9 @@ class Prometheus:
                                 signal = self.analyze_intraday(isym, bar_interval)
                                 if signal and signal.action != "HOLD":
                                     refined = self.refine_with_strategy(signal)
-                                    self.telegram.alert_new_signal(refined)
-                                    position = self.order_manager.execute_signal(
-                                        refined, confirm=False
+                                    self._alert_signal(refined)
+                                    position = self._execute_signal_with_feedback(
+                                        refined, confirm=False, context=f"{mode_label} intraday"
                                     )
                                     self._dispatch_multi_account(
                                         refined, is_intraday=True,
@@ -5702,7 +5968,9 @@ class Prometheus:
                     })
 
                     refined = self.refine_with_strategy(signal)
-                    position = self.order_manager.execute_signal(refined, confirm=False)
+                    position = self._execute_signal_with_feedback(
+                        refined, confirm=False, context=f"{mode_label} stocks"
+                    )
                     self._dispatch_multi_account(refined)
                     
                     if position:
@@ -5857,7 +6125,7 @@ class Prometheus:
         intra_count = 0
         intra_details = []
         intraday_cfg = self.config.get("intraday", {})
-        intraday_symbols = intraday_cfg.get("instruments", self.symbols)
+        intraday_symbols = self._get_intraday_instruments(self.symbols)
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             for di in executor.map(_scan_intra, intraday_symbols):
                 if di:
@@ -5879,82 +6147,55 @@ class Prometheus:
         return res
 
     def _tg_cmd_scan(self, args: str = "") -> str:
-        """Handle /scan command — run multi-index + stock scanner with swing + intraday."""
-        n_total = len(self.all_symbols)
-        self.telegram.send_message(
-            f"\U0001f50e Scanning {n_total} symbols "
-            f"({len(self.symbols)} indices + {len(self.stock_symbols)} stocks, "
-            f"swing + intraday)... please wait."
+        """Handle /scan command — start scan work in the background."""
+        with self._scan_lock:
+            if self._scan_in_progress:
+                return "⏳ Scan already in progress. Please wait for the current scan to finish."
+            self._scan_in_progress = True
+
+        worker = threading.Thread(
+            target=self._run_tg_scan_job,
+            args=(args,),
+            daemon=True,
+            name="tg-scan-job",
+        )
+        worker.start()
+
+        return (
+            f"🔎 Scan started for {len(self.all_symbols)} symbols "
+            f"({len(self.symbols)} indices + {len(self.stock_symbols)} stocks). "
+            f"I’ll send results when complete."
         )
 
-        # Regime multipliers (same as run_scan)
-        REGIME_MULTIPLIER = {
-            "markup": 1.00, "markdown": 0.95, "accumulation": 0.75,
-            "distribution": 0.70, "volatile": 0.55, "unknown": 0.40,
-        }
-        SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
+    def _run_tg_scan_job(self, args: str = ""):
+        """Execute the Telegram /scan workflow in the background."""
+        import concurrent.futures
 
-        def _scan_one_cmd(symbol):
-            try:
-                signal = self.analyze(symbol)
-                if not signal:
-                    return None
-                    
-                data = self.data.fetch_historical(symbol, days=90, interval="day")
-                regime_str = "unknown"
-                if not data.empty:
-                    regime = self.regime_detector.detect(data)
-                    regime_str = regime.regime.value
-                    
-                raw_confidence = signal.confidence
-                regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
-                adj_confidence = raw_confidence * regime_mult
-                sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
-                
-                return {
-                    "symbol": symbol,
-                    "action": signal.action,
-                    "raw_confidence": raw_confidence,
-                    "adj_confidence": adj_confidence,
-                    "regime": regime_str,
-                    "signal_count": sig_count,
-                    "entry_price": signal.entry_price,
-                    "stop_loss": signal.stop_loss,
-                    "target": signal.target,
-                    "risk_reward": signal.risk_reward,
-                    "reasoning": signal.reasoning,
-                    "executable": symbol not in SIGNAL_ONLY,
-                    "timeframe": "swing",
-                }
-            except Exception as e:
-                logger.debug(f"Scan failed for {symbol}: {e}")
-                return None
+        n_total = len(self.all_symbols)
+        try:
+            self.telegram.send_message(
+                f"\U0001f50e Scanning {n_total} symbols "
+                f"({len(self.symbols)} indices + {len(self.stock_symbols)} stocks, "
+                f"swing + intraday)... please wait."
+            )
 
-        scan_results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            for sres in executor.map(_scan_one_cmd, self.all_symbols):
-                if sres: scan_results.append(sres)
+            # Regime multipliers (same as run_scan)
+            REGIME_MULTIPLIER = {
+                "markup": 1.00, "markdown": 0.95, "accumulation": 0.75,
+                "distribution": 0.70, "volatile": 0.55, "unknown": 0.40,
+            }
+            SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
 
-        # Intraday scan (during market hours only)
-        from datetime import time as dtime
-        now = datetime.now()
-        intraday_cfg = self.config.get("intraday", {})
-        intraday_instruments = intraday_cfg.get("instruments", self.symbols[:2])
-        mkt_open = dtime(9, 15)
-        mkt_close = dtime(15, 15)
-
-        if mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
-            bar_interval = self._select_intraday_interval()
-            def _scan_intra_cmd(symbol):
+            def _scan_one_cmd(symbol):
                 try:
-                    signal = self.analyze_intraday(symbol, bar_interval)
+                    signal = self.analyze(symbol)
                     if not signal:
                         return None
                         
-                    intra_data = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+                    data = self.data.fetch_historical(symbol, days=90, interval="day")
                     regime_str = "unknown"
-                    if len(intra_data) >= 50:
-                        regime = self.regime_detector.detect(intra_data)
+                    if not data.empty:
+                        regime = self.regime_detector.detect(data)
                         regime_str = regime.regime.value
                         
                     raw_confidence = signal.confidence
@@ -5963,7 +6204,7 @@ class Prometheus:
                     sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
                     
                     return {
-                        "symbol": f"{symbol} (intraday {bar_interval})",
+                        "symbol": symbol,
                         "action": signal.action,
                         "raw_confidence": raw_confidence,
                         "adj_confidence": adj_confidence,
@@ -5972,22 +6213,79 @@ class Prometheus:
                         "entry_price": signal.entry_price,
                         "stop_loss": signal.stop_loss,
                         "target": signal.target,
-                        "risk_reward": getattr(signal, "risk_reward", 0),
-                        "reasoning": getattr(signal, "reasoning", ""),
+                        "risk_reward": signal.risk_reward,
+                        "reasoning": signal.reasoning,
                         "executable": symbol not in SIGNAL_ONLY,
-                        "timeframe": "intraday",
+                        "timeframe": "swing",
                     }
                 except Exception as e:
-                    logger.debug(f"Intraday scan failed for {symbol}: {e}")
+                    logger.debug(f"Scan failed for {symbol}: {e}")
                     return None
 
+            scan_results = []
             with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                for sres in executor.map(_scan_intra_cmd, intraday_instruments):
+                for sres in executor.map(_scan_one_cmd, self.all_symbols):
                     if sres: scan_results.append(sres)
 
-        # Send formatted summary (handles empty case too)
-        self.telegram.alert_scanner_summary(scan_results)
-        return None  # already sent via alert_scanner_summary
+            # Intraday scan (during market hours only)
+            from datetime import time as dtime
+            now = datetime.now()
+            intraday_cfg = self.config.get("intraday", {})
+            intraday_instruments = self._get_intraday_instruments(self.symbols[:2])
+            mkt_open = dtime(9, 15)
+            mkt_close = dtime(15, 15)
+
+            if mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
+                bar_interval = self._select_intraday_interval()
+
+                def _scan_intra_cmd(symbol):
+                    try:
+                        signal = self.analyze_intraday(symbol, bar_interval)
+                        if not signal:
+                            return None
+                            
+                        intra_data = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+                        regime_str = "unknown"
+                        if len(intra_data) >= 50:
+                            regime = self.regime_detector.detect(intra_data)
+                            regime_str = regime.regime.value
+                            
+                        raw_confidence = signal.confidence
+                        regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
+                        adj_confidence = raw_confidence * regime_mult
+                        sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
+                        
+                        return {
+                            "symbol": f"{symbol} (intraday {bar_interval})",
+                            "action": signal.action,
+                            "raw_confidence": raw_confidence,
+                            "adj_confidence": adj_confidence,
+                            "regime": regime_str,
+                            "signal_count": sig_count,
+                            "entry_price": signal.entry_price,
+                            "stop_loss": signal.stop_loss,
+                            "target": signal.target,
+                            "risk_reward": getattr(signal, "risk_reward", 0),
+                            "reasoning": getattr(signal, "reasoning", ""),
+                            "executable": symbol not in SIGNAL_ONLY,
+                            "timeframe": "intraday",
+                        }
+                    except Exception as e:
+                        logger.debug(f"Intraday scan failed for {symbol}: {e}")
+                        return None
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    for sres in executor.map(_scan_intra_cmd, intraday_instruments):
+                        if sres: scan_results.append(sres)
+
+            # Send formatted summary (handles empty case too)
+            self.telegram.alert_scanner_summary(scan_results)
+        except Exception as e:
+            logger.error(f"Telegram /scan job failed: {e}")
+            self.telegram.send_message(f"⚠️ /scan failed: {str(e)[:200]}")
+        finally:
+            with self._scan_lock:
+                self._scan_in_progress = False
 
     def _tg_cmd_status(self, args: str = "") -> str:
         """Handle /status command — shows all accounts if multi-account is active."""
@@ -6085,11 +6383,12 @@ class Prometheus:
         )
 
     def _tg_cmd_regime(self, args: str = "") -> str:
-        """Handle /regime command — show current regime for all indices."""
+        """Handle /regime command — show separate swing and intraday regimes."""
         lines = [
             "\U0001f30d <b>MARKET REGIME</b>",
             "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
             "",
+            "\U0001f4c5 <b>SWING (daily, 90 bars)</b>",
         ]
 
         for symbol in self.symbols:
@@ -6121,6 +6420,44 @@ class Prometheus:
                 )
             except Exception as e:
                 lines.append(f"\u26aa {symbol}:  <i>error</i>")
+
+        lines.extend([
+            "",
+            "\U0001f552 <b>INTRADAY (current session)</b>",
+        ])
+
+        bar_interval = self._select_intraday_interval()
+        intraday_vix = self.data.get_vix()
+
+        for symbol in self.config.get("intraday", {}).get("instruments", self.symbols):
+            try:
+                data = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+                if data.empty or len(data) < 50:
+                    lines.append(f"\u26aa {symbol}:  <i>intraday data insufficient</i>")
+                    continue
+
+                regime = self.regime_detector.detect(data, vix=intraday_vix)
+                r_val = regime.regime.value
+                r_conf = regime.confidence
+                trend = regime.trend_strength
+
+                from prometheus.interface.telegram_bot import REGIME_QUALITY
+                quality, wr = REGIME_QUALITY.get(r_val, ("???", ""))
+
+                if trend > 0.2:
+                    arrow = "\u2b06\ufe0f"
+                elif trend < -0.2:
+                    arrow = "\u2b07\ufe0f"
+                else:
+                    arrow = "\u27a1\ufe0f"
+
+                lines.append(
+                    f"{arrow} <b>{symbol}</b> <i>({bar_interval})</i>\n"
+                    f"    {r_val.upper()} <code>{r_conf:.0%}</code>  \u2502  {quality} ({wr})\n"
+                    f"    Trend: <code>{trend:+.2f}</code>"
+                )
+            except Exception:
+                lines.append(f"\u26aa {symbol}:  <i>intraday error</i>")
 
         return "\n".join(lines)
 
@@ -6236,8 +6573,8 @@ def main():
     parser.add_argument(
         "--data-source",
         default="auto",
-        choices=["auto", "kite", "angelone", "yfinance"],
-        help="Historical data source mode (default: auto)",
+        choices=["auto", "hybrid", "kite", "angelone", "yfinance"],
+        help="Historical data source mode (default: auto). Use 'hybrid' for yfinance validation + Angel One execution feeds.",
     )
     parser.add_argument(
         "--fetch-retries",

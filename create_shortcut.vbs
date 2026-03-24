@@ -3,11 +3,13 @@
 ' ============================================================================
 
 Set WshShell = CreateObject("WScript.Shell")
-Set oLink = WshShell.CreateShortcut(WshShell.SpecialFolders("Startup") & "\Prometheus.lnk")
+Set FSO = CreateObject("Scripting.FileSystemObject")
+scriptDir = FSO.GetParentFolderName(WScript.ScriptFullName)
 
-oLink.TargetPath = "wscript.exe"
-oLink.Arguments = "C:\Users\amanu\Desktop\Trading\prometheus_service.vbs"
-oLink.WorkingDirectory = "C:\Users\amanu\Desktop\Trading"
+Set oLink = WshShell.CreateShortcut(WshShell.SpecialFolders("Startup") & "\Prometheus.lnk")
+oLink.TargetPath = "C:\Windows\System32\wscript.exe"
+oLink.Arguments = Chr(34) & scriptDir & "\prometheus_service.vbs" & Chr(34)
+oLink.WorkingDirectory = scriptDir
 oLink.Description = "PROMETHEUS Signal Service"
 oLink.Save
 

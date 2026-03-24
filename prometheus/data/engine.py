@@ -419,7 +419,7 @@ class DataEngine:
         self.kite = KiteDataFeed(kite_api_key, kite_access_token)
         self.yf = YFinanceFallback()
         self.nse = NSEDirectFeed()
-        self.historical_source = "auto"  # auto | kite | angelone | yfinance
+        self.historical_source = "auto"  # auto | hybrid | kite | angelone | yfinance
         self.fetch_retries = 2
 
         # Angel One for extended intraday history (up to 5yr of 5min data)
@@ -449,7 +449,7 @@ class DataEngine:
 
     def configure_historical_fetch(self, source: str = "auto", retries: int = 2):
         """Configure historical data provider selection and retry behavior."""
-        valid_sources = {"auto", "kite", "angelone", "yfinance"}
+        valid_sources = {"auto", "hybrid", "kite", "angelone", "yfinance"}
         normalized_source = (source or "auto").lower()
         if normalized_source not in valid_sources:
             logger.warning(f"Invalid data source '{source}'. Falling back to auto.")
@@ -464,6 +464,10 @@ class DataEngine:
     def _get_source_order(self, symbol: str, interval: str, days: int) -> List[str]:
         """Resolve provider priority based on mode and data characteristics."""
         if self.historical_source != "auto":
+            # Hybrid architecture: use yfinance candles for validation gates,
+            # while execution-side pricing/option chain still prefers Angel One.
+            if self.historical_source == "hybrid":
+                return ["yfinance"]
             return [self.historical_source]
 
         sources: List[str] = []
@@ -600,6 +604,50 @@ class DataEngine:
         df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return df
 
+    def _normalize_options_chain(self, df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Normalize option-chain schema and numeric dtypes for downstream analyzers."""
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # Drop duplicate column names to avoid Series-valued column selections.
+        df = df.loc[:, ~df.columns.duplicated()].copy()
+
+        defaults = {
+            "timestamp": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+            "strike": 0.0,
+            "expiry": "",
+            "option_type": "",
+            "ltp": 0.0,
+            "bid": 0.0,
+            "ask": 0.0,
+            "volume": 0,
+            "oi": 0,
+            "oi_change": 0,
+            "iv": 0.0,
+            "underlying": 0.0,
+        }
+
+        for col, default in defaults.items():
+            if col not in df.columns:
+                df[col] = default
+
+        numeric_cols = ["strike", "ltp", "bid", "ask", "volume", "oi", "oi_change", "iv", "underlying"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+        # Keep supported option types only and normalize casing.
+        df["option_type"] = df["option_type"].astype(str).str.upper()
+        df = df[df["option_type"].isin(["CE", "PE"])]
+
+        # Persist-friendly text fields.
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        df["timestamp"] = df["timestamp"].fillna(pd.Timestamp.now(tz=IST))
+        df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        df["expiry"] = df["expiry"].astype(str)
+
+        df["symbol"] = symbol
+        return df.reset_index(drop=True)
+
     def fetch_intraday(
         self,
         symbol: str,
@@ -650,7 +698,7 @@ class DataEngine:
                     symbol, spot_price=spot, strikes_around_atm=10,
                 )
                 if not df.empty:
-                    df["symbol"] = symbol
+                    df = self._normalize_options_chain(df, symbol)
                     self.store.save_options_chain(df)
                     return df
             except Exception as e:
@@ -663,7 +711,7 @@ class DataEngine:
 
         df = self.nse.parse_options_chain(raw)
         if not df.empty:
-            df["symbol"] = symbol
+            df = self._normalize_options_chain(df, symbol)
             self.store.save_options_chain(df)
 
         return df

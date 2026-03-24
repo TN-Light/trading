@@ -46,6 +46,17 @@ class AngelOneOptionChain:
         self._cache_date: str = ""  # invalidate daily
         self._last_call: float = 0.0
         self._min_interval: float = 0.35  # ~3 req/sec
+        self._disabled_until: float = 0.0
+        self._auth_cooldown_sec: int = 300
+
+    def _is_temporarily_disabled(self) -> bool:
+        return time.time() < self._disabled_until
+
+    def _mark_auth_failure(self, reason: str):
+        self._disabled_until = time.time() + self._auth_cooldown_sec
+        logger.warning(
+            f"Angel One option chain disabled for {self._auth_cooldown_sec}s due to auth failure: {reason}"
+        )
 
     def _rate_limit(self):
         """Simple rate limiter for API calls."""
@@ -56,6 +67,8 @@ class AngelOneOptionChain:
 
     def _get_obj(self):
         """Get authenticated SmartConnect object."""
+        if self._is_temporarily_disabled():
+            return None
         if not self._fetcher._ensure_connected():
             return None
         return self._fetcher._obj
@@ -99,6 +112,10 @@ class AngelOneOptionChain:
             try:
                 result = obj.searchScrip("NFO", underlying)
                 if not result or not result.get("data"):
+                    msg = str(result.get("message", "")) if isinstance(result, dict) else ""
+                    code = str(result.get("errorCode", "")) if isinstance(result, dict) else ""
+                    if code == "AG8001" or "invalid token" in msg.lower():
+                        self._mark_auth_failure(msg or code or "Invalid Token")
                     logger.warning(f"searchScrip returned no data for {underlying}")
                     return []
 
@@ -107,11 +124,13 @@ class AngelOneOptionChain:
                 self._cache_date = today_str
                 logger.info(f"Angel One: discovered {len(contracts)} NFO contracts for {underlying}")
             except Exception as e:
+                if "invalid token" in str(e).lower() or "AG8001" in str(e):
+                    self._mark_auth_failure(str(e))
                 logger.error(f"Angel One searchScrip error: {e}")
                 return []
 
         # Filter contracts
-        filtered = []
+        candidates = []
         for c in contracts:
             ts = c.get("tradingsymbol", "")
             token = c.get("symboltoken", "")
@@ -125,11 +144,6 @@ class AngelOneOptionChain:
             if parsed["option_type"] not in ("CE", "PE"):
                 continue
 
-            # Filter by expiry
-            if expiry_date and parsed.get("expiry_str"):
-                if parsed["expiry_str"] != expiry_date:
-                    continue
-
             # Filter by strike range around ATM
             if spot_price and spot_price > 0:
                 from prometheus.utils.indian_market import get_strike_interval
@@ -139,7 +153,7 @@ class AngelOneOptionChain:
                 if abs(parsed["strike"] - atm) > strike_range:
                     continue
 
-            filtered.append({
+            candidates.append({
                 "tradingsymbol": ts,
                 "symboltoken": token,
                 "strike": parsed["strike"],
@@ -147,7 +161,27 @@ class AngelOneOptionChain:
                 "expiry": parsed.get("expiry_str", ""),
             })
 
-        return filtered
+        # Primary: requested expiry only
+        if expiry_date:
+            filtered = [c for c in candidates if c.get("expiry") == expiry_date]
+            if filtered:
+                return filtered
+
+            # Fallback: nearest available expiry to avoid empty chain due stale calendar mapping
+            today_iso = date.today().isoformat()
+            expiries = sorted({c.get("expiry", "") for c in candidates if c.get("expiry", "")})
+            future_expiries = [e for e in expiries if e >= today_iso]
+            chosen = future_expiries[0] if future_expiries else (expiries[0] if expiries else "")
+            if chosen:
+                fallback = [c for c in candidates if c.get("expiry") == chosen]
+                if fallback:
+                    logger.warning(
+                        f"Angel One: requested expiry {expiry_date} unavailable for {symbol}; "
+                        f"using nearest {chosen}"
+                    )
+                    return fallback
+
+        return candidates
 
     def _parse_tradingsymbol(self, ts: str, underlying: str) -> Optional[Dict]:
         """

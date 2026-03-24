@@ -195,3 +195,88 @@ Alerts (optional): python-telegram-bot
 
 - Current index already contains many staged generated artifacts from prior runs.
 - Keep source changes; remove generated outputs before final commit.
+
+## Session 26 Updates (March 23, 2026)
+
+- Fixed Windows auto-start resiliency:
+  - `register_task.bat` now uses multi-path registration: Scheduled Task (preferred), HKCU Run key fallback, and Startup shortcut refresh.
+  - Script no longer hard-fails when task creation is denied due lack of admin rights.
+- Hardened startup shortcut creation in `create_shortcut.vbs`:
+  - Uses `WScript.ScriptFullName` to derive working directory (no hard-coded absolute path).
+  - Uses explicit `C:\Windows\System32\wscript.exe` target.
+- Improved Telegram connectivity failover in `prometheus/interface/telegram_bot.py`:
+  - API base URL candidate list now includes configured relay + official API fallback.
+  - Connection bootstrap tries proxy/direct/SNI across candidates.
+- Fixed non-responsive Telegram inbound commands (`/help`, `/scan`, etc.):
+  - `start_listening()` now attempts reconnect before skipping.
+  - `getUpdates` polling now falls back to `https://api.telegram.org` when relay returns non-200.
+- Restarted service and verified combined paper runtime:
+  - `paper --combined --multi-account` process running.
+  - Telegram command listener starts successfully after restart.
+
+### Validation (Session 26)
+
+- `python -m pytest -q prometheus/tests/test_integration.py` → **10 passed**.
+- `python -m py_compile prometheus/interface/telegram_bot.py` → **pass**.
+- `python prometheus/main.py backtest --days 120 --symbol "NIFTY 50"` → executes end-to-end (sample window produced negative return; runtime path healthy).
+- `python prometheus/main.py backtest --intraday --days 30 --symbol "NIFTY 50"` → executes end-to-end (sample window profitable; runtime path healthy).
+
+## Session 27 Updates (March 24, 2026)
+
+- Completed subsystem diff review for current working tree changes:
+  - Startup resiliency updates in `register_task.bat` and `create_shortcut.vbs`
+  - Multi-account strike routing and rejection feedback in `prometheus/main.py`
+  - Execution rejection reason propagation in `prometheus/execution/order_manager.py`
+  - Telegram connectivity and mobile formatting updates in `prometheus/interface/telegram_bot.py`
+  - Lot-size override configuration in `prometheus/config/settings.yaml`
+- Classified changes as operational/runtime focused (not core backtest engine rewrite).
+
+### Validation (Session 27)
+
+- `python -m pytest -q prometheus/tests/test_integration.py` → **10 passed**.
+- `python -m py_compile prometheus/interface/telegram_bot.py prometheus/main.py prometheus/execution/order_manager.py` → **pass**.
+- `python prometheus/main.py backtest --days 120 --symbol "NIFTY 50" --parrondo` → executes end-to-end (short window produced negative return; runtime path healthy).
+- `python prometheus/main.py walkforward --symbol "NIFTY 50" --parrondo` → executes end-to-end and reports **9/9 validation passes**, **PBO 0.127 (ROBUST)**.
+
+## Session 28 Updates (March 24, 2026)
+
+- Added strict A/B regression automation command: `run_regression_guard.py`
+  - Compares baseline ref (default `HEAD~1`) vs target snapshot (`WORKTREE` by default for uncommitted current state).
+  - Runs 5y/10y/15y backtests and walk-forward OOS for `NIFTY 50`, `NIFTY BANK`, `SENSEX`.
+  - Produces pass/fail drift checks for PF, Sharpe, Calmar, MaxDD, and PBO.
+  - Enforces strict no-degrade logic:
+    - PF/Sharpe/Calmar must not decrease
+    - MaxDD/PBO must not increase
+- Added deployment filter auto-generation to `prometheus/config/deployment_filters.yaml`:
+  - Builds symbol whitelist only when strict no-degrade and robustness gates pass.
+  - Emits per-symbol risk caps for position risk, daily loss, and concurrent positions.
+- Added convenience launcher: `run_regression_guard.bat`.
+- Added artifact guardrails in `.gitignore` for `reports/validation/` and `regression/ab_compare/`.
+
+### Validation (Session 28)
+
+- `python -m py_compile run_regression_guard.py` → **pass**.
+- `python run_regression_guard.py --base-ref HEAD~1 --target-ref WORKTREE --symbols "NIFTY 50" "NIFTY BANK" "SENSEX" --days 1825 3650 5475` → executed end-to-end.
+- Output artifacts generated:
+  - `regression/ab_compare/<timestamp>/backtest_delta_table.csv`
+  - `regression/ab_compare/<timestamp>/walkforward_oos_delta_table.csv`
+  - `prometheus/config/deployment_filters.yaml`
+
+## Session 29 Updates (March 24, 2026)
+
+- Fixed strict A/B regression reproducibility in `run_regression_guard.py`:
+  - Added explicit data source pinning for both snapshots (`--data-source`, default `yfinance`) to prevent provider mismatch noise.
+  - Added runtime hydration for temp worktrees (`credentials.yaml`) so historical snapshots execute reliably.
+  - Added retry-on-parse robustness for snapshot command outputs to handle transient provider/output jitter.
+  - Corrected report-mode final status messaging (`--allow-degrade` now reports FAIL when thresholds are breached, but exits 0 intentionally).
+- Updated `run_regression_guard.bat` defaults to deterministic mode:
+  - `--data-source yfinance --fetch-retries 2`
+- Regenerated deployment filters from deterministic strict run:
+  - Whitelist includes only `NIFTY 50` under current robustness gates (`PBO < 0.50`, strict no-degrade).
+
+### Validation (Session 29)
+
+- `python -m py_compile run_regression_guard.py` → **pass**.
+- `python run_regression_guard.py --base-ref HEAD~1 --target-ref WORKTREE --symbols "NIFTY 50" "NIFTY BANK" "SENSEX" --days 1825 3650 5475 --data-source yfinance --fetch-retries 2 --allow-degrade` → **strict no-degrade PASS** across all tracked metrics (PF, Sharpe, Calmar, MaxDD, PBO).
+- `python run_regression_guard.py --base-ref HEAD~1 --target-ref WORKTREE --symbols "NIFTY 50" "NIFTY BANK" "SENSEX" --days 1825 3650 5475 --data-source yfinance --fetch-retries 2` → **strict mode PASS**, exit code **0**.
+- `prometheus/config/deployment_filters.yaml` now emits symbol whitelist: **NIFTY 50**.

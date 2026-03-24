@@ -71,6 +71,7 @@ class OrderManager:
         self.store = DataStore()
         self.managed_positions: Dict[str, ManagedPosition] = {}
         self._position_counter = 0
+        self.last_execution_error: str = ""
 
     def execute_signal(
         self,
@@ -98,16 +99,20 @@ class OrderManager:
         action = signal.get("action", "HOLD")
 
         if action == "HOLD":
+            self.last_execution_error = "No actionable signal (HOLD)."
             return None
+
+        self.last_execution_error = ""
 
         # Step 1: Position sizing via risk-based calculation (must precede risk check)
         lot_size = get_lot_size(symbol)
         sizing = self.risk.calculate_position_size(entry, sl, lot_size)
         quantity = sizing.get("quantity", lot_size)
         if quantity <= 0:
-            logger.warning(
-                f"Trade REJECTED: risk budget insufficient ({sizing.get('error', 'sizing failed')})"
+            self.last_execution_error = (
+                f"Risk budget insufficient ({sizing.get('error', 'sizing failed')})"
             )
+            logger.warning(f"Trade REJECTED: {self.last_execution_error}")
             return None
 
         # Step 2: Risk pre-check with true size/cost
@@ -121,6 +126,9 @@ class OrderManager:
         })
 
         if not risk_check.approved:
+            self.last_execution_error = (
+                f"Risk manager rejected: {risk_check.reason}"
+            )
             logger.warning(
                 f"Trade REJECTED by risk manager: {risk_check.reason} "
                 f"(violations: {risk_check.violations})"
@@ -137,6 +145,7 @@ class OrderManager:
         elif action == "BUY_STRANGLE":
             return self._execute_strangle(signal, quantity)
         else:
+            self.last_execution_error = f"Unknown action: {action}"
             logger.warning(f"Unknown action: {action}")
             return None
 
@@ -197,6 +206,7 @@ class OrderManager:
         entry_order = self.broker.place_order(entry_order)
 
         if entry_order.status == OrderStatus.REJECTED:
+            self.last_execution_error = f"Entry order rejected: {entry_order.message}"
             logger.error(f"Entry order rejected: {entry_order.message}")
             return None
 
@@ -292,6 +302,7 @@ class OrderManager:
                 for prev in entry_orders[:-1]:
                     if prev.status in (OrderStatus.OPEN, OrderStatus.COMPLETE):
                         self._close_order(prev)
+                self.last_execution_error = f"Straddle leg rejected: {filled.message}"
                 logger.error(f"Straddle leg rejected: {filled.message}")
                 return None
 

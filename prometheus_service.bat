@@ -26,7 +26,8 @@ echo [%date% %time%] Mode: COMBINED (swing + intraday) + MULTI-ACCOUNT >> "%LOGF
 :: Run combined mode: swing + intraday with 4 paper accounts
 :: --combined  = both swing scans (1PM, 3:35PM) + intraday scans (9:45-14:30)
 :: --multi-account = 4 parallel accounts (15K, 50K, 1L, 2L)
+:: --data-source hybrid = yfinance validation gate + Angel One execution feeds
 :: Intraday scan auto-aligns to bar interval (5min bars→300s, 15min bars→900s)
-"C:\Program Files\Python312\python.exe" prometheus/main.py paper --combined --multi-account >> "%LOGFILE%" 2>&1
+"C:\Program Files\Python312\python.exe" prometheus/main.py paper --combined --multi-account --data-source hybrid --fetch-retries 2 >> "%LOGFILE%" 2>&1
 
 echo [%date% %time%] PROMETHEUS service stopped. >> "%LOGFILE%"

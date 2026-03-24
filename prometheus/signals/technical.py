@@ -123,18 +123,29 @@ def calculate_volume_profile(
     bins = np.linspace(price_min, price_max, num_bins + 1)
     volume_at_price = np.zeros(num_bins)
 
+    def _scalar(value):
+        if isinstance(value, pd.Series):
+            return value.iloc[0]
+        if isinstance(value, np.ndarray):
+            return value.flat[0]
+        return value
+
     for _, row in recent.iterrows():
         # Distribute volume across the candle's range
-        low_bin = int((row["low"] - price_min) / bin_size)
-        high_bin = int((row["high"] - price_min) / bin_size)
+        low_value = float(_scalar(row["low"]))
+        high_value = float(_scalar(row["high"]))
+        volume_value = float(_scalar(row["volume"]))
+
+        low_bin = int((low_value - price_min) / bin_size)
+        high_bin = int((high_value - price_min) / bin_size)
         low_bin = max(0, min(low_bin, num_bins - 1))
         high_bin = max(0, min(high_bin, num_bins - 1))
 
         if low_bin == high_bin:
-            volume_at_price[low_bin] += row["volume"]
+            volume_at_price[low_bin] += volume_value
         else:
             bins_in_range = high_bin - low_bin + 1
-            vol_per_bin = row["volume"] / bins_in_range
+            vol_per_bin = volume_value / bins_in_range
             for b in range(low_bin, high_bin + 1):
                 volume_at_price[b] += vol_per_bin
 

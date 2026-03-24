@@ -39,6 +39,8 @@ env/
 prometheus/reports/
 reports/*.txt
 reports/*_report.md
+reports/validation/
+regression/ab_compare/
 
 # Generated analysis outputs (root)
 trade_analysis_*.csv
