@@ -41,6 +41,7 @@ reports/*.txt
 reports/*_report.md
 reports/validation/
 regression/ab_compare/
+regression/eclipse_guard/
 
 # Generated analysis outputs (root)
 trade_analysis_*.csv

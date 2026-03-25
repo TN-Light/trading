@@ -48,6 +48,7 @@ sys.path.insert(0, str(PROJECT_ROOT.parent))
 
 import pandas as pd
 import numpy as np
+import yaml
 
 # ── PROMETHEUS Modules ───────────────────────────────────────────────────────
 from prometheus.config import load_config, get, get_credential, get_risk_limits, get_capital_config
@@ -414,6 +415,15 @@ class Prometheus:
 
     def _build_multi_strike_candidates(self, refined_signal: Dict) -> List[Dict]:
         """Generate OTM->ATM->ITM strike candidates with cost/risk metadata."""
+        def _scalar_float(val, default: float = 0.0) -> float:
+            try:
+                if hasattr(val, "iloc"):
+                    # pandas Series/DataFrame cell fallback
+                    val = val.iloc[0]
+                return float(val)
+            except Exception:
+                return default
+
         action = refined_signal.get("action", "HOLD")
         symbol = refined_signal.get("symbol", "")
         if action == "HOLD" or not symbol:
@@ -425,12 +435,13 @@ class Prometheus:
         if option_type not in ("CE", "PE"):
             return []
 
-        # Spot fallback from latest daily close.
-        spot = 0.0
+        # Prefer caller-provided spot so strike ladder aligns with live chain.
+        spot = float(refined_signal.get("spot_price", 0) or refined_signal.get("underlying_price", 0) or 0)
         try:
-            data = self.data.fetch_historical(symbol, days=5, interval="day")
-            if data is not None and not data.empty:
-                spot = float(data["close"].iloc[-1])
+            if spot <= 0:
+                data = self.data.fetch_historical(symbol, days=5, interval="day")
+                if data is not None and not data.empty:
+                    spot = float(data["close"].iloc[-1])
         except Exception:
             pass
         if spot <= 0:
@@ -439,6 +450,40 @@ class Prometheus:
         interval = get_strike_interval(symbol)
         atm = get_atm_strike(spot, symbol)
         offsets = [2, 1, 0, -1, -2] if option_type == "CE" else [-2, -1, 0, 1, 2]
+
+        # Prefer live chain LTPs for user-facing affordability/risk math.
+        live_price_map = {}
+        live_chain = None
+        try:
+            if getattr(self.data, "angelone_options", None):
+                expiry = refined_signal.get("expiry", "")
+                if not expiry or str(expiry).upper() == "WEEKLY":
+                    expiry = None
+                live_chain = self.data.angelone_options.get_option_chain(
+                    symbol=symbol,
+                    spot_price=spot,
+                    expiry_date=expiry,
+                    strikes_around_atm=max(abs(x) for x in offsets) + 2,
+                    include_greeks=False,
+                )
+                if live_chain is not None and not live_chain.empty:
+                    for _, row in live_chain.iterrows():
+                        try:
+                            st = int(round(_scalar_float(row.get("strike", 0), 0.0)))
+                            ot = str(row.get("option_type", "")).upper()
+                            ltp = _scalar_float(row.get("ltp", 0), 0.0)
+                            if st > 0 and ot in ("CE", "PE") and ltp > 0:
+                                live_price_map[(st, ot)] = {
+                                    "ltp": ltp,
+                                    "bid": _scalar_float(row.get("bid", 0), 0.0),
+                                    "ask": _scalar_float(row.get("ask", 0), 0.0),
+                                    "tradingsymbol": row.get("tradingsymbol", ""),
+                                    "expiry": row.get("expiry", ""),
+                                }
+                        except Exception:
+                            continue
+        except Exception as e:
+            logger.debug(f"Live chain preload failed for {symbol}: {e}")
 
         base_entry = float(refined_signal.get("entry_price", 0) or 0)
         base_sl = float(refined_signal.get("stop_loss", 0) or 0)
@@ -460,9 +505,11 @@ class Prometheus:
         for off in offsets:
             strike = float(atm + off * interval)
             try:
-                premium = float(self.trend._estimate_premium(chain, strike, option_type, spot, dte))
+                est_premium = float(self.trend._estimate_premium(chain, strike, option_type, spot, dte))
             except Exception:
-                premium = 0.0
+                est_premium = 0.0
+            live = live_price_map.get((int(round(strike)), option_type), {})
+            premium = float(live.get("ltp", 0) or 0) if live else est_premium
             if premium <= 0:
                 continue
 
@@ -491,6 +538,8 @@ class Prometheus:
                 "strike": int(round(strike)),
                 "option_type": option_type,
                 "instrument": f"{symbol} {int(round(strike))} {option_type}",
+                "tradingsymbol": live.get("tradingsymbol", "") if live else "",
+                "expiry": live.get("expiry", "") if live else refined_signal.get("expiry", ""),
                 "entry_price": entry,
                 "stop_loss": stop_loss,
                 "target": target,
@@ -503,6 +552,7 @@ class Prometheus:
                 "strike_tier": tier,
                 "offset": int(off),
                 "eligible_brackets": eligible,
+                "premium_source": "live" if live else "estimated",
                 "score": score,
             })
 
@@ -539,6 +589,8 @@ class Prometheus:
         out["strike"] = candidate["strike"]
         out["option_type"] = candidate["option_type"]
         out["instrument"] = candidate["instrument"]
+        out["tradingsymbol"] = candidate.get("tradingsymbol", "")
+        out["expiry"] = candidate.get("expiry", out.get("expiry", ""))
         out["entry_price"] = candidate["entry_price"]
         out["stop_loss"] = candidate["stop_loss"]
         out["target"] = candidate["target"]
@@ -549,6 +601,7 @@ class Prometheus:
         out["risk_amount_1lot"] = candidate["risk_amount_1lot"]
         out["reward_amount_1lot"] = candidate["reward_amount_1lot"]
         out["strike_tier"] = candidate["strike_tier"]
+        out["premium_source"] = candidate.get("premium_source", "estimated")
         out["lots"] = int(candidate.get("recommended_lots", 1))
         return out
 
@@ -784,9 +837,16 @@ class Prometheus:
 
         # 3. OI Analysis
         oi_signals = []
+        oi_metrics = {}
         options_chain = self.data.fetch_options_chain(symbol)
         if not options_chain.empty:
-            oi_signals = self.oi_analyzer.analyze(options_chain, spot)
+            oi_result = self.oi_analyzer.analyze(options_chain, spot)
+            if isinstance(oi_result, dict):
+                oi_signals = oi_result.get("signals", []) or []
+                oi_metrics = oi_result.get("metrics", {}) or {}
+            else:
+                # Backward compatibility if analyzer returns list directly
+                oi_signals = oi_result or []
 
         # 4. Regime Detection
         regime = self.regime_detector.detect(data_daily)
@@ -982,7 +1042,13 @@ class Prometheus:
         saved_weights = self.fusion.SIGNAL_WEIGHTS
         current_equity = self._get_current_equity()
         bracket = self.risk.bracket_manager.get_bracket(current_equity)
-        intra_profile = self._resolve_capital_profile("intraday", current_equity).get("profile", {})
+        intraday_cfg = get("intraday", {})
+        intraday_v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg.get("v2", {}), dict) else {}
+        intra_profile = self._apply_intraday_ab_profile(
+            self._resolve_capital_profile("intraday", current_equity).get("profile", {}),
+            symbol=symbol,
+            intraday_v2_cfg=intraday_v2_cfg,
+        )
         saved_conf = self.fusion.min_confluence_score
         intraday_weights = dict(saved_weights)
         intraday_weights["vwap"] = 1.0         # Session VWAP is primary
@@ -999,7 +1065,7 @@ class Prometheus:
                 oi_signals=[],
                 regime=regime,
                 ai_sentiment=None,
-                min_rr=float(intra_profile.get("min_rr", bracket.min_rr)),
+                min_rr=float(intra_profile.get("min_rr", intraday_v2_cfg.get("min_rr", 2.0))),
             )
         finally:
             # Restore original weights (so swing analyze() is unaffected)
@@ -1826,6 +1892,144 @@ class Prometheus:
             "profile": dict(profile),
         }
 
+    def _get_intraday_ab_cfg(self) -> Dict[str, Any]:
+        """Return intraday A/B patch config when enabled, else empty dict."""
+        ab_cfg = get("intraday.v2.ab_test", {})
+        if not isinstance(ab_cfg, dict):
+            return {}
+        if not bool(ab_cfg.get("enabled", False)):
+            return {}
+        return ab_cfg
+
+    def _apply_intraday_ab_profile(
+        self,
+        profile: Dict[str, Any],
+        symbol: str = "",
+        intraday_v2_cfg: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Apply symbol and A/B intraday profile tweaks in-memory without mutating config."""
+        out = dict(profile or {})
+        v2_cfg = intraday_v2_cfg if isinstance(intraday_v2_cfg, dict) else get("intraday.v2", {})
+
+        if symbol and isinstance(v2_cfg.get("symbol_overrides", {}), dict):
+            sym_patch = v2_cfg.get("symbol_overrides", {}).get(symbol, {})
+            if isinstance(sym_patch, dict):
+                out.update(sym_patch)
+
+        ab_cfg = self._get_intraday_ab_cfg()
+        if not ab_cfg:
+            return out
+
+        conf_delta = float(ab_cfg.get("confluence_trending_delta", 0.0) or 0.0)
+        if "confluence_trending" in out:
+            out["confluence_trending"] = max(0.5, float(out.get("confluence_trending", 0.0)) + conf_delta)
+
+        rr_override = ab_cfg.get("min_rr_override", None)
+        if rr_override is not None:
+            out["min_rr"] = max(1.0, float(rr_override))
+
+        cutoff_time = ab_cfg.get("entry_cutoff_time", "")
+        if isinstance(cutoff_time, str) and cutoff_time.strip():
+            out["entry_cutoff_time"] = cutoff_time.strip()
+
+        if symbol and isinstance(ab_cfg.get("symbol_overrides", {}), dict):
+            sym_ab_patch = ab_cfg.get("symbol_overrides", {}).get(symbol, {})
+            if isinstance(sym_ab_patch, dict):
+                out.update(sym_ab_patch)
+
+        return out
+
+    def _is_event_risk_window(
+        self,
+        bar_ts: Any,
+        symbol: str,
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[bool, str]:
+        """Return whether current bar time falls inside configured official-event risk window."""
+        cfg = get("intraday.v2.event_risk_gate", {})
+        if not isinstance(cfg, dict):
+            return False, ""
+
+        ov = overrides if isinstance(overrides, dict) else {}
+        enabled = bool(ov.get("event_risk_gate_enabled", cfg.get("enabled", False)))
+        if not enabled:
+            return False, ""
+
+        events = []
+
+        # Optional dedicated official calendar file (preferred for maintenance).
+        cal_file = str(cfg.get("event_calendar_file", "")).strip()
+        if cal_file:
+            cal_path = Path(cal_file)
+            if not cal_path.is_absolute():
+                cal_path = PROJECT_ROOT / cal_path
+            if cal_path.exists():
+                try:
+                    with cal_path.open("r", encoding="utf-8") as f:
+                        cal_doc = yaml.safe_load(f) or {}
+                    file_events = cal_doc.get("events", []) if isinstance(cal_doc, dict) else []
+                    if isinstance(file_events, list):
+                        events.extend(file_events)
+                except Exception as e:
+                    logger.debug(f"Event calendar load failed ({cal_path}): {e}")
+
+        inline_events = ov.get("event_risk_events", cfg.get("events", []))
+        if isinstance(inline_events, list):
+            events.extend(inline_events)
+
+        if not events:
+            return False, ""
+
+        before_min = int(ov.get("event_block_before_min", cfg.get("block_before_minutes", 15)) or 15)
+        after_min = int(ov.get("event_block_after_min", cfg.get("block_after_minutes", 15)) or 15)
+
+        impacts = cfg.get("enabled_impacts", ["high"])
+        enabled_impacts = {str(x).strip().lower() for x in impacts} if isinstance(impacts, list) else {"high"}
+
+        ts = pd.to_datetime(bar_ts, errors="coerce")
+        if pd.isna(ts):
+            return False, ""
+        if ts.tzinfo is not None:
+            try:
+                ts = ts.tz_convert(IST).tz_localize(None)
+            except Exception:
+                ts = ts.tz_localize(None)
+
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+
+            ev_date = str(ev.get("date", "")).strip()
+            ev_time = str(ev.get("time_ist", "")).strip()
+            if not ev_date or not ev_time:
+                continue
+
+            try:
+                ev_dt = pd.to_datetime(f"{ev_date} {ev_time}", errors="raise")
+            except Exception:
+                continue
+
+            ev_impact = str(ev.get("impact", "high")).strip().lower()
+            if enabled_impacts and ev_impact not in enabled_impacts:
+                continue
+
+            ev_symbols = ev.get("symbols", ["ALL"])
+            if isinstance(ev_symbols, str):
+                ev_symbols = [ev_symbols]
+            if isinstance(ev_symbols, list):
+                symset = {str(s).strip() for s in ev_symbols}
+                if "ALL" not in symset and symbol not in symset:
+                    continue
+
+            start = ev_dt - pd.Timedelta(minutes=max(0, before_min))
+            end = ev_dt + pd.Timedelta(minutes=max(0, after_min))
+            if start <= ts <= end:
+                src = str(ev.get("source", "official")).strip()
+                title = str(ev.get("title", "event")).strip()
+                return True, f"{src}: {title}"
+
+        return False, ""
+
     def _reset_intraday_guardrail_audit(self, mode_label: str):
         """Reset daily intraday guardrail audit state at market-open boundary."""
         self._intraday_guardrail_audit = {
@@ -1860,7 +2064,7 @@ class Prometheus:
         bracket = self.risk.bracket_manager.get_bracket(current_equity)
         profile_info = self._resolve_capital_profile("intraday", current_equity)
         tier_key = profile_info.get("tier", "tier1")
-        profile = profile_info.get("profile", {})
+        profile = self._apply_intraday_ab_profile(profile_info.get("profile", {}), intraday_v2_cfg=intraday_cfg.get("v2", {}))
 
         v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg, dict) else {}
         guard_cfg = v2_cfg.get("pilot_guardrails", {}) if isinstance(v2_cfg, dict) else {}
@@ -2274,7 +2478,10 @@ class Prometheus:
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
         last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
         square_off_str = intraday_cfg.get("square_off_time", "15:15")
-        intra_profile_live = self._resolve_capital_profile("intraday", self._get_current_equity()).get("profile", {})
+        intra_profile_live = self._apply_intraday_ab_profile(
+            self._resolve_capital_profile("intraday", self._get_current_equity()).get("profile", {}),
+            intraday_v2_cfg=intraday_cfg.get("v2", {}),
+        )
         if "max_daily_trades" in intra_profile_live:
             max_trades = int(intra_profile_live.get("max_daily_trades", max_trades))
         if "entry_cutoff_time" in intra_profile_live:
@@ -2570,7 +2777,10 @@ class Prometheus:
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
         last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
         square_off_str = intraday_cfg.get("square_off_time", "15:15")
-        intra_profile_live = self._resolve_capital_profile("intraday", self._get_current_equity()).get("profile", {})
+        intra_profile_live = self._apply_intraday_ab_profile(
+            self._resolve_capital_profile("intraday", self._get_current_equity()).get("profile", {}),
+            intraday_v2_cfg=intraday_cfg.get("v2", {}),
+        )
         if "max_daily_trades" in intra_profile_live:
             intra_max_trades = int(intra_profile_live.get("max_daily_trades", intra_max_trades))
         if "entry_cutoff_time" in intra_profile_live:
@@ -2902,6 +3112,11 @@ class Prometheus:
             - mr_vwap_deviation: float (default 1.0, min ATR from VWAP)
             - mr_rsi_oversold: int (default 30)
             - mr_rsi_overbought: int (default 70)
+            - trendday_prefilter: bool (default False, intraday only)
+            - trendday_persistence_min: float (default 0.55)
+            - orb_atr_buffer: float (default 0.10)
+            - persistence_lookback: int (default 8 for 5m, 6 for 15m)
+            - vol_adaptive_trailing: bool (default False, intraday only)
         """
         overrides = param_overrides or {}
 
@@ -2923,6 +3138,11 @@ class Prometheus:
         # Parrondo regime transition tracking
         _prev_regime = [None]  # mutable container for nonlocal in closure
         _regime_transitions = []
+        _runtime_state = {
+            "vix": 15.0,
+            "gap_pct": 0.0,
+            "oi_ctx": {},
+        }
 
         # ================================================================
         # LOAD LEARNED SIGNAL WEIGHTS (from regression training)
@@ -3099,7 +3319,154 @@ class Prometheus:
                 "ema_direction": ema_direction,
             }
 
-        def _price_options(current, direction, atr, data_so_far):
+        def _compute_trend_day_state(data_so_far, atr):
+            """Opening-range breakout + persistence state for intraday trend-day filtering."""
+            if primary_interval not in ("5minute", "15minute"):
+                return {
+                    "is_trend_day": True,
+                    "direction": "neutral",
+                    "persistence": 0.0,
+                    "orb_breakout": 0.0,
+                }
+
+            ts_col = data_so_far.get("timestamp")
+            if ts_col is None or len(data_so_far) < 20:
+                return {
+                    "is_trend_day": False,
+                    "direction": "neutral",
+                    "persistence": 0.0,
+                    "orb_breakout": 0.0,
+                }
+
+            tser = pd.to_datetime(ts_col, errors="coerce")
+            if tser.isna().all():
+                return {
+                    "is_trend_day": False,
+                    "direction": "neutral",
+                    "persistence": 0.0,
+                    "orb_breakout": 0.0,
+                }
+
+            d0 = tser.iloc[-1].date()
+            session = data_so_far.loc[tser.dt.date == d0].copy()
+            if session.empty:
+                return {
+                    "is_trend_day": False,
+                    "direction": "neutral",
+                    "persistence": 0.0,
+                    "orb_breakout": 0.0,
+                }
+
+            s_ts = pd.to_datetime(session["timestamp"], errors="coerce")
+            t = s_ts.dt.time
+            session = session.loc[(t >= dtime(9, 15)) & (t <= dtime(15, 30))]
+            if len(session) < 10:
+                return {
+                    "is_trend_day": False,
+                    "direction": "neutral",
+                    "persistence": 0.0,
+                    "orb_breakout": 0.0,
+                }
+
+            orb_bars = 6 if primary_interval == "5minute" else 2
+            orb = session.head(orb_bars)
+            if len(orb) < orb_bars:
+                return {
+                    "is_trend_day": False,
+                    "direction": "neutral",
+                    "persistence": 0.0,
+                    "orb_breakout": 0.0,
+                }
+
+            orb_high = float(orb["high"].max())
+            orb_low = float(orb["low"].min())
+            current_price = float(session["close"].iloc[-1])
+            atr_ref = max(float(atr), 1e-9)
+
+            lookback_default = 8 if primary_interval == "5minute" else 6
+            lookback = int(overrides.get("persistence_lookback", lookback_default) or lookback_default)
+            ret = session["close"].diff().dropna().tail(max(lookback, 3))
+            if ret.empty:
+                persistence = 0.0
+            else:
+                signs = np.sign(ret.values)
+                persistence = float(abs(np.sum(signs)) / len(signs))
+
+            orb_buffer = float(overrides.get("orb_atr_buffer", 0.10) or 0.10)
+            breakout = (current_price - orb_high) / atr_ref if current_price >= orb_high else (orb_low - current_price) / atr_ref
+            direction = "bullish" if current_price > orb_high + atr_ref * orb_buffer else (
+                "bearish" if current_price < orb_low - atr_ref * orb_buffer else "neutral"
+            )
+
+            pmin = float(overrides.get("trendday_persistence_min", 0.55) or 0.55)
+            breakout_override_atr = float(overrides.get("trendday_breakout_override_atr", 0.60) or 0.60)
+            strong_breakout = abs(float(breakout)) >= max(0.0, breakout_override_atr)
+            is_trend = (direction in ("bullish", "bearish")) and ((persistence >= pmin) or strong_breakout)
+
+            return {
+                "is_trend_day": is_trend,
+                "direction": direction,
+                "persistence": persistence,
+                "orb_breakout": float(breakout),
+            }
+
+        def _refresh_oi_context(bar_ts, spot_price):
+            """Fetch OI/PCR context on a throttled cadence; fail-open if unavailable."""
+            if not bool(overrides.get("use_oi_pcr_filter", False)):
+                _runtime_state["oi_ctx"] = {}
+                return {}
+
+            refresh_min = int(overrides.get("pcr_refresh_minutes", 30) or 30)
+            prev_ctx = _runtime_state.get("oi_ctx", {})
+            prev_ts = pd.to_datetime(prev_ctx.get("timestamp"), errors="coerce") if prev_ctx else pd.NaT
+            ts_now = pd.to_datetime(bar_ts, errors="coerce")
+            if not pd.isna(prev_ts) and not pd.isna(ts_now):
+                if (ts_now - prev_ts).total_seconds() < max(1, refresh_min) * 60:
+                    return prev_ctx
+
+            ctx = {}
+            try:
+                chain = self.data.fetch_options_chain(symbol)
+                if chain is None or chain.empty:
+                    _runtime_state["oi_ctx"] = prev_ctx
+                    return prev_ctx
+
+                oi_result = self.oi_analyzer.analyze(chain, float(spot_price))
+                metrics = oi_result.get("metrics", {}) if isinstance(oi_result, dict) else {}
+                pcr = float((metrics.get("pcr", {}) or {}).get("oi", 0.0) or 0.0)
+                prev_pcr = float(prev_ctx.get("pcr", pcr) or pcr)
+                pcr_delta = pcr - prev_pcr
+
+                ctx = {
+                    "timestamp": str(ts_now),
+                    "pcr": pcr,
+                    "pcr_delta": pcr_delta,
+                    "support": float(metrics.get("strongest_support", 0.0) or 0.0),
+                    "resistance": float(metrics.get("strongest_resistance", 0.0) or 0.0),
+                }
+            except Exception:
+                ctx = prev_ctx
+
+            _runtime_state["oi_ctx"] = ctx
+            return ctx
+
+        def _compute_session_gap_pct(data_so_far):
+            """Compute current session opening gap %% vs prior session close."""
+            ts = pd.to_datetime(data_so_far["timestamp"], errors="coerce")
+            if ts.isna().all():
+                return 0.0
+            current_date = ts.iloc[-1].date()
+            session = data_so_far.loc[ts.dt.date == current_date]
+            prev = data_so_far.loc[ts.dt.date < current_date]
+            if session.empty or prev.empty:
+                return 0.0
+            prev_close = float(prev["close"].iloc[-1])
+            session_open = float(session["open"].iloc[0])
+            if prev_close <= 0:
+                return 0.0
+            return (session_open - prev_close) / prev_close * 100.0
+
+        def _price_options(current, direction, atr, data_so_far, confluence_score=0.0, trendday_state=None):
             """Black-Scholes pricing with IV skew. Returns (premium, delta, lot_size, strike, sigma, expiry_str) or None."""
             lot_size = get_lot_size(symbol)
             interval = get_strike_interval(symbol)
@@ -3122,6 +3489,17 @@ class Prometheus:
             except Exception:
                 dte = 5
                 expiry_date_str = ""
+
+            if bool(overrides.get("skip_1dte_buying", True)) and int(dte) <= 1:
+                if bar_date.weekday() == 0 and bool(overrides.get("monday_1dte_guard", True)):
+                    min_score = float(overrides.get("monday_override_score", 5.5) or 5.5)
+                    min_breakout = float(overrides.get("monday_override_breakout_atr", 0.9) or 0.9)
+                    ts = trendday_state or {}
+                    if float(confluence_score) < min_score or abs(float(ts.get("orb_breakout", 0.0) or 0.0)) < min_breakout:
+                        return None
+                else:
+                    return None
+
             dte = max(dte, 1)
             T = dte / 365.0
 
@@ -3135,20 +3513,41 @@ class Prometheus:
             atm_sigma = max(atm_sigma, 0.10)
             atm_sigma = min(atm_sigma, 0.60)
 
-            # Apply IV skew adjustment for strike distance from spot
-            sigma = get_implied_vol_at_strike(current, strike, atm_sigma)
-
             r = 0.07
             opt_type = OptionType.CALL if direction == "bullish" else OptionType.PUT
 
-            premium = black_scholes_price(current, strike, T, r, sigma, opt_type)
-            premium = max(premium, current * 0.003)
+            target_premium = float(overrides.get("target_premium_rs", 200.0) or 200.0)
+            delta_min = float(overrides.get("target_delta_min", 0.55) or 0.55)
+            delta_max = float(overrides.get("target_delta_max", 0.70) or 0.70)
+            use_targeting = bool(overrides.get("premium_targeting_enabled", primary_interval in ("5minute", "15minute")))
 
-            greeks = calculate_greeks(current, strike, T, r, sigma, opt_type)
-            delta = abs(greeks.get("delta", 0.5))
-            delta = max(delta, 0.20)
+            candidates = []
+            if use_targeting:
+                for off in (-3, -2, -1, 0, 1, 2, 3):
+                    c_strike = atm_strike + off * interval
+                    c_sigma = get_implied_vol_at_strike(current, c_strike, atm_sigma)
+                    c_premium = black_scholes_price(current, c_strike, T, r, c_sigma, opt_type)
+                    c_premium = max(c_premium, current * 0.003)
+                    c_greeks = calculate_greeks(current, c_strike, T, r, c_sigma, opt_type)
+                    c_delta = max(abs(c_greeks.get("delta", 0.5)), 0.20)
 
-            return premium, delta, lot_size, strike, sigma, expiry_date_str
+                    score = abs(c_premium - target_premium)
+                    if c_delta < delta_min:
+                        score += (delta_min - c_delta) * target_premium * 2.0
+                    elif c_delta > delta_max:
+                        score += (c_delta - delta_max) * target_premium * 2.0
+                    candidates.append((score, c_premium, c_delta, c_strike, c_sigma))
+
+            if candidates:
+                _, premium, delta, strike, sigma = sorted(candidates, key=lambda x: x[0])[0]
+            else:
+                sigma = get_implied_vol_at_strike(current, strike, atm_sigma)
+                premium = black_scholes_price(current, strike, T, r, sigma, opt_type)
+                premium = max(premium, current * 0.003)
+                greeks = calculate_greeks(current, strike, T, r, sigma, opt_type)
+                delta = max(abs(greeks.get("delta", 0.5)), 0.20)
+
+            return premium, delta, lot_size, strike, sigma, expiry_date_str, int(dte)
 
         def _size_position(premium, premium_sl, lot_size):
             """Position sizing with drawdown-adjusted risk.
@@ -3211,7 +3610,8 @@ class Prometheus:
         # ================================================================
 
         def _generate_trend_signal(data_so_far, recent_window, current, prev_bar,
-                                   atr, bias, min_confluence, indicators, regime_name="unknown"):
+                       atr, bias, min_confluence, indicators, regime_name="unknown",
+                       trendday_state=None):
             """Trend-following signal: directional confluence → BS pricing → sizing."""
             ind = indicators
             min_net_edge = float(overrides.get("min_net_edge", profile.get("min_net_edge", 1.5)))
@@ -3221,6 +3621,9 @@ class Prometheus:
             require_volume_surge = bool(overrides.get("require_volume_surge", False))
             breakout_lookback = int(overrides.get("breakout_lookback", 0) or 0)
             breakout_atr_buffer = float(overrides.get("breakout_atr_buffer", 0.0) or 0.0)
+            allow_counter_bias = bool(overrides.get("allow_counter_bias_when_strong", False))
+            counter_bias_edge = float(overrides.get("counter_bias_min_net_edge", 2.5) or 2.5)
+            counter_bias_breakout_atr = float(overrides.get("counter_bias_breakout_atr", 0.8) or 0.8)
 
             # --- Confluence scoring (using learned or default weights) ---
             bull_score = 0
@@ -3307,6 +3710,49 @@ class Prometheus:
             else:
                 return None
 
+            # Intraday trend-day prefilter: require ORB breakout + persistent direction.
+            if primary_interval in ("5minute", "15minute") and bool(overrides.get("trendday_prefilter", False)):
+                ts = trendday_state or {}
+                if (not ts.get("is_trend_day", False)) or (ts.get("direction", "neutral") != direction):
+                    return None
+
+            # F3: VIX mode/asymmetry for option buying.
+            vix_now = float(_runtime_state.get("vix", 15.0) or 15.0)
+            vix_sell_only_below = float(overrides.get("vix_sell_only_below", 12.0) or 12.0)
+            vix_buy_only_above = float(overrides.get("vix_buy_only_above", 18.0) or 18.0)
+            if primary_interval in ("5minute", "15minute") and vix_now < vix_sell_only_below:
+                return None
+            if direction == "bullish" and vix_now >= vix_buy_only_above:
+                ce_penalty = float(overrides.get("ce_high_vix_edge_penalty", 0.25) or 0.25)
+                if net_bull < (min_net_edge + ce_penalty):
+                    return None
+
+            # F5: Gap behavior fade filter.
+            gap_pct = float(_runtime_state.get("gap_pct", 0.0) or 0.0)
+            gap_thr = float(overrides.get("gap_fade_threshold_pct", 0.30) or 0.30)
+            if gap_pct >= gap_thr and direction == "bullish":
+                return None
+            if gap_pct <= -gap_thr and direction == "bearish":
+                return None
+
+            # F4: OI/PCR directional and S/R proximity filter (fail-open when data unavailable).
+            oi_ctx = _runtime_state.get("oi_ctx", {}) if isinstance(_runtime_state.get("oi_ctx", {}), dict) else {}
+            if oi_ctx:
+                pcr_delta = float(oi_ctx.get("pcr_delta", 0.0) or 0.0)
+                pcr_sig = float(overrides.get("pcr_intraday_signal_delta", 0.20) or 0.20)
+                if pcr_delta >= pcr_sig and direction == "bearish":
+                    return None
+                if pcr_delta <= -pcr_sig and direction == "bullish":
+                    return None
+
+                sr_tol = float(overrides.get("oi_sr_tolerance_pct", 0.0025) or 0.0025)
+                support = float(oi_ctx.get("support", 0.0) or 0.0)
+                resistance = float(oi_ctx.get("resistance", 0.0) or 0.0)
+                if direction == "bullish" and resistance > 0 and current >= resistance * (1.0 - sr_tol):
+                    return None
+                if direction == "bearish" and support > 0 and current <= support * (1.0 + sr_tol):
+                    return None
+
             # Optional V2 quality gates for intraday.
             if require_vwap_align and ind["vwap_direction"] != direction:
                 return None
@@ -3332,17 +3778,23 @@ class Prometheus:
                 global_funnel.record_confluence_pass()
                 global_funnel.record_regime_pass()  # Signal reached here, meaning it passed the regime filter in pro_signal_generator
 
-            # Bias filter
-            if bias == "bullish" and direction == "bearish":
-                return None
-            if bias == "bearish" and direction == "bullish":
-                return None
+            # Bias filter with optional guarded counter-bias override.
+            if bias in ("bullish", "bearish") and bias != direction:
+                if not allow_counter_bias:
+                    return None
+                ts = trendday_state or {}
+                net_edge = net_bull if direction == "bullish" else net_bear
+                breakout_mag = abs(float(ts.get("orb_breakout", 0.0) or 0.0))
+                breakout_dir_ok = ts.get("direction", "neutral") == direction
+                if (net_edge < counter_bias_edge) or (breakout_mag < counter_bias_breakout_atr) or (not breakout_dir_ok):
+                    return None
+                reasons.append("CBias")
 
             # --- Options pricing ---
-            pricing = _price_options(current, direction, atr, data_so_far)
+            pricing = _price_options(current, direction, atr, data_so_far, confluence_score=score, trendday_state=trendday_state)
             if pricing is None:
                 return None
-            premium, delta, lot_size, strike, sigma, expiry_str = pricing
+            premium, delta, lot_size, strike, sigma, expiry_str, dte_now = pricing
 
             # --- SL & TARGET ---
             sl_atr_mult = bracket.sl_atr_mult
@@ -3370,6 +3822,10 @@ class Prometheus:
             else:
                 premium_sl = max(premium - sl_premium_drop, premium * 0.35)
 
+            if bool(overrides.get("fixed_premium_sl_enabled", True)):
+                sl_pct = float(overrides.get("fixed_premium_sl_pct", 0.20) or 0.20)
+                premium_sl = max(premium_sl, premium * (1.0 - max(0.01, min(sl_pct, 0.50))))
+
             risk_check = premium - premium_sl
             if risk_check <= 0:
                 return None
@@ -3389,10 +3845,16 @@ class Prometheus:
                 target_multiplier = base_target
 
             target_index_move = atr * target_multiplier
+
+            # F6: Expiry-day late session scalp mode.
+            if bool(overrides.get("expiry_late_scalp_only", True)) and int(dte_now) <= 1:
+                bar_ts = pd.to_datetime(data_so_far["timestamp"].iloc[-1], errors="coerce")
+                if not pd.isna(bar_ts) and bar_ts.time() >= dtime(14, 30):
+                    target_index_move = min(target_index_move, atr * float(overrides.get("expiry_late_target_atr", 1.0) or 1.0))
             premium_target = premium + delta * target_index_move
 
             # Min R:R — from bracket configuration
-            min_rr = bracket.min_rr
+            min_rr = float(overrides.get("min_rr", bracket.min_rr))
 
             reward = premium_target - premium
             if risk_check > 0 and reward / risk_check < min_rr:
@@ -3460,6 +3922,9 @@ class Prometheus:
                                 signal_spot=current, atr_at_signal=atr,
                                 option_expiry_date=expiry_str)
             sig["delta"] = delta
+            sig["vol_adaptive_trailing"] = bool(overrides.get("vol_adaptive_trailing", False))
+            vol_frac = float(atr) / max(float(current), 1e-9)
+            sig["vol_trail_factor"] = max(0.8, min(1.6, 1.0 + (vol_frac - 0.003) * 80.0))
             return sig
 
         # ================================================================
@@ -3567,7 +4032,7 @@ class Prometheus:
             pricing = _price_options(current, direction, atr, data_so_far)
             if pricing is None:
                 return None
-            premium, delta, lot_size, strike, sigma, expiry_str = pricing
+            premium, delta, lot_size, strike, sigma, expiry_str, _ = pricing
 
             # --- SL & TARGET (tighter for mean-reversion) ---
             mr_sl = overrides.get("mr_sl_atr", 0.8)
@@ -3640,6 +4105,9 @@ class Prometheus:
                                 signal_spot=current, atr_at_signal=atr,
                                 option_expiry_date=expiry_str)
             sig["delta"] = delta
+            sig["vol_adaptive_trailing"] = bool(overrides.get("vol_adaptive_trailing", False))
+            vol_frac = float(atr) / max(float(current), 1e-9)
+            sig["vol_trail_factor"] = max(0.8, min(1.6, 1.0 + (vol_frac - 0.003) * 80.0))
             return sig
 
         def _generate_expiry_spread_signal(data_so_far, recent_window, current, prev_bar, atr,
@@ -3777,6 +4245,20 @@ class Prometheus:
             sig["delta"] = delta
             return sig
 
+        def _apply_event_risk_gate(sig: Optional[Dict], data_so_far: pd.DataFrame) -> Optional[Dict]:
+            """Block new intraday entries in configured official event windows."""
+            if sig is None or primary_interval not in ("5minute", "15minute"):
+                return sig
+            if len(data_so_far) == 0:
+                return sig
+            ts = pd.to_datetime(data_so_far["timestamp"].iloc[-1], errors="coerce")
+            if pd.isna(ts):
+                return sig
+            blocked, _ = self._is_event_risk_window(ts, symbol, overrides=overrides)
+            if blocked:
+                return None
+            return sig
+
         # ================================================================
         # MAIN SIGNAL GENERATOR CLOSURE
         # ================================================================
@@ -3792,6 +4274,34 @@ class Prometheus:
             current_bar = recent_window.iloc[-1]
             prev_bar = recent_window.iloc[-2] if len(recent_window) >= 2 else current_bar
 
+            # F6: intraday time segmentation gates
+            if primary_interval in ("5minute", "15minute"):
+                bar_ts = pd.to_datetime(current_bar.get("timestamp"), errors="coerce")
+                if pd.isna(bar_ts):
+                    return None
+                bar_t = bar_ts.time()
+                dead_start = str(overrides.get("dead_zone_start", "11:30") or "11:30")
+                dead_end = str(overrides.get("dead_zone_end", "13:30") or "13:30")
+                aft_start = str(overrides.get("afternoon_window_start", "14:00") or "14:00")
+                use_second_window = bool(overrides.get("use_second_window", True))
+                try:
+                    ds_h, ds_m = map(int, dead_start.split(":"))
+                    de_h, de_m = map(int, dead_end.split(":"))
+                    if dtime(ds_h, ds_m) <= bar_t < dtime(de_h, de_m):
+                        return None
+                    if use_second_window:
+                        as_h, as_m = map(int, aft_start.split(":"))
+                        morning_ok = bar_t < dtime(ds_h, ds_m)
+                        afternoon_ok = bar_t >= dtime(as_h, as_m)
+                        if not (morning_ok or afternoon_ok):
+                            return None
+                except Exception:
+                    pass
+
+                _runtime_state["gap_pct"] = _compute_session_gap_pct(data_so_far)
+                _runtime_state["vix"] = float(self.data.get_vix() or 15.0)
+                _refresh_oi_context(bar_ts, float(current))
+
             current_date = str(current_bar.get("timestamp", ""))[:10]
             bias = hourly_bias_map.get(current_date, "neutral")
 
@@ -3801,6 +4311,7 @@ class Prometheus:
 
             # --- INDICATORS (computed once, shared by both paths) ---
             indicators = _compute_indicators(recent_window, current, prev_bar, atr)
+            trendday_state = _compute_trend_day_state(data_so_far, atr)
 
             # ================================================================
             # REGIME ROUTING (per-bar detection — no look-ahead bias)
@@ -3831,22 +4342,25 @@ class Prometheus:
                         atr, bias, bar_regime, indicators
                     )
                     if mr_signal:
-                        return mr_signal
+                        return _apply_event_risk_gate(mr_signal, data_so_far)
                     # Fallback: trend with higher confluence
                     conf_sideways = overrides.get("confluence_sideways", profile.get("confluence_sideways", 3.5))
-                    return _generate_trend_signal(
+                    trend_sig = _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
-                        atr, bias, conf_sideways, indicators, regime_name=regime_value
+                        atr, bias, conf_sideways, indicators, regime_name=regime_value,
+                        trendday_state=trendday_state,
                     )
+                    return _apply_event_risk_gate(trend_sig, data_so_far)
                 else:
                     # TREND mode (markup, markdown, unknown)
                     conf_trending = overrides.get("confluence_trending", profile.get("confluence_trending", 3.0))
                     trend_sig = _generate_trend_signal(
                         data_so_far, recent_window, current, prev_bar,
-                        atr, bias, conf_trending, indicators, regime_name=regime_value
+                        atr, bias, conf_trending, indicators, regime_name=regime_value,
+                        trendday_state=trendday_state,
                     )
                     if trend_sig:
-                        return trend_sig
+                        return _apply_event_risk_gate(trend_sig, data_so_far)
                     return None
             else:
                 # NON-PARRONDO: per-bar regime for confluence threshold only
@@ -3862,10 +4376,11 @@ class Prometheus:
 
                 trend_sig = _generate_trend_signal(
                     data_so_far, recent_window, current, prev_bar,
-                    atr, bias, min_confluence, indicators, regime_name=regime_value
+                    atr, bias, min_confluence, indicators, regime_name=regime_value,
+                    trendday_state=trendday_state,
                 )
                 if trend_sig:
-                    return trend_sig
+                    return _apply_event_risk_gate(trend_sig, data_so_far)
                 return None
 
         # Attach transition log to the closure for post-backtest analysis
@@ -4098,7 +4613,11 @@ class Prometheus:
         intraday_v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg.get("v2", {}), dict) else {}
         intraday_v2_enabled = intraday_v2_cfg.get("enabled", True)
         intra_profile_info = self._resolve_capital_profile("intraday", capital)
-        intra_profile = intra_profile_info.get("profile", {})
+        intra_profile = self._apply_intraday_ab_profile(
+            intra_profile_info.get("profile", {}),
+            symbol=symbol,
+            intraday_v2_cfg=intraday_v2_cfg,
+        )
         intraday_overrides = {
             "breakeven_ratio": intra_profile.get("breakeven_ratio", intraday_cfg.get("breakeven_ratio", 0.5)),
             # Force default weights + activate intraday-specific indicators
@@ -4113,6 +4632,7 @@ class Prometheus:
             intraday_overrides.update({
                 "confluence_trending": intra_profile.get("confluence_trending", intraday_v2_cfg.get("confluence_trending", 4.25)),
                 "confluence_sideways": intra_profile.get("confluence_sideways", intraday_v2_cfg.get("confluence_sideways", 5.0)),
+                "min_rr": intra_profile.get("min_rr", intraday_v2_cfg.get("min_rr", 2.0)),
                 "kelly_wr": intra_profile.get("kelly_wr", intraday_v2_cfg.get("kelly_wr", 0.40)),
                 "time_stop_bars": intra_profile.get("time_stop_bars", intraday_v2_cfg.get("time_stop_bars", 14)),
                 "target_atr_mult": intra_profile.get("target_atr_mult", intraday_v2_cfg.get("target_atr_mult", 2.2)),
@@ -4123,6 +4643,42 @@ class Prometheus:
                 "require_volume_surge": intraday_v2_cfg.get("require_volume_surge", True),
                 "breakout_lookback": intraday_v2_cfg.get("breakout_lookback", 12),
                 "breakout_atr_buffer": intraday_v2_cfg.get("breakout_atr_buffer", 0.10),
+                "trendday_prefilter": intraday_v2_cfg.get("trendday_prefilter", False),
+                "trendday_persistence_min": intraday_v2_cfg.get("trendday_persistence_min", 0.55),
+                "orb_atr_buffer": intraday_v2_cfg.get("orb_atr_buffer", 0.10),
+                "persistence_lookback": intraday_v2_cfg.get("persistence_lookback", 8),
+                "trendday_breakout_override_atr": intraday_v2_cfg.get("trendday_breakout_override_atr", 0.60),
+                "vol_adaptive_trailing": intraday_v2_cfg.get("vol_adaptive_trailing", False),
+                "event_risk_gate_enabled": intraday_v2_cfg.get("event_risk_gate", {}).get("enabled", False),
+                "event_block_before_min": intraday_v2_cfg.get("event_risk_gate", {}).get("block_before_minutes", 15),
+                "event_block_after_min": intraday_v2_cfg.get("event_risk_gate", {}).get("block_after_minutes", 15),
+                "use_oi_pcr_filter": intraday_v2_cfg.get("use_oi_pcr_filter", False),
+                "pcr_refresh_minutes": intraday_v2_cfg.get("pcr_refresh_minutes", 30),
+                "pcr_intraday_signal_delta": intraday_v2_cfg.get("pcr_intraday_signal_delta", 0.20),
+                "oi_sr_tolerance_pct": intraday_v2_cfg.get("oi_sr_tolerance_pct", 0.0025),
+                "vix_sell_only_below": intraday_v2_cfg.get("vix_sell_only_below", 12.0),
+                "vix_buy_only_above": intraday_v2_cfg.get("vix_buy_only_above", 18.0),
+                "ce_high_vix_edge_penalty": intraday_v2_cfg.get("ce_high_vix_edge_penalty", 0.25),
+                "dead_zone_start": intraday_v2_cfg.get("dead_zone_start", "11:30"),
+                "dead_zone_end": intraday_v2_cfg.get("dead_zone_end", "13:30"),
+                "afternoon_window_start": intraday_v2_cfg.get("afternoon_window_start", "14:00"),
+                "use_second_window": intraday_v2_cfg.get("use_second_window", True),
+                "gap_fade_threshold_pct": intraday_v2_cfg.get("gap_fade_threshold_pct", 0.30),
+                "skip_1dte_buying": intraday_v2_cfg.get("skip_1dte_buying", True),
+                "monday_1dte_guard": intraday_v2_cfg.get("monday_1dte_guard", True),
+                "monday_override_score": intraday_v2_cfg.get("monday_override_score", 5.5),
+                "monday_override_breakout_atr": intraday_v2_cfg.get("monday_override_breakout_atr", 0.9),
+                "premium_targeting_enabled": intraday_v2_cfg.get("premium_targeting_enabled", True),
+                "target_premium_rs": intraday_v2_cfg.get("target_premium_rs", 200.0),
+                "target_delta_min": intraday_v2_cfg.get("target_delta_min", 0.55),
+                "target_delta_max": intraday_v2_cfg.get("target_delta_max", 0.70),
+                "fixed_premium_sl_enabled": intraday_v2_cfg.get("fixed_premium_sl_enabled", True),
+                "fixed_premium_sl_pct": intraday_v2_cfg.get("fixed_premium_sl_pct", 0.20),
+                "expiry_late_scalp_only": intraday_v2_cfg.get("expiry_late_scalp_only", True),
+                "expiry_late_target_atr": intraday_v2_cfg.get("expiry_late_target_atr", 1.0),
+                "allow_counter_bias_when_strong": intraday_v2_cfg.get("allow_counter_bias_when_strong", False),
+                "counter_bias_min_net_edge": intraday_v2_cfg.get("counter_bias_min_net_edge", 2.5),
+                "counter_bias_breakout_atr": intraday_v2_cfg.get("counter_bias_breakout_atr", 0.8),
                 "intraday_v2_disable_mr": intraday_v2_cfg.get("disable_mean_reversion", True),
                 "weight_overrides": {
                     "signal_supertrend": intraday_v2_cfg.get("weight_supertrend", 1.25),
@@ -4130,6 +4686,42 @@ class Prometheus:
                     "signal_vwap": intraday_v2_cfg.get("weight_vwap", 1.25),
                 },
             })
+        ab_cfg = self._get_intraday_ab_cfg()
+        if ab_cfg:
+            if "trendday_prefilter" in ab_cfg:
+                intraday_overrides["trendday_prefilter"] = bool(ab_cfg.get("trendday_prefilter"))
+            if "trendday_persistence_min" in ab_cfg:
+                intraday_overrides["trendday_persistence_min"] = float(ab_cfg.get("trendday_persistence_min", 0.55))
+            if "orb_atr_buffer" in ab_cfg:
+                intraday_overrides["orb_atr_buffer"] = float(ab_cfg.get("orb_atr_buffer", 0.10))
+            if "persistence_lookback" in ab_cfg:
+                intraday_overrides["persistence_lookback"] = int(ab_cfg.get("persistence_lookback", 8))
+            if "trendday_breakout_override_atr" in ab_cfg:
+                intraday_overrides["trendday_breakout_override_atr"] = float(ab_cfg.get("trendday_breakout_override_atr", 0.60))
+            if "vol_adaptive_trailing" in ab_cfg:
+                intraday_overrides["vol_adaptive_trailing"] = bool(ab_cfg.get("vol_adaptive_trailing"))
+            if "event_risk_gate_enabled" in ab_cfg:
+                intraday_overrides["event_risk_gate_enabled"] = bool(ab_cfg.get("event_risk_gate_enabled"))
+            if "event_risk_events" in ab_cfg:
+                intraday_overrides["event_risk_events"] = ab_cfg.get("event_risk_events", [])
+            if "use_oi_pcr_filter" in ab_cfg:
+                intraday_overrides["use_oi_pcr_filter"] = bool(ab_cfg.get("use_oi_pcr_filter"))
+            if "pcr_intraday_signal_delta" in ab_cfg:
+                intraday_overrides["pcr_intraday_signal_delta"] = float(ab_cfg.get("pcr_intraday_signal_delta", 0.20))
+            if "vix_sell_only_below" in ab_cfg:
+                intraday_overrides["vix_sell_only_below"] = float(ab_cfg.get("vix_sell_only_below", 12.0))
+            if "vix_buy_only_above" in ab_cfg:
+                intraday_overrides["vix_buy_only_above"] = float(ab_cfg.get("vix_buy_only_above", 18.0))
+            if "skip_1dte_buying" in ab_cfg:
+                intraday_overrides["skip_1dte_buying"] = bool(ab_cfg.get("skip_1dte_buying"))
+            if "target_premium_rs" in ab_cfg:
+                intraday_overrides["target_premium_rs"] = float(ab_cfg.get("target_premium_rs", 200.0))
+            if "allow_counter_bias_when_strong" in ab_cfg:
+                intraday_overrides["allow_counter_bias_when_strong"] = bool(ab_cfg.get("allow_counter_bias_when_strong"))
+            if "counter_bias_min_net_edge" in ab_cfg:
+                intraday_overrides["counter_bias_min_net_edge"] = float(ab_cfg.get("counter_bias_min_net_edge", 2.5))
+            if "counter_bias_breakout_atr" in ab_cfg:
+                intraday_overrides["counter_bias_breakout_atr"] = float(ab_cfg.get("counter_bias_breakout_atr", 0.8))
         intraday_overrides.update(overrides)
 
         # Create signal generator with intraday interval

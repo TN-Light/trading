@@ -443,11 +443,12 @@ intraday:
     entry_start_time: "10:00"
     entry_cutoff_time: "13:45"
     max_daily_trades: 3
-    confluence_trending: 2.8
+    confluence_trending: 2.7
     confluence_sideways: 3.5
+    min_rr: 2.0
     kelly_wr: 0.40
     target_atr_mult: 2.2
-    time_stop_bars: 14
+    time_stop_bars: 16
     min_net_edge: 1.4
     require_vwap_alignment: true
     require_ema_alignment: true
@@ -455,10 +456,92 @@ intraday:
     require_volume_surge: false
     breakout_lookback: 0
     breakout_atr_buffer: 0.10
+    use_oi_pcr_filter: false
+    pcr_refresh_minutes: 30
+    pcr_intraday_signal_delta: 0.20
+    oi_sr_tolerance_pct: 0.0025
+    vix_sell_only_below: 12.0
+    vix_buy_only_above: 18.0
+    ce_high_vix_edge_penalty: 0.25
+    dead_zone_start: "11:30"
+    dead_zone_end: "13:30"
+    afternoon_window_start: "14:00"
+    use_second_window: true
+    gap_fade_threshold_pct: 0.30
+    skip_1dte_buying: true
+    monday_1dte_guard: true
+    monday_override_score: 5.5
+    monday_override_breakout_atr: 0.9
+    premium_targeting_enabled: true
+    target_premium_rs: 200.0
+    target_delta_min: 0.55
+    target_delta_max: 0.70
+    fixed_premium_sl_enabled: true
+    fixed_premium_sl_pct: 0.20
+    expiry_late_scalp_only: true
+    expiry_late_target_atr: 1.0
+    trendday_prefilter: true
+    trendday_persistence_min: 0.45
+    orb_atr_buffer: 0.05
+    persistence_lookback: 8
+    trendday_breakout_override_atr: 0.60
+    vol_adaptive_trailing: true
+    allow_counter_bias_when_strong: false
+    counter_bias_min_net_edge: 2.6
+    counter_bias_breakout_atr: 0.8
+    symbol_overrides:
+      "NIFTY 50":
+        trendday_persistence_min: 0.50
+        orb_atr_buffer: 0.07
+        trendday_breakout_override_atr: 0.70
+      "NIFTY BANK":
+        trendday_persistence_min: 0.40
+        orb_atr_buffer: 0.03
+        trendday_breakout_override_atr: 0.45
+    event_risk_gate:
+      enabled: false
+      event_calendar_file: "config/official_event_calendar.yaml"
+      block_before_minutes: 15
+      block_after_minutes: 20
+      enabled_impacts: ["high"]
+      events:
+        # Official calendar events only (RBI/NSE/BSE/GOI releases). Maintain this list daily.
+        []
     disable_mean_reversion: true
     weight_supertrend: 1.25
     weight_ema: 1.0
     weight_vwap: 1.25
+    ab_test:
+      enabled: false
+      name: "intraday_capture_v1"
+      confluence_trending_delta: -0.2
+      min_rr_override: 1.8
+      entry_cutoff_time: "14:15"
+      trendday_prefilter: true
+      use_oi_pcr_filter: false
+      trendday_persistence_min: 0.45
+      orb_atr_buffer: 0.05
+      persistence_lookback: 8
+      trendday_breakout_override_atr: 0.60
+      vol_adaptive_trailing: true
+      vix_sell_only_below: 12.0
+      vix_buy_only_above: 18.0
+      skip_1dte_buying: true
+      target_premium_rs: 200.0
+      fixed_premium_sl_pct: 0.20
+      allow_counter_bias_when_strong: false
+      counter_bias_min_net_edge: 2.5
+      counter_bias_breakout_atr: 0.8
+      symbol_overrides:
+        "NIFTY 50":
+          trendday_persistence_min: 0.50
+          orb_atr_buffer: 0.07
+          trendday_breakout_override_atr: 0.70
+        "NIFTY BANK":
+          trendday_persistence_min: 0.40
+          orb_atr_buffer: 0.03
+          trendday_breakout_override_atr: 0.45
+      event_risk_gate_enabled: false
     pilot_guardrails:
       enabled: true
       rolling_window_trades: 20
@@ -470,9 +553,10 @@ intraday:
       force_square_off_on_breach: true
     profiles:
       tier1:
-        confluence_trending: 3.0
-        confluence_sideways: 3.8
-        min_net_edge: 1.6
+        confluence_trending: 2.6
+        confluence_sideways: 3.2
+        min_net_edge: 1.3
+        min_rr: 2.0
         kelly_wr: 0.38
         target_atr_mult: 2.0
         time_stop_bars: 14
@@ -481,6 +565,7 @@ intraday:
         confluence_trending: 2.9
         confluence_sideways: 3.6
         min_net_edge: 1.5
+        min_rr: 2.0
         kelly_wr: 0.40
         target_atr_mult: 2.2
         time_stop_bars: 14
@@ -489,6 +574,7 @@ intraday:
         confluence_trending: 2.8
         confluence_sideways: 3.5
         min_net_edge: 1.4
+        min_rr: 1.9
         kelly_wr: 0.40
         target_atr_mult: 2.4
         time_stop_bars: 13
@@ -497,6 +583,7 @@ intraday:
         confluence_trending: 2.7
         confluence_sideways: 3.3
         min_net_edge: 1.3
+        min_rr: 1.8
         kelly_wr: 0.42
         target_atr_mult: 2.6
         time_stop_bars: 12
@@ -505,13 +592,16 @@ intraday:
         confluence_trending: 2.6
         confluence_sideways: 3.2
         min_net_edge: 1.2
+        min_rr: 1.8
         kelly_wr: 0.42
         target_atr_mult: 2.8
         time_stop_bars: 12
         max_daily_trades: 5
   instruments:                      # Instruments for intraday scans
+    - "NIFTY 50"
     - "NIFTY BANK"
   allowed_instruments:              # Runtime performance gate (deployment allowlist)
+    - "NIFTY 50"
     - "NIFTY BANK"
 
 # ---------------------------------------------------------------------------

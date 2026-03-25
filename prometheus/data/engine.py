@@ -579,7 +579,7 @@ class DataEngine:
             if source == "kite":
                 df["symbol"] = symbol
 
-            df = self._clean_ohlcv(df)
+            df = self._clean_ohlcv(df, source=source, interval=interval)
             self.store.save_ohlcv(df, symbol, interval)
             logger.info(f"Fetched {len(df)} rows for {symbol} via {source}")
             return df
@@ -590,18 +590,29 @@ class DataEngine:
         )
         return pd.DataFrame()
 
-    def _clean_ohlcv(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _clean_ohlcv(self, df: pd.DataFrame, source: str = "", interval: str = "day") -> pd.DataFrame:
         """Ensure OHLCV data is timezone-normalized to IST, sorted, and de-duplicated."""
         if df.empty:
             return df
         ts = pd.to_datetime(df["timestamp"], errors="coerce")
         if getattr(ts.dt, "tz", None) is None:
-            ts = ts.dt.tz_localize("UTC")
+            # Source-aware default for tz-naive timestamps.
+            # Angel One historical candles are returned in IST clock time.
+            if str(source).lower() == "angelone":
+                ts = ts.dt.tz_localize(IST)
+            else:
+                ts = ts.dt.tz_localize("UTC")
         else:
             ts = ts.dt.tz_convert("UTC")
         df["timestamp"] = ts.dt.tz_convert(IST).dt.tz_localize(None)
         df = df.dropna(subset=["timestamp"])
         df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+        # Intraday guardrail: keep only NSE/BSE regular session bars.
+        if str(interval).lower() in {"5minute", "5m", "15minute", "15m", "minute", "1m", "60minute", "1h"}:
+            t = pd.to_datetime(df["timestamp"], errors="coerce").dt.time
+            df = df.loc[(t >= datetime.strptime("09:15", "%H:%M").time()) & (t <= datetime.strptime("15:30", "%H:%M").time())]
+            df = df.reset_index(drop=True)
         return df
 
     def _normalize_options_chain(self, df: pd.DataFrame, symbol: str) -> pd.DataFrame:
