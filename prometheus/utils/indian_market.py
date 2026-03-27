@@ -101,6 +101,7 @@ NSE_HOLIDAYS_2026 = [
     date(2026, 2, 17),   # Mahashivratri
     date(2026, 3, 3),    # Holi
     date(2026, 3, 20),   # Id-Ul-Fitr
+    date(2026, 3, 26),   # Added manually: Today's Holiday
     date(2026, 3, 30),   # Shri Ram Navami
     date(2026, 4, 3),    # Good Friday
     date(2026, 4, 14),   # Dr. Ambedkar Jayanti

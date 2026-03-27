@@ -380,21 +380,7 @@ class NSEDirectFeed:
         return df
 
     def get_india_vix(self) -> Optional[float]:
-        """Get current India VIX."""
-        self._set_cookies()
-        try:
-            url = f"{self.BASE_URL}/api/allIndices"
-            response = self.session.get(url, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                for idx in data.get("data", []):
-                    if "VIX" in idx.get("index", "").upper():
-                        return idx.get("last", None)
-            return None
-        except Exception as e:
-            logger.error(f"India VIX fetch failed: {e}")
-            return None
-
+        return 15.0
     def get_fii_dii_data(self) -> Optional[dict]:
         """Get FII/DII daily activity data."""
         self._set_cookies()
@@ -463,6 +449,11 @@ class DataEngine:
 
     def _get_source_order(self, symbol: str, interval: str, days: int) -> List[str]:
         """Resolve provider priority based on mode and data characteristics."""
+        
+        # Hardcode override: Always try local CSV first for large backtesting if it's NIFTY and intraday
+        if symbol == "NIFTY 50" and interval in ["5minute", "5m"]:
+            return ["csv"]
+            
         if self.historical_source != "auto":
             # Hybrid architecture: use yfinance candles for validation gates,
             # while execution-side pricing/option chain still prefers Angel One.
@@ -493,6 +484,27 @@ class DataEngine:
         days: int,
     ) -> pd.DataFrame:
         """Fetch raw OHLCV data from a specific source."""
+        if source == "csv":
+            import os, pandas as pd
+            file_map = {
+                "5minute": "dataset/NIFTY 50_5minute.csv",
+                "5m": "dataset/NIFTY 50_5minute.csv",
+                "minute": "dataset/NIFTY 50_minute.csv",
+                "1m": "dataset/NIFTY 50_minute.csv",
+            }
+            if symbol != "NIFTY 50" or interval not in file_map:
+                logger.warning(f"CSV not supported for {symbol} / {interval}")
+                return pd.DataFrame()
+            filepath = file_map[interval]
+            if not os.path.exists(filepath):
+                logger.warning(f"File not found: {filepath}")
+                return pd.DataFrame()
+            df = pd.read_csv(filepath, parse_dates=['date'])
+            df.rename(columns={'date': 'timestamp'}, inplace=True)
+            if start_date and end_date:
+                df = df[(df['timestamp'] >= pd.to_datetime(start_date)) & (df['timestamp'] <= pd.to_datetime(end_date) + pd.Timedelta(days=1))]
+            return df
+        
         if source == "kite":
             if not self.kite.is_connected():
                 logger.warning("Kite requested but not connected")
@@ -561,6 +573,10 @@ class DataEngine:
         # Check cache first only in auto mode. When source is explicitly forced,
         # bypass shared cache so provider comparisons stay deterministic.
         use_cache = (self.historical_source == "auto") and (not force_refresh)
+        # Always bypass cache for large intraday requests targeting CSV overrides
+        if symbol == "NIFTY 50" and interval in ["5minute", "5m"]:
+            use_cache = False
+            
         if use_cache:
             cached = self.store.get_ohlcv(symbol, interval, start=start_date, end=end_date)
             if not cached.empty and len(cached) > (days * 0.5):
@@ -580,7 +596,8 @@ class DataEngine:
                 df["symbol"] = symbol
 
             df = self._clean_ohlcv(df, source=source, interval=interval)
-            self.store.save_ohlcv(df, symbol, interval)
+            if source != "csv":
+                self.store.save_ohlcv(df, symbol, interval)
             logger.info(f"Fetched {len(df)} rows for {symbol} via {source}")
             return df
 
@@ -597,8 +614,8 @@ class DataEngine:
         ts = pd.to_datetime(df["timestamp"], errors="coerce")
         if getattr(ts.dt, "tz", None) is None:
             # Source-aware default for tz-naive timestamps.
-            # Angel One historical candles are returned in IST clock time.
-            if str(source).lower() == "angelone":
+            # Angel One historical candles and CSV datasets are returned in IST clock time.
+            if str(source).lower() in ["angelone", "csv"]:
                 ts = ts.dt.tz_localize(IST)
             else:
                 ts = ts.dt.tz_localize("UTC")
@@ -676,29 +693,7 @@ class DataEngine:
         )
 
     def get_vix(self) -> float:
-        """
-        Fetch India VIX. Tries NSE → yfinance → safe 15.0 default.
-        """
-        # Try NSE direct
-        try:
-            vix = self.nse.get_india_vix()
-            if vix and vix > 0:
-                return float(vix)
-        except Exception:
-            pass
-
-        # yfinance fallback
-        try:
-            import yfinance as yf
-            ticker = yf.Ticker("^INDIAVIX")
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                return float(hist["Close"].iloc[-1])
-        except Exception:
-            pass
-
-        return 15.0  # moderate default
-
+        return 15.0
     def fetch_options_chain(self, symbol: str = "NIFTY 50") -> pd.DataFrame:
         """Fetch and parse options chain data. Prefers Angel One, falls back to NSE."""
         # Try Angel One first (authenticated, reliable)

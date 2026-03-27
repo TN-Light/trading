@@ -1,637 +1,535 @@
-# ============================================================================
-# PROMETHEUS Trading System — Master Configuration
-# ============================================================================
-
-system:
-  name: "PROMETHEUS"
-  version: "1.0.0"
-  mode: "paper"  # paper | signal | semi_auto | full_auto
-  timezone: "Asia/Kolkata"
-  log_level: "INFO"
-
-# ---------------------------------------------------------------------------
-# Capital & Account
-# ---------------------------------------------------------------------------
+ai:
+  embeddings:
+    cache_dir: data/models/embeddings
+    enabled: true
+    model: all-MiniLM-L6-v2
+  finbert:
+    batch_size: 16
+    cache_dir: data/models/finbert
+    enabled: true
+    model: ProsusAI/finbert
+  gemini:
+    api_key: ''
+    enabled: true
+    model: gemini-2.0-flash
+    rpm_limit: 15
+  groq:
+    api_key: ''
+    enabled: true
+    max_tokens: 2048
+    model: llama-3.3-70b-versatile
+    temperature: 0.3
+  ollama:
+    base_url: http://localhost:11434
+    enabled: true
+    max_tokens: 2048
+    model: llama3.2:3b
+    temperature: 0.3
+    timeout: 90
+backtest:
+  commission_model: zerodha
+  costs:
+    equity_delivery_brokerage: 0
+    gst: 18.0
+    intraday_brokerage: 20
+    options_brokerage: 20
+    sebi_charges: 0.0001
+    slippage_pct: 0.15
+    stamp_duty: 0.003
+    stt_futures: 0.01
+    stt_options_sell: 0.1
+    transaction_charges: 0.053
+  end_date: '2025-12-31'
+  initial_capital: 15000
+  slippage_pct: 0.05
+  start_date: '2022-01-01'
+broker:
+  access_token: ''
+  api_key: ''
+  api_secret: ''
+  base_url: https://api.kite.trade
+  max_orders_per_second: 3
+  name: zerodha
+  rate_limit_buffer: 0.5
+  websocket_url: wss://ws.kite.trade
 capital:
-  initial: 15000            # INR — small capital test
-  max_deployment: 0.45      # max 45% per trade (1 lot reality with 15K)
-  reserved_cash: 0.15       # 15% buffer (small capital needs more deployed)
-  max_single_trade: 0.45    # max 45% in one trade
-  max_correlated_exposure: 0.50  # max 50% in correlated positions
-  
-  # Capital Brackets Configuration (Dynamic Position Sizing & RR)
   brackets:
     tier1:
-      name: "15K Strict Preservation"
+      base_target: 5.0
       max_capital: 29999
       max_loss_per_trade: 150
-      min_rr: 3.5
-      base_target: 5.0
-      sl_atr_mult: 1.0
       min_margin: 0
+      min_rr: 3.5
+      name: 15K Strict Preservation
+      sl_atr_mult: 1.0
     tier2:
-      name: "30K Balanced Growth"
+      base_target: 4.0
       max_capital: 49999
       max_loss_per_trade: 300
-      min_rr: 2.5
-      base_target: 4.0
-      sl_atr_mult: 1.0
       min_margin: 30000
+      min_rr: 2.5
+      name: 30K Balanced Growth
+      sl_atr_mult: 1.0
     tier3:
-      name: "50K Standard"
+      base_target: 2.5
       max_capital: 99999
       max_loss_per_trade: 500
-      min_rr: 2.0
-      base_target: 2.5
-      sl_atr_mult: 1.2
       min_margin: 50000
+      min_rr: 2.0
+      name: 50K Standard
+      sl_atr_mult: 1.2
     tier4:
-      name: "1L Advanced"
+      base_target: 2.0
       max_capital: 199999
       max_loss_per_trade: 1000
-      min_rr: 1.5
-      base_target: 2.0
-      sl_atr_mult: 1.5
       min_margin: 100000
+      min_rr: 1.5
+      name: 1L Advanced
+      sl_atr_mult: 1.5
     tier5:
-      name: "2L+ Institutional"
+      base_target: 2.0
       max_capital: 99999999
       max_loss_per_trade: 2000
-      min_rr: 1.5
-      base_target: 2.0
-      sl_atr_mult: 1.5
       min_margin: 200000
-
-# ---------------------------------------------------------------------------
-# Market Configuration
-# ---------------------------------------------------------------------------
-market:
-  exchange: "NSE"
-  indices:
-    - "NIFTY 50"
-    - "NIFTY BANK"
-    - "NIFTY FIN SERVICE"
-    - "NIFTY IT"
-    - "NIFTY MIDCAP SELECT"
-    - "SENSEX"
-  # Lot-size overrides for affordability logic (fallback uses exchange utility mapping)
-  lot_sizes:
-    "NIFTY 50": 50
-    "NIFTY BANK": 15
-    "SENSEX": 10
-    "NIFTY FIN SERVICE": 40
-  # 40+ liquid F&O stocks for swing scanning (~25 trades/month target)
-  stocks:
-    # Banks
-    - "HDFCBANK"
-    - "ICICIBANK"
-    - "SBIN"
-    - "AXISBANK"
-    - "KOTAKBANK"
-    - "INDUSINDBK"
-    - "PNB"
-    - "IDFCFIRSTB"
-    # IT
-    - "TCS"
-    - "INFY"
-    - "WIPRO"
-    - "HCLTECH"
-    - "TECHM"
-    - "LTIM"
-    # Auto (TATAMOTORS demerged Oct 2025 → TATAMOTORS=CV, TMPV=PV+JLR)
-    - "TATAMOTORS"
-    - "TMPV"
-    - "M&M"
-    - "MARUTI"
-    - "BAJAJ-AUTO"
-    - "HEROMOTOCO"
-    # Energy & Infra
-    - "RELIANCE"
-    - "ONGC"
-    - "NTPC"
-    - "POWERGRID"
-    - "ADANIENT"
-    - "ADANIPORTS"
-    # Pharma
-    - "SUNPHARMA"
-    - "DRREDDY"
-    - "CIPLA"
-    - "DIVISLAB"
-    # FMCG
-    - "ITC"
-    - "HINDUNILVR"
-    - "NESTLEIND"
-    - "BRITANNIA"
-    # Finance (non-bank)
-    - "BAJFINANCE"
-    - "BAJAJFINSV"
-    - "SBILIFE"
-    - "HDFCLIFE"
-    # Metals & Cement
-    - "TATASTEEL"
-    - "JSWSTEEL"
-    - "HINDALCO"
-    - "ULTRACEMCO"
-    # Others
-    - "LT"
-    - "TITAN"
-    - "ASIANPAINT"
-  trading_hours:
-    start: "09:15"
-    end: "15:30"
-    pre_open_start: "09:00"
-    pre_open_end: "09:08"
-  holidays_calendar: "india_nse"  # auto-loaded
-
-# ---------------------------------------------------------------------------
-# Swing Scan Scheduling
-# ---------------------------------------------------------------------------
-swing:
-  index_scan_times: ["13:00", "15:35"]     # existing index scan windows
-  stock_scan_times: ["12:30", "15:00"]     # staggered stock scan windows
-  stock_confidence_min: 0.70               # slightly relaxed for stocks (vs 0.80 index)
-  stock_min_signals: 3                     # min contributing signals for stocks (vs 4 index)
-  stock_batch_size: 10                     # scan 10 stocks at a time
-  stock_batch_delay_seconds: 5             # 5s between batches (yfinance rate limit)
-  profiles:
-    tier1:
-      confluence_trending: 3.4
-      confluence_sideways: 4.0
-      min_net_edge: 1.8
-      kelly_wr: 0.33
-      target_atr_mult: 5.0
-      time_stop_bars: 7
-      breakeven_ratio: 0.6
-    tier2:
-      confluence_trending: 3.2
-      confluence_sideways: 3.8
-      min_net_edge: 1.7
-      kelly_wr: 0.34
-      target_atr_mult: 4.0
-      time_stop_bars: 7
-      breakeven_ratio: 0.6
-    tier3:
-      confluence_trending: 3.0
-      confluence_sideways: 3.6
-      min_net_edge: 1.6
-      kelly_wr: 0.35
-      target_atr_mult: 3.0
-      time_stop_bars: 6
-      breakeven_ratio: 0.6
-    tier4:
-      confluence_trending: 2.8
-      confluence_sideways: 3.4
-      min_net_edge: 1.5
-      kelly_wr: 0.36
-      target_atr_mult: 2.5
-      time_stop_bars: 5
-      breakeven_ratio: 0.55
-    tier5:
-      confluence_trending: 2.6
-      confluence_sideways: 3.2
-      min_net_edge: 1.4
-      kelly_wr: 0.36
-      target_atr_mult: 2.2
-      time_stop_bars: 5
-      breakeven_ratio: 0.55
-
-# ---------------------------------------------------------------------------
-# Broker Configuration — Zerodha Kite Connect
-# ---------------------------------------------------------------------------
-broker:
-  name: "zerodha"
-  api_key: ""              # set in credentials.yaml
-  api_secret: ""           # set in credentials.yaml
-  access_token: ""         # refreshed daily
-  base_url: "https://api.kite.trade"
-  websocket_url: "wss://ws.kite.trade"
-  max_orders_per_second: 3
-  rate_limit_buffer: 0.5   # seconds between API calls
-
-# ---------------------------------------------------------------------------
-# Data Engine
-# ---------------------------------------------------------------------------
+      min_rr: 1.5
+      name: 2L+ Institutional
+      sl_atr_mult: 1.5
+  initial: 15000
+  max_correlated_exposure: 0.5
+  max_deployment: 0.45
+  max_single_trade: 0.45
+  reserved_cash: 0.15
 data:
-  historical_source: "kite"   # kite | nse_archive | csv
-  db_path: "data/prometheus.db"
-  cache_dir: "data/cache"
-  ohlcv_intervals: ["minute", "5minute", "15minute", "60minute", "day"]
-  max_historical_days: 1095   # 3 years
+  cache_dir: data/cache
+  db_path: data/prometheus.db
+  historical_source: kite
+  max_historical_days: 1095
+  ohlcv_intervals:
+  - minute
+  - 5minute
+  - 15minute
+  - 60minute
+  - day
   options_chain:
-    refresh_interval: 5       # seconds
-    strikes_around_atm: 10    # fetch 10 strikes above and below ATM
-    expiries_to_fetch: 3      # current + next 2 expiries
-
-# ---------------------------------------------------------------------------
-# Signal Engine
-# ---------------------------------------------------------------------------
-signals:
-  # Signal weights (0 to 1) — higher = more trusted
-  weights:
-    volume_profile: 0.85
-    vwap: 0.80
-    oi_analysis: 0.80
-    regime_detector: 0.75
-    liquidity_sweep: 0.70
-    fvg_imbalance: 0.60
-    rsi_divergence: 0.40      # secondary only
-    macd_crossover: 0.20      # lowest priority
-
-  # Minimum confluence score to generate a signal (0 to 1)
-  min_confluence: 3.0  # on 0-10 scale (spec: hard gate at 3.0)
-
-  # Multi-timeframe config
-  timeframes:
-    primary: "60minute"       # hourly for bias
-    secondary: "15minute"     # for entry zones
-    execution: "5minute"      # for precise entries
-
-# ---------------------------------------------------------------------------
-# AI Intelligence Layer — Multi-Provider, 100% FREE
-# ---------------------------------------------------------------------------
-# Priority: Groq (70B) → Gemini 2.0 Flash → Ollama local → FinBERT
-# All providers have generous free tiers. A trading day uses ~30-50 calls.
-ai:
-  # PRIMARY: Groq Cloud — Llama 3.3 70B for FREE (best reasoning)
-  # Free tier: 30 RPM, 14,400 requests/day — more than enough
-  # Setup: Get free key at https://console.groq.com/keys
-  groq:
-    enabled: true
-    api_key: ""                    # set in credentials.yaml
-    model: "llama-3.3-70b-versatile"
-    temperature: 0.3
-    max_tokens: 2048
-
-  # SECONDARY: Google Gemini 2.0 Flash — powerful cloud backup
-  # Free tier: 15 RPM, 1,500 requests/day, 1M tokens/day
-  # Setup: Get free key at https://aistudio.google.com/apikey
-  gemini:
-    enabled: true
-    api_key: ""                    # set in credentials.yaml
-    model: "gemini-2.0-flash"
-    rpm_limit: 15
-
-  # TERTIARY: Ollama Local — offline fallback (works without internet)
-  # Setup: Install from https://ollama.ai, then: ollama pull llama3.2:3b
-  ollama:
-    enabled: true
-    base_url: "http://localhost:11434"
-    model: "llama3.2:3b"          # or qwen2.5:7b if you have 5GB+ VRAM
-    timeout: 90
-    temperature: 0.3
-    max_tokens: 2048
-
-  # Financial Sentiment: FinBERT (runs locally, specialized for finance)
-  finbert:
-    enabled: true
-    model: "ProsusAI/finbert"
-    cache_dir: "data/models/finbert"
-    batch_size: 16
-
-  # Pattern Matching: Sentence Transformers (local)
-  embeddings:
-    enabled: true
-    model: "all-MiniLM-L6-v2"
-    cache_dir: "data/models/embeddings"
-
-# ---------------------------------------------------------------------------
-# Strategy Modules
-# ---------------------------------------------------------------------------
-strategies:
-  active_modules:
-    - "trend"
-    - "volatility"
-    - "expiry"
-
-  trend:
-    enabled: true
-    instruments: ["NIFTY 50", "NIFTY BANK"]
-    entry_type: "options_buying"  # options_buying | debit_spread
-    min_signal_strength: 0.70
-    max_sl_points: 30             # max stop loss in index points
-    target_rr_ratio: 2.5          # minimum reward:risk
-
-  volatility:
-    enabled: true
-    instruments: ["NIFTY 50", "NIFTY BANK"]
-    entry_type: "straddle_buy"    # buy straddle/strangle before events
-    iv_percentile_trigger: 30     # buy vol when IV percentile < 30
-    event_proximity_days: 2       # enter 2 days before known event
-    max_position_cost: 0.20       # max 20% of capital per vol trade
-
-  expiry:
-    enabled: true
-    instruments: ["NIFTY 50", "NIFTY BANK"]
-    entry_type: "debit_spread"    # capital efficient for under 2L
-    days_to_expiry_max: 2         # only trade within 2 days of expiry
-    min_iv_percentile: 50         # only sell premium in high IV
-
-  mean_reversion:
-    enabled: false                # needs more capital for spreads
-    instruments: ["NIFTY 50"]
-
-# ---------------------------------------------------------------------------
-# Risk Management — NON-NEGOTIABLE HARD LIMITS
-# ---------------------------------------------------------------------------
-risk:
-  # Daily limits
-  max_daily_loss: 5000           # INR — hard stop, no trading after this
-  max_daily_loss_pct: 3.0        # % of capital
-  max_daily_trades: 10           # increased for expanded watchlist (40+ stocks)
-
-  # Weekly limits
-  max_weekly_loss: 10000         # INR
-  max_weekly_loss_pct: 6.0       # % of capital
-
-  # Position limits
-  max_open_positions: 3          # with under 2L, max 3 positions
-  max_single_position_pct: 30.0  # max % of capital in one position
-  max_correlated_pct: 50.0       # max % in same sector/direction
-
-  # Stop loss rules
-  stop_loss_type: "atr"          # atr | fixed | trailing
-  atr_multiplier: 2.0            # 2x ATR for stop loss
-  trailing_activation: 1.5       # activate trailing after 1.5x target
-  max_stop_loss_pct: 50.0        # never lose more than 50% on a single option trade
-
-  # Margin safety
-  margin_utilization_max: 70.0   # never use more than 70% of available margin
-  margin_buffer_pct: 30.0        # keep 30% margin buffer
-
-  # Circuit breakers
-  consecutive_losses_pause: 3    # pause after 3 consecutive losses
-  pause_duration_minutes: 60     # cool-off period
-  drawdown_halt_pct: 10.0        # halt system if 10% drawdown from peak
-
-# ---------------------------------------------------------------------------
-# Backtesting
-# ---------------------------------------------------------------------------
-backtest:
-  start_date: "2022-01-01"
-  end_date: "2025-12-31"
-  initial_capital: 15000
-  slippage_pct: 0.05             # 0.05% slippage per trade
-  commission_model: "zerodha"     # uses Zerodha brokerage rates
-
-  # Zerodha cost structure
-  costs:
-    equity_delivery_brokerage: 0  # zero
-    intraday_brokerage: 20        # flat Rs 20 or 0.03%
-    options_brokerage: 20         # flat Rs 20 per order
-    stt_options_sell: 0.10        # 0.10% on sell side (correct spec)
-    stt_futures: 0.01             # 0.01% on sell side (correct spec)
-    transaction_charges: 0.053    # NSE: 0.053%
-    gst: 18.0                     # 18% on brokerage + transaction
-    sebi_charges: 0.0001          # Rs 10 per crore
-    stamp_duty: 0.003             # 0.003% on buy side
-    slippage_pct: 0.15            # 0.15% realistic options slippage (paper/backtest parity)
-
-# ---------------------------------------------------------------------------
-# Interface
-# ---------------------------------------------------------------------------
+    expiries_to_fetch: 3
+    refresh_interval: 5
+    strikes_around_atm: 10
 interface:
   cli:
-    refresh_rate: 2               # seconds
-    theme: "dark"
+    refresh_rate: 2
     show_greeks: true
     show_pnl: true
     show_signals: true
-
+    theme: dark
   telegram:
-    enabled: true
-    bot_token: ""                 # set in credentials.yaml
-    chat_id: ""                   # your chat ID
-    proxy: ""                     # SOCKS5/HTTP proxy e.g. "socks5://host:port"
-    api_base_url: "https://tg-relay.venkatabhilash432004.workers.dev"
     alert_on:
-      - "new_signal"
-      - "order_placed"
-      - "order_filled"
-      - "stop_loss_hit"
-      - "target_hit"
-      - "risk_breach"
-      - "daily_summary"
-
-# ---------------------------------------------------------------------------
-# Position Monitoring (semi_auto / full_auto / dry_run)
-# ---------------------------------------------------------------------------
-position_monitor:
-  poll_interval_seconds: 15    # LTP poll frequency
-  time_stop_bars_daily: 7      # Max holding period (daily bars, <50K)
-  breakeven_ratio: 0.6         # R:R trigger for breakeven trap
-  confirmation_timeout: 1800   # semi_auto: seconds to wait for /confirm
-
-# ---------------------------------------------------------------------------
-# Intraday Trading Configuration
-# ---------------------------------------------------------------------------
-intraday:
-  enabled: false                    # Must be explicitly enabled via --intraday flag
-  scan_interval_seconds: 180        # Scan every 3 minutes during market hours
-  bar_interval: "auto"              # auto | 5minute | 15minute
-  vix_threshold_5min: 18.0          # Use 5min bars when VIX > 18
-  skip_first_minutes: 30            # Skip opening 30 minutes (9:15-9:45)
-  last_entry_time: "14:30"          # No new entries after 2:30 PM
-  square_off_time: "15:15"          # Force close all intraday at 3:15 PM
-  max_daily_trades: 4               # Separate limit for intraday trades
-  risk_per_trade_pct: 2.0           # Risk per intraday trade
-  time_stop_bars_5min: 36            # Session 23: ~3 hours in 5-min bars (was 60)
-  time_stop_bars_15min: 16           # Session 23: ~4 hours in 15-min bars (was 20)
-  breakeven_ratio: 0.5              # Faster breakeven for intraday
-  trailing_poll_seconds: 10         # Faster polling than swing (15s)
-  v2:
+    - new_signal
+    - order_placed
+    - order_filled
+    - stop_loss_hit
+    - target_hit
+    - risk_breach
+    - daily_summary
+    api_base_url: https://tg-relay.venkatabhilash432004.workers.dev
+    bot_token: ''
+    chat_id: ''
     enabled: true
-    entry_start_time: "10:00"
-    entry_cutoff_time: "13:45"
-    max_daily_trades: 3
-    confluence_trending: 2.7
+    proxy: ''
+intraday:
+  allowed_instruments:
+  - NIFTY 50
+  - NIFTY BANK
+  bar_interval: auto
+  breakeven_ratio: 0.5
+  enabled: false
+  instruments:
+  - NIFTY 50
+  - NIFTY BANK
+  last_entry_time: '14:30'
+  max_daily_trades: 4
+  risk_per_trade_pct: 2.0
+  scan_interval_seconds: 180
+  skip_first_minutes: 30
+  square_off_time: '15:15'
+  time_stop_bars_15min: 16
+  time_stop_bars_5min: 36
+  trailing_poll_seconds: 10
+  v2:
+    ab_test:
+      allow_counter_bias_when_strong: false
+      confluence_trending_delta: -0.2
+      counter_bias_breakout_atr: 0.8
+      counter_bias_min_net_edge: 2.5
+      enabled: false
+      entry_cutoff_time: '14:15'
+      event_risk_gate_enabled: false
+      fixed_premium_sl_pct: 0.2
+      min_rr_override: 1.8
+      name: intraday_capture_v1
+      orb_atr_buffer: 0.05
+      persistence_lookback: 8
+      skip_1dte_buying: true
+      symbol_overrides:
+        NIFTY 50:
+          orb_atr_buffer: 0.07
+          trendday_breakout_override_atr: 0.7
+          trendday_persistence_min: 0.5
+        NIFTY BANK:
+          orb_atr_buffer: 0.03
+          trendday_breakout_override_atr: 0.45
+          trendday_persistence_min: 0.4
+      target_premium_rs: 200.0
+      trendday_breakout_override_atr: 0.6
+      trendday_persistence_min: 0.45
+      trendday_prefilter: true
+      use_oi_pcr_filter: false
+      vix_buy_only_above: 18.0
+      vix_sell_only_below: 12.0
+      vol_adaptive_trailing: true
+    afternoon_window_start: '14:00'
+    allow_counter_bias_when_strong: false
+    breakout_atr_buffer: 0.1
+    breakout_lookback: 0
+    ce_high_vix_edge_penalty: 0.25
     confluence_sideways: 3.5
-    min_rr: 2.0
-    kelly_wr: 0.40
-    target_atr_mult: 2.2
-    time_stop_bars: 16
+    confluence_trending: 2.7
+    counter_bias_breakout_atr: 0.8
+    counter_bias_min_net_edge: 2.6
+    dead_zone_end: '13:30'
+    dead_zone_start: '11:30'
+    disable_mean_reversion: true
+    enabled: true
+    entry_cutoff_time: '13:45'
+    entry_start_time: '10:00'
+    event_risk_gate:
+      block_after_minutes: 20
+      block_before_minutes: 15
+      enabled: false
+      enabled_impacts:
+      - high
+      event_calendar_file: config/official_event_calendar.yaml
+      events: []
+    expiry_late_scalp_only: true
+    expiry_late_target_atr: 1.0
+    fixed_premium_sl_enabled: true
+    fixed_premium_sl_pct: 0.2
+    gap_fade_threshold_pct: 0.3
+    kelly_wr: 0.4
+    max_daily_trades: 3
     min_net_edge: 1.4
-    require_vwap_alignment: true
+    min_rr: 2.0
+    monday_1dte_guard: true
+    monday_override_breakout_atr: 0.9
+    monday_override_score: 5.5
+    oi_sr_tolerance_pct: 0.0025
+    orb_atr_buffer: 0.05
+    pcr_intraday_signal_delta: 0.2
+    pcr_refresh_minutes: 30
+    persistence_lookback: 8
+    pilot_guardrails:
+      block_new_entries_on_breach: true
+      enabled: true
+      force_square_off_on_breach: true
+      max_intraday_drawdown_pct: 10.0
+      min_rolling_pf: 1.1
+      require_full_window: true
+      rolling_window_trades: 20
+      today_only: true
+    premium_targeting_enabled: true
+    profiles:
+      tier1:
+        confluence_sideways: 3.2
+        confluence_trending: 2.6
+        kelly_wr: 0.38
+        max_daily_trades: 2
+        min_net_edge: 1.3
+        min_rr: 2.0
+        target_atr_mult: 2.0
+        time_stop_bars: 14
+      tier2:
+        confluence_sideways: 3.6
+        confluence_trending: 2.9
+        kelly_wr: 0.4
+        max_daily_trades: 3
+        min_net_edge: 1.5
+        min_rr: 2.0
+        target_atr_mult: 2.2
+        time_stop_bars: 14
+      tier3:
+        confluence_sideways: 3.5
+        confluence_trending: 2.8
+        kelly_wr: 0.4
+        max_daily_trades: 3
+        min_net_edge: 1.4
+        min_rr: 1.9
+        target_atr_mult: 2.4
+        time_stop_bars: 13
+      tier4:
+        confluence_sideways: 3.3
+        confluence_trending: 2.7
+        kelly_wr: 0.42
+        max_daily_trades: 4
+        min_net_edge: 1.3
+        min_rr: 1.8
+        target_atr_mult: 2.6
+        time_stop_bars: 12
+      tier5:
+        confluence_sideways: 3.2
+        confluence_trending: 2.6
+        kelly_wr: 0.42
+        max_daily_trades: 5
+        min_net_edge: 1.2
+        min_rr: 1.8
+        target_atr_mult: 2.8
+        time_stop_bars: 12
     require_ema_alignment: true
     require_supertrend_alignment: true
     require_volume_surge: false
-    breakout_lookback: 0
-    breakout_atr_buffer: 0.10
-    use_oi_pcr_filter: false
-    pcr_refresh_minutes: 30
-    pcr_intraday_signal_delta: 0.20
-    oi_sr_tolerance_pct: 0.0025
-    vix_sell_only_below: 12.0
-    vix_buy_only_above: 18.0
-    ce_high_vix_edge_penalty: 0.25
-    dead_zone_start: "11:30"
-    dead_zone_end: "13:30"
-    afternoon_window_start: "14:00"
-    use_second_window: true
-    gap_fade_threshold_pct: 0.30
+    require_vwap_alignment: true
     skip_1dte_buying: true
-    monday_1dte_guard: true
-    monday_override_score: 5.5
-    monday_override_breakout_atr: 0.9
-    premium_targeting_enabled: true
-    target_premium_rs: 200.0
-    target_delta_min: 0.55
-    target_delta_max: 0.70
-    fixed_premium_sl_enabled: true
-    fixed_premium_sl_pct: 0.20
-    expiry_late_scalp_only: true
-    expiry_late_target_atr: 1.0
-    trendday_prefilter: true
-    trendday_persistence_min: 0.45
-    orb_atr_buffer: 0.05
-    persistence_lookback: 8
-    trendday_breakout_override_atr: 0.60
-    vol_adaptive_trailing: true
-    allow_counter_bias_when_strong: false
-    counter_bias_min_net_edge: 2.6
-    counter_bias_breakout_atr: 0.8
     symbol_overrides:
-      "NIFTY 50":
-        trendday_persistence_min: 0.50
+      NIFTY 50:
         orb_atr_buffer: 0.07
-        trendday_breakout_override_atr: 0.70
-      "NIFTY BANK":
-        trendday_persistence_min: 0.40
+        trendday_breakout_override_atr: 0.7
+        trendday_persistence_min: 0.5
+      NIFTY BANK:
         orb_atr_buffer: 0.03
         trendday_breakout_override_atr: 0.45
-    event_risk_gate:
-      enabled: false
-      event_calendar_file: "config/official_event_calendar.yaml"
-      block_before_minutes: 15
-      block_after_minutes: 20
-      enabled_impacts: ["high"]
-      events:
-        # Official calendar events only (RBI/NSE/BSE/GOI releases). Maintain this list daily.
-        []
-    disable_mean_reversion: true
-    weight_supertrend: 1.25
+        trendday_persistence_min: 0.4
+    target_atr_mult: 2.2
+    target_delta_max: 0.7
+    target_delta_min: 0.55
+    target_premium_rs: 200.0
+    time_stop_bars: 16
+    trendday_breakout_override_atr: 0.6
+    trendday_persistence_min: 0.45
+    trendday_prefilter: true
+    use_oi_pcr_filter: false
+    use_second_window: true
+    vix_buy_only_above: 18.0
+    vix_sell_only_below: 12.0
+    vol_adaptive_trailing: true
     weight_ema: 1.0
+    weight_supertrend: 1.25
     weight_vwap: 1.25
-    ab_test:
-      enabled: false
-      name: "intraday_capture_v1"
-      confluence_trending_delta: -0.2
-      min_rr_override: 1.8
-      entry_cutoff_time: "14:15"
-      trendday_prefilter: true
-      use_oi_pcr_filter: false
-      trendday_persistence_min: 0.45
-      orb_atr_buffer: 0.05
-      persistence_lookback: 8
-      trendday_breakout_override_atr: 0.60
-      vol_adaptive_trailing: true
-      vix_sell_only_below: 12.0
-      vix_buy_only_above: 18.0
-      skip_1dte_buying: true
-      target_premium_rs: 200.0
-      fixed_premium_sl_pct: 0.20
-      allow_counter_bias_when_strong: false
-      counter_bias_min_net_edge: 2.5
-      counter_bias_breakout_atr: 0.8
-      symbol_overrides:
-        "NIFTY 50":
-          trendday_persistence_min: 0.50
-          orb_atr_buffer: 0.07
-          trendday_breakout_override_atr: 0.70
-        "NIFTY BANK":
-          trendday_persistence_min: 0.40
-          orb_atr_buffer: 0.03
-          trendday_breakout_override_atr: 0.45
-      event_risk_gate_enabled: false
-    pilot_guardrails:
-      enabled: true
-      rolling_window_trades: 20
-      min_rolling_pf: 1.10
-      require_full_window: true
-      today_only: true
-      max_intraday_drawdown_pct: 10.0
-      block_new_entries_on_breach: true
-      force_square_off_on_breach: true
-    profiles:
-      tier1:
-        confluence_trending: 2.6
-        confluence_sideways: 3.2
-        min_net_edge: 1.3
-        min_rr: 2.0
-        kelly_wr: 0.38
-        target_atr_mult: 2.0
-        time_stop_bars: 14
-        max_daily_trades: 2
-      tier2:
-        confluence_trending: 2.9
-        confluence_sideways: 3.6
-        min_net_edge: 1.5
-        min_rr: 2.0
-        kelly_wr: 0.40
-        target_atr_mult: 2.2
-        time_stop_bars: 14
-        max_daily_trades: 3
-      tier3:
-        confluence_trending: 2.8
-        confluence_sideways: 3.5
-        min_net_edge: 1.4
-        min_rr: 1.9
-        kelly_wr: 0.40
-        target_atr_mult: 2.4
-        time_stop_bars: 13
-        max_daily_trades: 3
-      tier4:
-        confluence_trending: 2.7
-        confluence_sideways: 3.3
-        min_net_edge: 1.3
-        min_rr: 1.8
-        kelly_wr: 0.42
-        target_atr_mult: 2.6
-        time_stop_bars: 12
-        max_daily_trades: 4
-      tier5:
-        confluence_trending: 2.6
-        confluence_sideways: 3.2
-        min_net_edge: 1.2
-        min_rr: 1.8
-        kelly_wr: 0.42
-        target_atr_mult: 2.8
-        time_stop_bars: 12
-        max_daily_trades: 5
-  instruments:                      # Instruments for intraday scans
-    - "NIFTY 50"
-    - "NIFTY BANK"
-  allowed_instruments:              # Runtime performance gate (deployment allowlist)
-    - "NIFTY 50"
-    - "NIFTY BANK"
-
-# ---------------------------------------------------------------------------
-# Multi-Account Paper Trading
-# ---------------------------------------------------------------------------
-multi_account:
-  # Activated via --multi-account CLI flag
-  accounts:
-    - label: "micro_15k"
-      capital: 15000
-    - label: "starter_50k"
-      capital: 50000
-    - label: "growth_100k"
-      capital: 100000
-      risk_overrides:
-        max_open_positions: 3
-        drawdown_halt_pct: 15.0
-    - label: "full_200k"
-      capital: 200000
-      risk_overrides:
-        max_open_positions: 4
-        drawdown_halt_pct: 15.0
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+  vix_threshold_5min: 18.0
 logging:
-  level: "INFO"
-  file: "logs/prometheus.log"
-  max_size_mb: 50
   backup_count: 5
-  trade_log: "logs/trades.log"
-  signal_log: "logs/signals.log"
+  file: logs/prometheus.log
+  level: INFO
+  max_size_mb: 50
+  signal_log: logs/signals.log
+  trade_log: logs/trades.log
+market:
+  exchange: NSE
+  holidays_calendar: india_nse
+  indices:
+  - NIFTY 50
+  - NIFTY BANK
+  - NIFTY FIN SERVICE
+  - NIFTY IT
+  - NIFTY MIDCAP SELECT
+  - SENSEX
+  lot_sizes:
+    NIFTY 50: 50
+    NIFTY BANK: 15
+    NIFTY FIN SERVICE: 40
+    SENSEX: 10
+  stocks:
+  - HDFCBANK
+  - ICICIBANK
+  - SBIN
+  - AXISBANK
+  - KOTAKBANK
+  - INDUSINDBK
+  - PNB
+  - IDFCFIRSTB
+  - TCS
+  - INFY
+  - WIPRO
+  - HCLTECH
+  - TECHM
+  - LTIM
+  - TATAMOTORS
+  - TMPV
+  - M&M
+  - MARUTI
+  - BAJAJ-AUTO
+  - HEROMOTOCO
+  - RELIANCE
+  - ONGC
+  - NTPC
+  - POWERGRID
+  - ADANIENT
+  - ADANIPORTS
+  - SUNPHARMA
+  - DRREDDY
+  - CIPLA
+  - DIVISLAB
+  - ITC
+  - HINDUNILVR
+  - NESTLEIND
+  - BRITANNIA
+  - BAJFINANCE
+  - BAJAJFINSV
+  - SBILIFE
+  - HDFCLIFE
+  - TATASTEEL
+  - JSWSTEEL
+  - HINDALCO
+  - ULTRACEMCO
+  - LT
+  - TITAN
+  - ASIANPAINT
+  trading_hours:
+    end: '15:30'
+    pre_open_end: 09:08
+    pre_open_start: 09:00
+    start: 09:15
+multi_account:
+  accounts:
+  - capital: 15000
+    label: micro_15k
+  - capital: 50000
+    label: starter_50k
+  - capital: 100000
+    label: growth_100k
+    risk_overrides:
+      drawdown_halt_pct: 15.0
+      max_open_positions: 3
+  - capital: 200000
+    label: full_200k
+    risk_overrides:
+      drawdown_halt_pct: 15.0
+      max_open_positions: 4
+position_monitor:
+  breakeven_ratio: 0.6
+  confirmation_timeout: 1800
+  poll_interval_seconds: 15
+  time_stop_bars_daily: 7
+risk:
+  atr_multiplier: 2.0
+  consecutive_losses_pause: 3
+  drawdown_halt_pct: 50.0
+  margin_buffer_pct: 30.0
+  margin_utilization_max: 70.0
+  max_correlated_pct: 50.0
+  max_daily_loss: 15000
+  max_daily_loss_pct: 30.0
+  max_daily_trades: 10
+  max_open_positions: 3
+  max_single_position_pct: 30.0
+  max_stop_loss_pct: 50.0
+  max_weekly_loss: 30000
+  max_weekly_loss_pct: 6.0
+  pause_duration_minutes: 60
+  stop_loss_type: atr
+  trailing_activation: 1.5
+signals:
+  min_confluence: 3.0
+  timeframes:
+    execution: 5minute
+    primary: 60minute
+    secondary: 15minute
+  weights:
+    fvg_imbalance: 0.6
+    liquidity_sweep: 0.7
+    macd_crossover: 0.2
+    oi_analysis: 0.8
+    regime_detector: 0.75
+    rsi_divergence: 0.4
+    volume_profile: 0.85
+    vwap: 0.8
+strategies:
+  active_modules:
+  - trend
+  - volatility
+  - expiry
+  expiry:
+    days_to_expiry_max: 2
+    enabled: true
+    entry_type: debit_spread
+    instruments:
+    - NIFTY 50
+    - NIFTY BANK
+    min_iv_percentile: 50
+  mean_reversion:
+    enabled: false
+    instruments:
+    - NIFTY 50
+  trend:
+    enabled: true
+    entry_type: options_buying
+    instruments:
+    - NIFTY 50
+    - NIFTY BANK
+    max_sl_points: 30
+    min_signal_strength: 0.7
+    target_rr_ratio: 2.5
+  volatility:
+    enabled: true
+    entry_type: straddle_buy
+    event_proximity_days: 2
+    instruments:
+    - NIFTY 50
+    - NIFTY BANK
+    iv_percentile_trigger: 30
+    max_position_cost: 0.2
+swing:
+  index_scan_times:
+  - '13:00'
+  - '15:35'
+  profiles:
+    tier1:
+      breakeven_ratio: 0.6
+      confluence_sideways: 4.0
+      confluence_trending: 3.4
+      kelly_wr: 0.33
+      min_net_edge: 1.8
+      target_atr_mult: 5.0
+      time_stop_bars: 7
+    tier2:
+      breakeven_ratio: 0.6
+      confluence_sideways: 3.8
+      confluence_trending: 3.2
+      kelly_wr: 0.34
+      min_net_edge: 1.7
+      target_atr_mult: 4.0
+      time_stop_bars: 7
+    tier3:
+      breakeven_ratio: 0.6
+      confluence_sideways: 3.6
+      confluence_trending: 3.0
+      kelly_wr: 0.35
+      min_net_edge: 1.6
+      target_atr_mult: 3.0
+      time_stop_bars: 6
+    tier4:
+      breakeven_ratio: 0.55
+      confluence_sideways: 3.4
+      confluence_trending: 2.8
+      kelly_wr: 0.36
+      min_net_edge: 1.5
+      target_atr_mult: 2.5
+      time_stop_bars: 5
+    tier5:
+      breakeven_ratio: 0.55
+      confluence_sideways: 3.2
+      confluence_trending: 2.6
+      kelly_wr: 0.36
+      min_net_edge: 1.4
+      target_atr_mult: 2.2
+      time_stop_bars: 5
+  stock_batch_delay_seconds: 5
+  stock_batch_size: 10
+  stock_confidence_min: 0.7
+  stock_min_signals: 3
+  stock_scan_times:
+  - '12:30'
+  - '15:00'
+system:
+  log_level: INFO
+  mode: paper
+  name: PROMETHEUS
+  timezone: Asia/Kolkata
+  version: 1.0.0

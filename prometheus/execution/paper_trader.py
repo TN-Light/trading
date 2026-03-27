@@ -67,6 +67,22 @@ class PaperTrader(BrokerBase):
         self._update_positions()
         self._check_pending_orders()
 
+    def get_mid_premium(self, tradingsymbol: str) -> float:
+        """Calculate the fair-value mid-price. Fallback to LTP if spread is zero."""
+        real = self._real_premiums.get(tradingsymbol)
+        if not real:
+            return self.get_ltp(tradingsymbol)
+            
+        bid = real["bid"]
+        ask = real["ask"]
+        ltp = real["ltp"]
+        
+        # If feed provides consolidated single price or no valid spread
+        if bid <= 0 or ask <= 0 or bid == ask:
+            return ltp
+            
+        return (bid + ask) / 2.0
+
     def set_real_premium(self, tradingsymbol: str, ltp: float, bid: float = 0, ask: float = 0):
         """
         Feed real option premium from Angel One for accurate paper execution.
@@ -77,6 +93,18 @@ class PaperTrader(BrokerBase):
             "bid": bid if bid > 0 else ltp,
             "ask": ask if ask > 0 else ltp,
         }
+        
+        # Diagnostic print for the first few quotes of a symbol
+        if not hasattr(self, "_diagnostic_print_counts"):
+            self._diagnostic_print_counts = {}
+        
+        count = self._diagnostic_print_counts.get(tradingsymbol, 0)
+        if count < 3:
+            quote = self._real_premiums[tradingsymbol]
+            mid = self.get_mid_premium(tradingsymbol)
+            logger.info(f"DIAGNOSTIC [{tradingsymbol}] | Bid: {quote['bid']:.2f} | Ask: {quote['ask']:.2f} | LTP: {quote['ltp']:.2f} | Mid: {mid:.2f}")
+            self._diagnostic_print_counts[tradingsymbol] = count + 1
+            
         # Also update the generic price feed
         self._price_feed[tradingsymbol] = ltp
 
@@ -318,7 +346,12 @@ class PaperTrader(BrokerBase):
             if pos.quantity == 0:
                 continue
 
-            current_price = self._price_feed.get(key, pos.last_price)
+            # Use mid-price for fair-value SL evaluation and unrealized PnL, not bid/ask spreads
+            if key in self._real_premiums:
+                current_price = self.get_mid_premium(key)
+            else:
+                current_price = self._price_feed.get(key, pos.last_price)
+                
             if current_price <= 0:
                 continue
 

@@ -41,6 +41,7 @@ class BacktestTrade:
     hold_duration_minutes: int = 0
     exit_reason: str = ""
     entry_type: str = "immediate"  # "immediate" | "pullback_limit" | "gap_fill"
+    underlying_direction_correct: bool = False
 
     # Signal features (for regression training)
     signal_liqsweep: bool = False
@@ -551,7 +552,7 @@ class BacktestEngine:
                                 else:
                                     exit_p = current_bar["close"]
                                 capital, trade = self._close_position(
-                                    pos, exit_p, current_time, capital, "intraday_square_off"
+                                    pos, exit_p, current_time, capital, "intraday_square_off", current_bar["close"]
                                 )
                                 self.trades.append(trade)
                                 daily_pnl += trade.net_pnl
@@ -589,7 +590,7 @@ class BacktestEngine:
                     else:
                         force_exit_price = current_bar["close"]
                     capital, trade = self._close_position(
-                        pos, force_exit_price, current_time, capital, "daily_loss_limit"
+                        pos, force_exit_price, current_time, capital, "daily_loss_limit", current_bar["close"]
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
@@ -609,7 +610,7 @@ class BacktestEngine:
                 )
                 if exit_triggered:
                     capital, trade = self._close_position(
-                        pos, exit_price, current_time, capital, exit_reason
+                        pos, exit_price, current_time, capital, exit_reason, current_bar["close"]
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
@@ -700,7 +701,8 @@ class BacktestEngine:
             capital, trade = self._close_position(
                 pos, exit_price,
                 str(data.iloc[-1].get("timestamp", len(data))),
-                capital, "end_of_data"
+                capital, "end_of_data",
+                data.iloc[-1]["close"]
             )
             self.trades.append(trade)
             self._sync_capital(capital)
@@ -781,6 +783,7 @@ class BacktestEngine:
                 "delta": delta_signed,
                 "current_premium": premium_entry,
                 "prev_close": bar["close"],
+                "underlying_entry_price": bar["close"],
                 "max_bars": signal.get("max_bars", 0),
                 "bar_interval": signal.get("bar_interval", "day"),
                 "breakeven_ratio": signal.get("breakeven_ratio", 0.4),
@@ -795,7 +798,7 @@ class BacktestEngine:
             else:
                 entry_price -= slippage
 
-            return {
+            pos_f = {
                 "entry_time": timestamp,
                 "symbol": signal.get("symbol", "NIFTY"),
                 "direction": signal.get("direction", "bullish"),
@@ -805,7 +808,10 @@ class BacktestEngine:
                 "quantity": signal.get("quantity", 1),
                 "strategy": signal.get("strategy", "default"),
                 "instrument_type": "futures",
+                "underlying_entry_price": bar["close"],
             }
+            pos_f.update(signal_meta)
+            return pos_f
 
     def _try_fill_pending(
         self,
@@ -886,7 +892,8 @@ class BacktestEngine:
         exit_price: float,
         timestamp: str,
         capital: float,
-        reason: str
+        reason: str,
+        current_underlying_price: float = None
     ) -> Tuple[float, BacktestTrade]:
         """Simulate closing a position with costs."""
         quantity = position["quantity"]
@@ -917,6 +924,14 @@ class BacktestEngine:
             net_pnl = gross_pnl - total_cost
             capital += net_pnl
 
+            underlying_entry = position.get("underlying_entry_price")
+            direction_correct = False
+            if underlying_entry is not None and current_underlying_price is not None:
+                if position["direction"] == "bullish" and current_underlying_price > underlying_entry:
+                    direction_correct = True
+                elif position["direction"] == "bearish" and current_underlying_price < underlying_entry:
+                    direction_correct = True
+
             trade = BacktestTrade(
                 entry_time=position["entry_time"],
                 exit_time=timestamp,
@@ -930,6 +945,7 @@ class BacktestEngine:
                 net_pnl=round(net_pnl, 2),
                 strategy=position["strategy"],
                 exit_reason=reason,
+                underlying_direction_correct=direction_correct,
                 signal_liqsweep=position.get("signal_liqsweep", False),
                 signal_fvg=position.get("signal_fvg", False),
                 signal_vp=position.get("signal_vp", False),
@@ -971,6 +987,14 @@ class BacktestEngine:
         net_pnl = gross_pnl - total_cost
         capital += net_pnl
 
+        underlying_entry = position.get("underlying_entry_price")
+        direction_correct = False
+        if underlying_entry is not None and current_underlying_price is not None:
+            if position["direction"] == "bullish" and current_underlying_price > underlying_entry:
+                direction_correct = True
+            elif position["direction"] == "bearish" and current_underlying_price < underlying_entry:
+                direction_correct = True
+
         trade = BacktestTrade(
             entry_time=position["entry_time"],
             exit_time=timestamp,
@@ -984,6 +1008,7 @@ class BacktestEngine:
             net_pnl=round(net_pnl, 2),
             strategy=position["strategy"],
             exit_reason=reason,
+            underlying_direction_correct=direction_correct,
             signal_liqsweep=position.get("signal_liqsweep", False),
             signal_fvg=position.get("signal_fvg", False),
             signal_vp=position.get("signal_vp", False),
@@ -1132,15 +1157,61 @@ class BacktestEngine:
             premium_low = max(premium_low, 0)
             premium_close = max(premium_close, 0)
 
-            # Check SL/target against premium, not index
-            # SL hit: premium drops to SL level
-            if sl > 0 and premium_low <= sl:
-                # Update position premium to SL level for P&L calculation
-                position["current_premium"] = sl
-                position["prev_close"] = bar["close"]
-                return True, sl, "stop_loss"
+            # Check raw index TARGET if provided
+            underlying_target = position.get("underlying_target", 0)
+            if underlying_target > 0:
+                direction = position.get("direction", "bullish")
+                hit_underlying_target = False
+                if direction == "bullish" and bar["high"] >= underlying_target:
+                    hit_underlying_target = True
+                elif direction == "bearish" and bar["low"] <= underlying_target:
+                    hit_underlying_target = True
 
-            # Target hit: premium rises to target level
+                if hit_underlying_target:
+                    position["current_premium"] = premium_high
+                    position["prev_close"] = bar["close"]
+                    return True, premium_high, "target"
+
+            # Check raw index SL if provided
+            underlying_sl = position.get("underlying_sl", 0)
+            if underlying_sl > 0:
+                direction = position.get("direction", "bullish")
+                hit_underlying = False
+                if direction == "bullish" and bar["low"] <= underlying_sl:
+                    hit_underlying = True
+                elif direction == "bearish" and bar["high"] >= underlying_sl:
+                    hit_underlying = True
+
+                if hit_underlying:
+                    position["current_premium"] = premium_low
+                    position["prev_close"] = bar["close"]
+                    return True, premium_low, "stop_loss_underlying"
+
+            # Parallel Premium SL Floor Check (3-Phase Conditional Floor)
+            if sl > 0:
+                is_premium_stop = False
+                phase = ""
+                if bars_held <= 3:
+                     # Phase 1: Total immunity to premium spread widening / IV crush
+                     is_premium_stop = False
+                elif bars_held <= 5:
+                     # Phase 2: Moderate buffer (allow spread to settle)
+                     buffered_sl = sl * 0.8
+                     if premium_low <= buffered_sl:
+                         is_premium_stop = True
+                         phase = "phase2"
+                else:
+                     # Phase 3: Total trust in options pricing
+                     if premium_low <= sl:
+                         is_premium_stop = True
+                         phase = "phase3"
+
+                if is_premium_stop:
+                    position["current_premium"] = sl
+                    position["prev_close"] = bar["close"]
+                    return True, sl, f"stop_loss_premium_{phase}"
+
+            # Fallback Premium Target Check (for older signal compatibility)
             if target > 0 and premium_high >= target:
                 position["current_premium"] = target
                 position["prev_close"] = bar["close"]

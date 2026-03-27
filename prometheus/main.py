@@ -3119,6 +3119,7 @@ class Prometheus:
             - vol_adaptive_trailing: bool (default False, intraday only)
         """
         overrides = param_overrides or {}
+        
 
         # Capture regime detector — always use per-bar detection (no look-ahead)
         regime_detector = self.regime_detector
@@ -4421,6 +4422,7 @@ class Prometheus:
         """
         # Extract regime_overrides if present in param_overrides (for tuning sweeps)
         overrides = param_overrides or {}
+        
         regime_overrides = overrides.get("regime_overrides", None)
         mr_min_score = overrides.get("mr_min_score", 2.5)
 
@@ -4500,6 +4502,19 @@ class Prometheus:
             dsq_hard=dsq_hard,
             dsq_min_scalar=dsq_min_scalar,
         )
+
+
+        print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
+        if param_overrides and param_overrides.get('apex'):
+            from prometheus.signals.apex_generator import ApexSignalGenerator
+            apex_gen = ApexSignalGenerator(symbol)
+            if 'data_slice' in locals() and data_slice is not None:
+                apex_gen.precompute(data_slice)
+            elif 'data_primary' in locals() and data_primary is not None:
+                apex_gen.precompute(data_primary)
+            def _mock_gen(data_so_far, current_oi=None):
+                return apex_gen.generate(data_so_far, current_oi)
+            signal_gen = _mock_gen
 
         result = engine.run(
             data=data_slice,
@@ -4595,6 +4610,7 @@ class Prometheus:
         Returns (BacktestResult, BacktestEngine).
         """
         overrides = param_overrides or {}
+        
 
         # Regime detection from daily data (intraday bars too short for regime)
         regime_state = self.regime_detector.detect(data_daily) if len(data_daily) >= 50 else None
@@ -4774,6 +4790,19 @@ class Prometheus:
         )
 
         warmup = 20 if bar_interval == "5minute" else 10
+
+        print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
+        if param_overrides and param_overrides.get('apex'):
+            from prometheus.signals.apex_generator import ApexSignalGenerator
+            apex_gen = ApexSignalGenerator(symbol)
+            if 'data_slice' in locals() and data_slice is not None:
+                apex_gen.precompute(data_slice)
+            elif 'data_primary' in locals() and data_primary is not None:
+                apex_gen.precompute(data_primary)
+            def _mock_gen(data_so_far, current_oi=None):
+                return apex_gen.generate(data_so_far, current_oi)
+            signal_gen = _mock_gen
+
         result = engine.run(
             data=data_slice,
             signal_generator=signal_gen,
@@ -4796,7 +4825,10 @@ class Prometheus:
             # Exit reason analysis
             if engine.trades:
                 reason_stats = {}
+                direction_correct_count = 0
                 for t in engine.trades:
+                    if getattr(t, 'underlying_direction_correct', False):
+                        direction_correct_count += 1
                     r = getattr(t, 'exit_reason', 'unknown')
                     if r not in reason_stats:
                         reason_stats[r] = {"count": 0, "wins": 0, "total_pnl": 0}
@@ -4804,6 +4836,11 @@ class Prometheus:
                     if t.net_pnl > 0:
                         reason_stats[r]["wins"] += 1
                     reason_stats[r]["total_pnl"] += t.net_pnl
+                print(f"\n--- Diagnostic: Underlying Direction Accuracy ---")
+                total_trades = len(engine.trades)
+                dir_acc = (direction_correct_count / total_trades) * 100 if total_trades > 0 else 0
+                print(f"  Underlying moved in signal direction (>0 pts) before exit: {direction_correct_count}/{total_trades} ({dir_acc:.1f}%)")
+                
                 print(f"\n--- Exit Reason Analysis ---")
                 for r, s in sorted(reason_stats.items(), key=lambda x: -x[1]["count"]):
                     wr = s["wins"] / s["count"] * 100 if s["count"] > 0 else 0
@@ -4847,6 +4884,7 @@ class Prometheus:
         dsq_hard: float = 0.60,
         dsq_min_scalar: float = 0.25,
         param_overrides: Optional[Dict] = None,
+        apex: bool = False,
         force_refresh: bool = False,
     ):
         """Run intraday backtest — completely separate from swing backtest."""
@@ -4858,8 +4896,8 @@ class Prometheus:
         logger.info(f"Starting INTRADAY backtest: {symbol} ({days} days, {bar_interval})" +
                      (" [PARRONDO]" if parrondo else ""))
 
-        # Cap days to yfinance limit for intraday (unless Angel One is available)
-        if days > 59 and not self.data.angelone:
+        # Cap days to yfinance limit for intraday (unless Angel One/CSV is available)
+        if days > 59 and not self.data.angelone and symbol != "NIFTY 50":
             logger.warning(f"yfinance limits intraday data to ~60 days. Capping {days} -> 59 days.")
             days = 59
 
@@ -4884,6 +4922,9 @@ class Prometheus:
         print(f" Session: 09:45-14:30 entries | 15:15 square-off")
         print(f"{'='*70}")
 
+        if apex:
+            param_overrides = param_overrides or {}
+            param_overrides["apex"] = True
         result, engine = self._run_intraday_backtest_on_slice(
             data_slice=data_intraday,
             data_daily=data_daily,
@@ -4974,6 +5015,9 @@ class Prometheus:
 
         # In-sample
         print(f"\n--- IN-SAMPLE (Train: {train_start} to {train_end}) ---")
+        if apex:
+            param_overrides = param_overrides or {}
+            param_overrides["apex"] = True
         result_is, engine_is = self._run_intraday_backtest_on_slice(
             data_slice=data_train,
             data_daily=data_daily,
@@ -5000,6 +5044,9 @@ class Prometheus:
 
         # Out-of-sample
         print(f"\n--- OUT-OF-SAMPLE (Test: {test_start} to {test_end}) ---")
+        if apex:
+            param_overrides = param_overrides or {}
+            param_overrides["apex"] = True
         result_oos, engine_oos = self._run_intraday_backtest_on_slice(
             data_slice=data_test,
             data_daily=data_daily,
@@ -5286,6 +5333,19 @@ class Prometheus:
         logger.info(f"Running backtest on {len(data_primary)} bars of {primary_interval} data..."
                      + (" [PARRONDO]" if parrondo else "")
                  + (" [RISK-OVERLAYS]" if (vol_target or dd_throttle or equity_curve_filter or half_capacity_mode or dsq_filter or equity_ma_sizing) else ""))
+
+
+        print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
+        if param_overrides and param_overrides.get('apex'):
+            from prometheus.signals.apex_generator import ApexSignalGenerator
+            apex_gen = ApexSignalGenerator(symbol)
+            if 'data_slice' in locals() and data_slice is not None:
+                apex_gen.precompute(data_slice)
+            elif 'data_primary' in locals() and data_primary is not None:
+                apex_gen.precompute(data_primary)
+            def _mock_gen(data_so_far, current_oi=None):
+                return apex_gen.generate(data_so_far, current_oi)
+            signal_gen = _mock_gen
 
         result = engine.run(
             data=data_primary,
@@ -7311,6 +7371,10 @@ def main():
         default=False,
         help="Raise signal quality thresholds: confluence 3.0/4.0, net edge 2.0, Kelly WR 0.35",
     )
+    parser.add_argument("--apex",
+        action="store_true",
+        default=False,
+    )
     parser.add_argument(
         "--intraday",
         action="store_true",
@@ -7428,7 +7492,7 @@ def main():
                 }
             prometheus.run_intraday_backtest(
                 symbol=args.symbol or "NIFTY 50",
-                days=min(args.days, 59),
+                days=args.days,
                 parrondo=args.parrondo,
                 dd_throttle=args.dd_throttle,
                 vol_target=args.vol_target,
@@ -7444,7 +7508,9 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
+                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
                 param_overrides=intraday_overrides if intraday_overrides else None,
+                apex=getattr(args, "apex", False),
                 force_refresh=args.force_refresh,
             )
         else:
@@ -7479,6 +7545,7 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
+                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
                 param_overrides=hq_overrides if hq_overrides else None,
                 force_refresh=args.force_refresh,
             )
@@ -7559,7 +7626,9 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
+                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
                 param_overrides=intraday_overrides if intraday_overrides else None,
+                apex=getattr(args, "apex", False),
                 force_refresh=args.force_refresh,
             )
         else:
@@ -7587,6 +7656,7 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
+                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
                 force_refresh=args.force_refresh,
             )
 
