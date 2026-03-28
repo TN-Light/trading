@@ -56,3 +56,9 @@ series_b*.csv
 series_b.txt
 sens_results.txt
 swing_verify_results.txt
+
+# Local Datasets and temp logs
+dataset/
+*.txt
+!requirements.txt
+*.pkl

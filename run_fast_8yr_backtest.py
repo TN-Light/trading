@@ -189,6 +189,41 @@ if __name__ == '__main__':
         print(f"   True Signal Vector Hit   : {direction_correct_count}/{total_trades}")
         print(f"   Accuracy ExpectancyEdge  : {dir_acc:.1f}%")
         print("\n   *(Data securely cached in /backtest_chunks/)*")
+        
+        # ---> GENERATE TRADITIONAL METRICS & MONTE CARLO <---
+        from prometheus.backtest.engine import BacktestEngine
+        
+        all_trades.sort(key=lambda t: pd.to_datetime(t.entry_time))
+        engine = BacktestEngine(initial_capital=15000)
+        engine.trades = all_trades
+        
+        cap = 15000
+        curve = [cap]
+        for t in all_trades:
+            cap += t.net_pnl
+            curve.append(cap)
+            
+        engine.equity_curve = curve
+        
+        start_dt = str(all_trades[0].entry_time) if all_trades else '2018-01-01'
+        end_dt = str(all_trades[-1].exit_time) if all_trades else '2026-03-27'
+        df_mock = pd.DataFrame({'timestamp': [start_dt, end_dt], 'close': [10000, 20000]})
+        
+        if hasattr(engine, '_generate_result'):
+            res = engine._generate_result('8_YEAR_APEX', df_mock, cap)
+        else:
+            res = engine._calculate_metrics('8_YEAR_APEX', df_mock, cap)
+            
+        print(res.summary())
+        
+        print("\n--- Monte Carlo Simulation (2,000 runs) ---")
+        mc = engine.monte_carlo_simulation(res, num_simulations=2000)
+        print(f"  Probability of profit: {mc.get('prob_profit', 0):.1f}%")
+        print(f"  Median final capital: Rs {mc.get('median_final_capital', 0):,.0f}")
+        print(f"  5th percentile (worst case): Rs {mc.get('p5_final_capital', 0):,.0f}")
+        print(f"  95th percentile (best case): Rs {mc.get('p95_final_capital', 0):,.0f}")
+        print(f"  Median max drawdown: {mc.get('median_max_drawdown', 0):.1f}%")
+        
     else:
         print("   No valid trades found mathematically across the entire timespan.")
     print("="*50)
