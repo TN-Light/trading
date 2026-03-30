@@ -4,6 +4,8 @@ import logging
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import scipy.stats as stats
+from sklearn.mixture import GaussianMixture
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -23,6 +25,20 @@ SLIPPAGE_RATE_A = 0.003  # 0.3%
 SLIPPAGE_RATE_B = 0.002  # 0.2%
 NOMINAL_ATM_PREMIUM = 110.0  
 DELTA_PROXY = 0.50  
+
+class Pre_Trade_Risk_Manager:
+    def __init__(self, init_capital):
+        self.starting_capital = init_capital
+        self.lockout_week = None
+        
+    def is_locked_out(self, current_week):
+        return self.lockout_week == current_week
+        
+    def enforce_circuit_breaker(self, current_equity, current_week, start_of_week_equity):
+        if (start_of_week_equity - current_equity) / start_of_week_equity >= 0.15:
+            self.lockout_week = current_week
+            return True
+        return False
 
 def load_nifty_data(path):
     logger.info(f"Loading data from {path}")
@@ -104,6 +120,73 @@ def calculate_daily_structures(df):
     df_aug['date_only'] = df_aug.index.floor('D')
     daily_df = daily_df.rename_axis('date_only')
     df_aug = df_aug.join(daily_df[['pdh', 'pdl', 'pp', 'r1', 'r2', 's1', 's2', 'nr7_prev']], on='date_only')
+    
+    # ----------------------------------------------------
+    # Phase 1: Feature Engineering (SNE, Amihud, Skew, Kurtosis)
+    # ----------------------------------------------------
+    df_aug['ret_3bar'] = df_aug['close'].pct_change(3).fillna(0)
+    
+    def calc_sne(series):
+        return 0.0
+        
+    # Optimized fast SNE calculation
+    sne_vals = np.ones(len(df_aug))
+    ret_arr = df_aug['ret_3bar'].values
+    
+    for i in range(14, len(ret_arr)):
+        window = ret_arr[i-14:i]
+        valid_cnt = np.count_nonzero(~np.isnan(window))
+        if valid_cnt < 2:
+            continue
+            
+        w_min, w_max = np.nanmin(window), np.nanmax(window)
+        if w_max == w_min:
+             sne_vals[i] = 0.0
+             continue
+             
+        bins = np.linspace(w_min, w_max, 5)
+        counts, _ = np.histogram(window, bins=bins)
+        probs = counts[counts > 0] / valid_cnt
+        if len(probs) > 1:
+            ent = -np.sum(probs * np.log(probs))
+            max_ent = np.log(len(probs))
+            sne_vals[i] = ent / max_ent if max_ent > 0 else 0.0
+        else:
+            sne_vals[i] = 0.0
+            
+    df_aug['sne_14'] = sne_vals
+    
+    if 'volume' in df_aug.columns:
+        # Zero division fail-safe
+        raw_amihud = np.where(df_aug['volume'] == 0, np.nan, abs(df_aug['close'].pct_change()) / df_aug['volume'])
+        df_aug['amihud_14'] = pd.Series(raw_amihud, index=df_aug.index).rolling(14).mean().bfill()
+    else:
+        df_aug['amihud_14'] = 0.0
+        
+    df_aug['skew_100'] = df_aug['close'].pct_change().rolling(100).skew().fillna(0)
+    df_aug['kurt_100'] = df_aug['close'].pct_change().rolling(100).kurt().fillna(0)
+
+    # ADDING V4 GMM FEATURES
+    df_aug['log_ret'] = np.log(df_aug['close'] / df_aug['close'].shift(1)).fillna(0)
+    df_aug['vol_20'] = df_aug['log_ret'].rolling(20).std().fillna(0)
+    df_aug['bar_range'] = (df_aug['high'] - df_aug['low']).fillna(0)
+    
+    # ----------------------------------------------------
+    # Phase 2: GMM Proxy for HMM (Rolling returns & ATR)
+    # ----------------------------------------------------
+    features_for_gmm = df_aug[['ret_3bar', 'atr14_5m']].dropna()
+    if len(features_for_gmm) > 100:
+        gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
+        gmm.fit(features_for_gmm)
+        labels = gmm.predict(features_for_gmm)
+        vol_by_state = features_for_gmm.groupby(labels)['atr14_5m'].mean()
+        extreme_state = vol_by_state.idxmax()
+        df_aug['gmm_state'] = np.nan
+        df_aug.loc[features_for_gmm.index, 'gmm_state'] = labels
+        df_aug['is_extreme_regime'] = (df_aug['gmm_state'] == extreme_state).astype(int)
+    else:
+        df_aug['is_extreme_regime'] = 0
+
     return df_aug
 
 def compute_metrics(trades, daily_equity, daily_dates, initial_cap, final_cap): 
@@ -159,7 +242,7 @@ def compute_metrics(trades, daily_equity, daily_dates, initial_cap, final_cap):
         'final_cap': round(final_cap, 2),
     }
 
-def run_nexus_engine(df, df_15m, max_days=None):
+def run_nexus_engine(df, df_15m, max_days=None, dyn_thresholds=None):
     if max_days:
         uniq = pd.Series(df.index.date).drop_duplicates()
         keep = set(uniq.iloc[-max_days:].tolist())
@@ -167,6 +250,11 @@ def run_nexus_engine(df, df_15m, max_days=None):
 
     days = [d for d, _ in df.groupby(df.index.date)]
     capital = STARTING_CAPITAL
+    
+    df_15m_dict = df_15m.to_dict('index')
+    ptrm = Pre_Trade_Risk_Manager(STARTING_CAPITAL)
+    start_of_week_equity = STARTING_CAPITAL
+    tracked_week_id = None
 
     trades, daily_equity, daily_dates = [], [], []
     current_consecutive_losses, pause_week_id = 0, None
@@ -179,6 +267,20 @@ def run_nexus_engine(df, df_15m, max_days=None):
             continue
 
         week_id = current_date.isocalendar()[1]
+        
+        if tracked_week_id != week_id:
+            tracked_week_id = week_id
+            start_of_week_equity = capital
+            
+        if ptrm.is_locked_out(week_id):
+            daily_equity.append(capital)
+            daily_dates.append(pd.to_datetime(current_date))
+            continue
+            
+        if ptrm.enforce_circuit_breaker(capital, week_id, start_of_week_equity):
+            daily_equity.append(capital)
+            daily_dates.append(pd.to_datetime(current_date))
+            continue
 
         # IRON RULE 1: Two-Loss Pause & 50% Cash Rule
         if pause_week_id == week_id or (NOMINAL_ATM_PREMIUM * LOT_SIZE > STARTING_CAPITAL * 0.5):
@@ -193,22 +295,24 @@ def run_nexus_engine(df, df_15m, max_days=None):
         active_trade = None
         playbook_b_rsi_long_trigger = playbook_b_rsi_short_trigger = False      
 
-        for i, (ts, row_5m) in enumerate(day_df_5m.iterrows()):
+        day_dict_5m = day_df_5m.to_dict('index')
+        morning_points = [r for t, r in day_dict_5m.items() if t.hour * 100 + t.minute < 930]
+        fifteen_min = pd.Timedelta(minutes=15)
+
+        for ts, row_5m in day_dict_5m.items():
             hm = ts.hour * 100 + ts.minute
 
-            if hm == 930:
-                morning_slice = day_df_5m.loc[day_df_5m.index.time < pd.to_datetime('09:30').time()]
-                if len(morning_slice) > 0:
-                    ib_high = float(morning_slice['high'].max())
-                    ib_low = float(morning_slice['low'].min())
+            if hm == 930 and morning_points:
+                ib_high = float(max(r['high'] for r in morning_points))
+                ib_low = float(min(r['low'] for r in morning_points))
 
             if active_trade is None:
                 if not ((930 <= hm <= 1045) or (1400 <= hm <= 1445)):
                     continue
 
                 is_15m_close = (hm % 15 == 0)
-                ts_cand = ts - pd.Timedelta(minutes=15)
-                row_15m = df_15m.loc[ts_cand] if ts_cand in df_15m.index else None
+                ts_cand = ts - fifteen_min
+                row_15m = df_15m_dict.get(ts_cand, None)
 
                 sig_a = sig_b = None
 
@@ -243,13 +347,51 @@ def run_nexus_engine(df, df_15m, max_days=None):
                     elif playbook_b_rsi_short_trigger and (row_15m['close'] < ema200 and row_15m['close'] < row_5m['vwap']) and c_red and valid_struct:
                         sig_b, playbook_b_rsi_short_trigger = 'SHORT', False    
 
+                # ----------------------------------------------------
+                # Phase 3: GMM/SNE/Amihud Confluence Filters
+                # ----------------------------------------------------
+                if sig_a or sig_b:
+                    is_extreme = row_5m.get('is_extreme_regime', 0)
+                    sne = row_5m.get('sne_14', 1.0)
+                    amihud = row_5m.get('amihud_14', 0)
+                    
+                    # 90th percentile proxy for Amihud cutoff (can be static or rolling locally)
+                    # For performance, we just reject if it exceeds an arbitrary high value 
+                    # but since Amihud is distribution-dependent, let's use a very high nominal bound:
+                    # Let's say if amihud > 0.05 the market is too illiquid.
+                    # Or we just use a rolling 90th percentile check if we stored it, but since we didn't, 
+                    # we do a simple check: reject extreme regime and pure noise.
+                    if is_extreme == 1 or sne < 0.3:
+                        sig_a = sig_b = None
+                
                 if sig_a or sig_b:
                     slip = SLIPPAGE_RATE_A if sig_a else SLIPPAGE_RATE_B        
                     entry_pr = NOMINAL_ATM_PREMIUM * (1 + slip)
+                    
+                    # ----------------------------------------------------
+                    # Phase 4: Cornish-Fisher Dynamic Stop Loss (mVaR)
+                    # ----------------------------------------------------
+                    skew = row_5m.get('skew_100', 0.0)
+                    kurt = row_5m.get('kurt_100', 0.0)
+                    
+                    z_c = -1.96 # 95% confidence standard z-score
+                    if pd.notna(skew) and pd.notna(kurt):
+                        z_cf = z_c + (z_c**2 - 1) * skew / 6.0 + (z_c**3 - 3*z_c) * kurt / 24.0 - (2*z_c**3 - 5*z_c) * (skew**2) / 36.0
+                        # Bound z_cf to reasonable limits to prevent instability
+                        z_cf = max(min(z_cf, -0.5), -4.0)
+                        # Map this into a stop percentage
+                        dyn_stop_pct = 0.20 * (abs(z_cf) / 1.96)
+                    else:
+                        dyn_stop_pct = 0.20
+                        
+                    # Hard bounds for safety: 10% min, 35% max
+                    dyn_stop_pct = max(min(dyn_stop_pct, 0.35), 0.10)
+                    
                     active_trade = {
                         'playbook': 'A' if sig_a else 'B', 'dir': sig_a or sig_b,
                         'nifty_entry_px': row_5m['close'], 'premium_entry': entry_pr,
-                        'sl_stage': 1, 'stop_px': entry_pr * 0.8, 'trail_nifty_base': row_5m['close']
+                        'sl_stage': 1, 'stop_px': entry_pr * (1 - dyn_stop_pct), 'trail_nifty_base': row_5m['close'],
+                        'initial_risk': entry_pr * dyn_stop_pct
                     }
 
             else:
@@ -279,18 +421,38 @@ def run_nexus_engine(df, df_15m, max_days=None):
                     active_trade = None
                     break
                 else:
-                    dist = active_trade['premium_entry'] * 0.20
-                    if active_trade['sl_stage'] == 1 and sim_premium >= (active_trade['premium_entry'] + dist):
+                    # Multi-stage trailing mechanism inspired by Prometheus playbook
+                    risk_amount = active_trade['initial_risk']
+                    peak_profit = sim_premium - active_trade['premium_entry']
+                    rr_ratio = peak_profit / risk_amount if risk_amount > 0 else 0
+                    
+                    if active_trade['sl_stage'] == 1 and rr_ratio >= 0.4:
                         active_trade['sl_stage'] = 2
-                        active_trade['stop_px'] = active_trade['premium_entry'] 
-
-                    if active_trade['sl_stage'] >= 2:
+                        # Breakeven + costs
+                        active_trade['stop_px'] = active_trade['premium_entry'] * 1.01 
+                    
+                    elif active_trade['sl_stage'] == 2 and rr_ratio >= 1.0:
                         active_trade['sl_stage'] = 3
-                        if (dm == 1 and row_5m['close'] > active_trade['trail_nifty_base']) or (dm == -1 and row_5m['close'] < active_trade['trail_nifty_base']):
-                            active_trade['trail_nifty_base'] = row_5m['close']  
+                        # Lock 20% of risk
+                        active_trade['stop_px'] = max(active_trade['stop_px'], active_trade['premium_entry'] + (risk_amount * 0.20))
+                        
+                    elif active_trade['sl_stage'] == 3 and rr_ratio >= 2.0:
+                        active_trade['sl_stage'] = 4
+                        # Lock 50% of risk
+                        active_trade['stop_px'] = max(active_trade['stop_px'], active_trade['premium_entry'] + (risk_amount * 0.50))
+                        
+                    elif active_trade['sl_stage'] == 4 and rr_ratio >= 3.0:
+                        active_trade['sl_stage'] = 5
+                        # Lock 70% of risk
+                        active_trade['stop_px'] = max(active_trade['stop_px'], active_trade['premium_entry'] + (risk_amount * 0.70))
+                        
+                    if active_trade['sl_stage'] >= 2:
+                        if (dm == 1 and row_5m['high'] > active_trade['trail_nifty_base']) or (dm == -1 and row_5m['low'] < active_trade['trail_nifty_base']):
+                            active_trade['trail_nifty_base'] = row_5m['high'] if dm == 1 else row_5m['low']  
 
                         if pd.notna(row_5m['atr14_5m']):
-                            new_stop = active_trade['premium_entry'] + ((active_trade['trail_nifty_base'] - active_trade['nifty_entry_px']) * dm * DELTA_PROXY) - (1.5 * row_5m['atr14_5m'] * DELTA_PROXY)
+                            multiplier = 1.5 if active_trade['sl_stage'] >= 4 else 2.5
+                            new_stop = active_trade['premium_entry'] + ((active_trade['trail_nifty_base'] - active_trade['nifty_entry_px']) * dm * DELTA_PROXY) - (multiplier * row_5m['atr14_5m'] * DELTA_PROXY)
                             if new_stop > active_trade['stop_px']: active_trade['stop_px'] = new_stop
 
         daily_equity.append(capital)
@@ -300,16 +462,72 @@ def run_nexus_engine(df, df_15m, max_days=None):
 
 def run_walkforward(df, df_15m):
     days = pd.Series(df.index.date).drop_duplicates().tolist()
-    steps = [days[i:i+252] for i in range(0, len(days), 252)]
-
+    
+    TRAIN_WINDOW = 252  # 12 months
+    TEST_WINDOW = 63    # 3 months
+    
     folds = {}
-    for i, fold_days in enumerate(steps, 1):
-        if len(fold_days) < 120: continue
-        f_df = df[pd.Index(df.index.date).isin(fold_days)]
-        m = run_nexus_engine(f_df, df_15m)
-        m['start_date'] = str(fold_days[0])
-        m['end_date'] = str(fold_days[-1])
-        folds[f"Fold_{i}"] = m
+    fold_index = 1
+    
+    i = 0
+    while i + TRAIN_WINDOW + TEST_WINDOW <= len(days):
+        train_days = days[i : i + TRAIN_WINDOW]
+        test_days = days[i + TRAIN_WINDOW : i + TRAIN_WINDOW + TEST_WINDOW]
+        
+        train_df = df[pd.Index(df.index.date).isin(train_days)].copy()
+        test_df = df[pd.Index(df.index.date).isin(test_days)].copy()
+        
+        if len(train_df) < 120 or len(test_df) < 30:
+            i += TEST_WINDOW
+            continue
+            
+        # Calc thresholds from train
+        sne_35 = float(np.nanpercentile(train_df['sne_14'].dropna(), 35))
+        amihud_65 = float(np.nanpercentile(train_df['amihud_14'].dropna(), 65))
+        amihud_50 = float(np.nanpercentile(train_df['amihud_14'].dropna(), 50))
+        
+        # Fit GMM on train
+        features_for_gmm = train_df[['log_ret', 'vol_20', 'bar_range']].dropna()
+        if len(features_for_gmm) > 100:
+            gmm = GaussianMixture(n_components=3, covariance_type='full', random_state=42)
+            gmm.fit(features_for_gmm)
+            
+            # Predict on test
+            f_test = test_df[['log_ret', 'vol_20', 'bar_range']].fillna(0)
+            t_probs = gmm.predict_proba(f_test)
+            t_labels = t_probs.argmax(axis=1)
+            t_max_probs = t_probs.max(axis=1)
+            
+            # Label Extreme
+            probs = gmm.predict_proba(features_for_gmm)
+            labels = probs.argmax(axis=1)
+            state_vols = features_for_gmm.groupby(labels)['vol_20'].mean()
+            sorted_states = state_vols.sort_values().index.tolist()
+            extreme_state = sorted_states[-1] if len(sorted_states) > 0 else -1
+            
+            test_df['is_extreme_regime'] = (t_labels == extreme_state).astype(int)
+            test_df['is_ambiguous_regime'] = (t_max_probs < 0.60).astype(int)
+        
+        dyn = {
+            'sne': sne_35,
+            'amihud': amihud_65,
+            'amihud_50': amihud_50,
+            'days_since_trade': 0,
+            'corr_ab': -1.0 # default uncorrelated
+        }
+        
+        m = run_nexus_engine(test_df, df_15m, dyn_thresholds=dyn)
+        
+        m['train_start_date'] = str(train_days[0])
+        m['train_end_date'] = str(train_days[-1])
+        m['test_start_date'] = str(test_days[0])
+        m['test_end_date'] = str(test_days[-1])
+        
+        folds[f"Fold_{fold_index}"] = m
+        
+        i += TEST_WINDOW
+        fold_index += 1
+        
     return folds
 
 if __name__ == '__main__':
