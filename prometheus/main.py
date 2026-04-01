@@ -22,6 +22,7 @@ Usage:
 
 import sys
 import os
+import csv
 import time
 import signal as sig
 import argparse
@@ -196,6 +197,11 @@ class Prometheus:
         # Multi-account paper trading (initialized on demand by --multi-account)
         self.multi_account = None
 
+        # Forward-validation artifact for Thursday Gamma Ambush exits.
+        self.gamma_ambush_log_file = str(
+            PROJECT_ROOT.parent / "reports" / "validation" / "gamma_ambush_forward.csv"
+        )
+
         # Daily intraday guardrail audit (included in end-of-day summary)
         self._intraday_guardrail_audit = {
             "date": datetime.now().strftime("%Y-%m-%d"),
@@ -312,6 +318,31 @@ class Prometheus:
         """Dispatch capital-routed strike candidates to each account stack."""
         if self.multi_account is None:
             return
+
+        # Gamma Ambush risk regime guardrails for expiry Thursday sessions.
+        if bool(refined_signal.get("is_expiry_thursday", False)):
+            try:
+                vix_now = float(self.data.get_vix() or 0.0)
+            except Exception:
+                vix_now = 0.0
+
+            if vix_now > 30.0:
+                msg = (
+                    "Gamma Ambush blocked: VIX above 30.0 (crisis regime). "
+                    "No new entries."
+                )
+                logger.warning(msg)
+                self.telegram.send_message(f"⚠️ <b>GAMMA AMBUSH BLOCKED</b>\n{msg}")
+                return
+
+            if vix_now > 25.0:
+                msg = (
+                    "Gamma Ambush options blocked: VIX above 25.0. "
+                    "ETF-only session routing required."
+                )
+                logger.info(msg)
+                self.telegram.send_message(f"ℹ️ <b>GAMMA AMBUSH FILTER</b>\n{msg}")
+                return
 
         # Sync primary broker's price feed to all multi-account traders
         if isinstance(self.broker, PaperTrader) and self.broker._price_feed:
@@ -1566,6 +1597,127 @@ class Prometheus:
         )
         self.position_monitor.start()
 
+    def _lookup_spot_close_for_trade_date(self, symbol: str, trade_date: date) -> Optional[float]:
+        """Resolve best available underlying close for a trade date.
+
+        Preference order:
+        1) Daily close for trade_date
+        2) Last available intraday close on trade_date
+        """
+        try:
+            daily = self.data.fetch_historical(symbol, days=15, interval="day")
+            if daily is not None and not daily.empty and "close" in daily.columns:
+                ts_col = "timestamp" if "timestamp" in daily.columns else None
+                if ts_col:
+                    ts = pd.to_datetime(daily[ts_col], errors="coerce")
+                    mask = ts.dt.date == trade_date
+                    if mask.any():
+                        return float(daily.loc[mask, "close"].iloc[-1])
+        except Exception:
+            pass
+
+        try:
+            intra = self.data.fetch_historical(symbol, days=5, interval="5minute")
+            if intra is not None and not intra.empty and "close" in intra.columns:
+                ts_col = "timestamp" if "timestamp" in intra.columns else None
+                if ts_col:
+                    ts = pd.to_datetime(intra[ts_col], errors="coerce")
+                    mask = ts.dt.date == trade_date
+                    if mask.any():
+                        return float(intra.loc[mask, "close"].iloc[-1])
+        except Exception:
+            pass
+
+        return None
+
+    def _log_gamma_ambush_exit(
+        self,
+        managed,
+        exit_price: float,
+        reason: str,
+        realized_pnl: Optional[float],
+        account_label: str = "primary",
+    ):
+        """Write forward-validation rows for expiry-Thursday options exits."""
+        if managed is None:
+            return
+        if not bool(getattr(managed, "is_expiry_thursday", False)):
+            return
+
+        try:
+            entry_ts = pd.to_datetime(getattr(managed, "entry_time", ""), errors="coerce")
+            trade_date = entry_ts.date() if not pd.isna(entry_ts) else datetime.now().date()
+        except Exception:
+            trade_date = datetime.now().date()
+
+        symbol = getattr(managed, "symbol", "NIFTY 50") or "NIFTY 50"
+        strike = float(getattr(managed, "strike", 0.0) or 0.0)
+        option_type = str(getattr(managed, "option_type", "") or "").upper()
+        entry_premium = float(getattr(managed, "entry_premium", 0.0) or 0.0)
+        lot_size = int(getattr(managed, "lot_size", 0) or 0)
+        lots = int(getattr(managed, "lots", 0) or 0)
+        if lot_size <= 0:
+            lot_size = get_lot_size(symbol)
+        if lots <= 0:
+            try:
+                if getattr(managed, "entry_orders", None):
+                    qty = int(managed.entry_orders[0].filled_quantity or 0)
+                    lots = max(1, qty // max(lot_size, 1))
+                else:
+                    lots = 1
+            except Exception:
+                lots = 1
+
+        spot_close = self._lookup_spot_close_for_trade_date(symbol, trade_date)
+        intrinsic_close = None
+        simulated_0dte_pnl = None
+        if spot_close is not None and strike > 0 and option_type in ("CE", "PE"):
+            if option_type == "CE":
+                intrinsic_close = max(spot_close - strike, 0.0)
+            else:
+                intrinsic_close = max(strike - spot_close, 0.0)
+            simulated_0dte_pnl = (intrinsic_close - entry_premium) * lot_size * lots
+
+        log_path = Path(self.gamma_ambush_log_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        new_file = not log_path.exists()
+
+        with log_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if new_file:
+                writer.writerow([
+                    "date", "entry_time", "account", "symbol", "strategy", "direction",
+                    "strike", "option_type", "entry_premium", "lot_size", "lots", "lot_cost",
+                    "expiry", "dte_at_entry", "is_monthly_expiry", "bar_timestamp",
+                    "exit_premium", "exit_reason", "realized_pnl", "spot_close",
+                    "intrinsic_at_close", "simulated_0dte_pnl",
+                ])
+
+            writer.writerow([
+                trade_date.isoformat(),
+                getattr(managed, "entry_time", ""),
+                account_label,
+                symbol,
+                getattr(managed, "strategy", ""),
+                getattr(managed, "direction", ""),
+                int(round(strike)) if strike > 0 else "",
+                option_type,
+                round(entry_premium, 2),
+                lot_size,
+                lots,
+                round(float(getattr(managed, "lot_cost", entry_premium * lot_size) or 0.0), 2),
+                getattr(managed, "expiry_date", ""),
+                int(getattr(managed, "dte_at_entry", -1) or -1),
+                int(bool(getattr(managed, "is_monthly_expiry", False))),
+                getattr(managed, "bar_timestamp", ""),
+                round(float(exit_price or 0.0), 2),
+                reason,
+                "" if realized_pnl is None else round(float(realized_pnl), 2),
+                "" if spot_close is None else round(float(spot_close), 2),
+                "" if intrinsic_close is None else round(float(intrinsic_close), 2),
+                "" if simulated_0dte_pnl is None else round(float(simulated_0dte_pnl), 2),
+            ])
+
     def _handle_position_exit(self, position_id: str, exit_price: float, reason: str):
         """Callback when PositionMonitor triggers an exit."""
         # Check if this is a multi-account position
@@ -1576,17 +1728,20 @@ class Prometheus:
             if state:
                 ma_label = getattr(state, "_multi_account_label", None)
 
+        managed_snapshot = None
         pnl = None
         if ma_label and self.multi_account:
             # Route exit to the correct sub-account stack
             stack = self.multi_account.get_stack(ma_label)
             if stack:
+                managed_snapshot = stack.order_manager.managed_positions.get(position_id)
                 pnl = stack.order_manager.close_position(position_id, reason)
                 logger.info(f"[{ma_label}] Position {position_id} closed ({reason}): P&L Rs {pnl if pnl is not None else 0:+,.0f}")
             else:
                 logger.warning(f"Multi-account stack '{ma_label}' not found for {position_id}")
         else:
             # Primary account exit
+            managed_snapshot = self.order_manager.managed_positions.get(position_id)
             pnl = self.order_manager.close_position(position_id, reason)
 
         if self.position_monitor:
@@ -1595,6 +1750,15 @@ class Prometheus:
 
         # Persist equity state for crash recovery
         self._persist_equity_state()
+
+        # Forward-validation artifact for Thursday Gamma Ambush trades.
+        self._log_gamma_ambush_exit(
+            managed_snapshot,
+            exit_price=exit_price,
+            reason=reason,
+            realized_pnl=pnl,
+            account_label=ma_label or "primary",
+        )
 
         reason_labels = {
             "stop_loss": "SL Hit",

@@ -43,6 +43,18 @@ class ManagedPosition:
     sl_order_id: str = ""
     max_bars: int = 7
     breakeven_ratio: float = 0.6
+    strike: float = 0.0
+    option_type: str = ""
+    expiry_date: str = ""
+    lot_size: int = 0
+    lots: int = 0
+    lot_cost: float = 0.0
+    dte_at_entry: int = -1
+    is_expiry_day: bool = False
+    is_expiry_thursday: bool = False
+    is_monthly_expiry: bool = False
+    spot_at_signal: float = 0.0
+    bar_timestamp: str = ""
 
 
 class OrderManager:
@@ -239,6 +251,24 @@ class OrderManager:
         # Populate live trailing stop fields
         managed.tradingsymbol = tradingsymbol
         managed.entry_premium = entry_order.average_price
+        managed.strike = float(signal.get("strike", strike) or 0)
+        managed.option_type = signal.get("option_type", option_type)
+        managed.expiry_date = str(signal.get("option_expiry_date") or signal.get("expiry", ""))
+        managed.lot_size = int(signal.get("lot_size", lot_size) or lot_size)
+        managed.lots = int(signal.get("lots", lots) or lots)
+        managed.lot_cost = float(signal.get("lot_cost", managed.entry_premium * managed.lot_size) or 0.0)
+        try:
+            managed.dte_at_entry = int(signal.get("dte", signal.get("days_to_expiry", -1)))
+        except Exception:
+            managed.dte_at_entry = -1
+        managed.is_expiry_day = bool(signal.get("is_expiry_day", False))
+        managed.is_expiry_thursday = bool(signal.get("is_expiry_thursday", False))
+        managed.is_monthly_expiry = bool(signal.get("is_monthly_expiry", False))
+        try:
+            managed.spot_at_signal = float(signal.get("spot_at_signal", signal.get("spot_price", 0.0)) or 0.0)
+        except Exception:
+            managed.spot_at_signal = 0.0
+        managed.bar_timestamp = str(signal.get("bar_timestamp", ""))
         if managed.exit_orders:
             managed.sl_order_id = managed.exit_orders[0].order_id
 

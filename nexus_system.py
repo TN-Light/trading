@@ -383,10 +383,10 @@ def run_nexus_engine(df, df_15m, max_days=None, dyn_thresholds=None):
                         dyn_stop_pct = 0.20 * (abs(z_cf) / 1.96)
                     else:
                         dyn_stop_pct = 0.20
-                        
-                    # Hard bounds for safety: 10% min, 35% max
-                    dyn_stop_pct = max(min(dyn_stop_pct, 0.35), 0.10)
-                    
+
+                    # Hard bounds for safety: 15% min, 45% max
+                    dyn_stop_pct = max(min(dyn_stop_pct, 0.45), 0.15)
+
                     active_trade = {
                         'playbook': 'A' if sig_a else 'B', 'dir': sig_a or sig_b,
                         'nifty_entry_px': row_5m['close'], 'premium_entry': entry_pr,
@@ -426,22 +426,22 @@ def run_nexus_engine(df, df_15m, max_days=None, dyn_thresholds=None):
                     peak_profit = sim_premium - active_trade['premium_entry']
                     rr_ratio = peak_profit / risk_amount if risk_amount > 0 else 0
                     
-                    if active_trade['sl_stage'] == 1 and rr_ratio >= 0.4:
+if active_trade['sl_stage'] == 1 and rr_ratio >= 1.2:
                         active_trade['sl_stage'] = 2
                         # Breakeven + costs
                         active_trade['stop_px'] = active_trade['premium_entry'] * 1.01 
-                    
-                    elif active_trade['sl_stage'] == 2 and rr_ratio >= 1.0:
+
+                    elif active_trade['sl_stage'] == 2 and rr_ratio >= 2.0:
                         active_trade['sl_stage'] = 3
                         # Lock 20% of risk
                         active_trade['stop_px'] = max(active_trade['stop_px'], active_trade['premium_entry'] + (risk_amount * 0.20))
-                        
-                    elif active_trade['sl_stage'] == 3 and rr_ratio >= 2.0:
+
+                    elif active_trade['sl_stage'] == 3 and rr_ratio >= 3.0:
                         active_trade['sl_stage'] = 4
                         # Lock 50% of risk
                         active_trade['stop_px'] = max(active_trade['stop_px'], active_trade['premium_entry'] + (risk_amount * 0.50))
-                        
-                    elif active_trade['sl_stage'] == 4 and rr_ratio >= 3.0:
+
+                    elif active_trade['sl_stage'] == 4 and rr_ratio >= 4.0:
                         active_trade['sl_stage'] = 5
                         # Lock 70% of risk
                         active_trade['stop_px'] = max(active_trade['stop_px'], active_trade['premium_entry'] + (risk_amount * 0.70))
@@ -451,7 +451,7 @@ def run_nexus_engine(df, df_15m, max_days=None, dyn_thresholds=None):
                             active_trade['trail_nifty_base'] = row_5m['high'] if dm == 1 else row_5m['low']  
 
                         if pd.notna(row_5m['atr14_5m']):
-                            multiplier = 1.5 if active_trade['sl_stage'] >= 4 else 2.5
+                            multiplier = 2.5 if active_trade['sl_stage'] >= 4 else 3.5
                             new_stop = active_trade['premium_entry'] + ((active_trade['trail_nifty_base'] - active_trade['nifty_entry_px']) * dm * DELTA_PROXY) - (multiplier * row_5m['atr14_5m'] * DELTA_PROXY)
                             if new_stop > active_trade['stop_px']: active_trade['stop_px'] = new_stop
 

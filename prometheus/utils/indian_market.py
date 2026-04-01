@@ -24,10 +24,10 @@ PRE_OPEN_END = time(9, 8)
 # Lot Sizes (updated periodically by NSE — keep current)
 # ---------------------------------------------------------------------------
 LOT_SIZES = {
-    "NIFTY 50": 25,
+    "NIFTY 50": 65,  # 2026 revision
     "NIFTY BANK": 15,
     "NIFTY FIN SERVICE": 25,
-    "NIFTY": 25,
+    "NIFTY": 65,     # 2026 revision
     "BANKNIFTY": 15,
     "FINNIFTY": 25,
     "SENSEX": 10,
@@ -67,12 +67,22 @@ STRIKE_INTERVALS = {
 # Weekly Expiry Days
 # ---------------------------------------------------------------------------
 WEEKLY_EXPIRY_DAYS = {
-    "NIFTY 50": "Thursday",       # NIFTY weekly on Thursday
-    "NIFTY BANK": "Wednesday",    # BANKNIFTY weekly on Wednesday
-    "NIFTY FIN SERVICE": "Tuesday",  # FINNIFTY weekly on Tuesday
+    "NIFTY 50": "Thursday",       # Legacy default; date-aware override applied below
+    "NIFTY BANK": "Wednesday",    # Legacy default; date-aware override applied below
+    "NIFTY FIN SERVICE": "Tuesday",  # Legacy/default
+    "SENSEX": "Thursday",         # BSE index expiry (SEBI split)
     "NIFTY": "Thursday",
     "BANKNIFTY": "Wednesday",
     "FINNIFTY": "Tuesday",
+}
+
+# NSE moved index and stock F&O expiries to Tuesday effective Sep 1, 2025.
+NSE_TUESDAY_EXPIRY_CUTOVER = date(2025, 9, 1)
+
+# BSE derivatives keep Thursday expiry under the split schedule.
+BSE_THURSDAY_EXPIRY_SYMBOLS = {
+    "SENSEX",
+    "BANKEX",
 }
 
 # ---------------------------------------------------------------------------
@@ -102,7 +112,6 @@ NSE_HOLIDAYS_2026 = [
     date(2026, 3, 3),    # Holi
     date(2026, 3, 20),   # Id-Ul-Fitr
     date(2026, 3, 26),   # Added manually: Today's Holiday
-    date(2026, 3, 30),   # Shri Ram Navami
     date(2026, 4, 3),    # Good Friday
     date(2026, 4, 14),   # Dr. Ambedkar Jayanti
     date(2026, 5, 1),    # Maharashtra Day
@@ -183,7 +192,7 @@ def get_expiry_date(symbol: str, from_date: Optional[date] = None) -> date:
     if from_date is None:
         from_date = datetime.now(IST).date()
 
-    expiry_day_name = WEEKLY_EXPIRY_DAYS.get(symbol, "Thursday")
+    expiry_day_name = _resolve_weekly_expiry_day_name(symbol, from_date)
     day_map = {
         "Monday": 0, "Tuesday": 1, "Wednesday": 2,
         "Thursday": 3, "Friday": 4
@@ -250,8 +259,8 @@ def minutes_to_close(dt: Optional[datetime] = None) -> int:
     return int(delta.total_seconds() / 60)
 
 
-def get_monthly_expiry(year: int, month: int) -> date:
-    """Get the last Thursday of a month (monthly F&O expiry)."""
+def get_monthly_expiry(year: int, month: int, weekday_name: str = "Thursday") -> date:
+    """Get the last weekday expiry of a month (holiday-adjusted)."""
     # Start from end of month
     if month == 12:
         next_month_first = date(year + 1, 1, 1)
@@ -260,8 +269,17 @@ def get_monthly_expiry(year: int, month: int) -> date:
 
     last_day = next_month_first - timedelta(days=1)
 
-    # Find last Thursday
-    while last_day.weekday() != 3:  # 3 = Thursday
+    day_map = {
+        "Monday": 0,
+        "Tuesday": 1,
+        "Wednesday": 2,
+        "Thursday": 3,
+        "Friday": 4,
+    }
+    target_weekday = day_map.get(weekday_name, 3)
+
+    # Find last requested expiry weekday
+    while last_day.weekday() != target_weekday:
         last_day -= timedelta(days=1)
 
     # If holiday, move to previous trading day
@@ -269,3 +287,89 @@ def get_monthly_expiry(year: int, month: int) -> date:
         last_day -= timedelta(days=1)
 
     return last_day
+
+
+def _normalize_symbol_alias(symbol: str) -> str:
+    """Normalize symbol aliases to canonical index names used in this module."""
+    s = (symbol or "").strip().upper()
+    alias_map = {
+        "NIFTY": "NIFTY 50",
+        "NIFTY50": "NIFTY 50",
+        "BANKNIFTY": "NIFTY BANK",
+        "FINNIFTY": "NIFTY FIN SERVICE",
+        "BSX": "SENSEX",
+    }
+    return alias_map.get(s, symbol)
+
+
+def _is_bse_derivative_symbol(symbol: str) -> bool:
+    """Identify symbols that follow BSE Thursday expiry schedule."""
+    normalized = _normalize_symbol_alias(symbol)
+    return normalized in BSE_THURSDAY_EXPIRY_SYMBOLS
+
+
+def _resolve_weekly_expiry_day_name(symbol: str, on_date: Optional[date] = None) -> str:
+    """Resolve symbol expiry weekday with historical schedule transitions."""
+    if on_date is None:
+        on_date = datetime.now(IST).date()
+
+    normalized = _normalize_symbol_alias(symbol)
+
+    if _is_bse_derivative_symbol(normalized):
+        return "Thursday"
+
+    # Historical BANKNIFTY schedule compatibility used by backtests.
+    if normalized == "NIFTY BANK" and on_date.year < 2023:
+        return "Thursday"
+
+    # NSE Tuesday standardization from Sep 1, 2025 for NSE index and stock derivatives.
+    if on_date >= NSE_TUESDAY_EXPIRY_CUTOVER:
+        return "Tuesday"
+
+    return WEEKLY_EXPIRY_DAYS.get(normalized, "Thursday")
+
+
+def is_weekly_expiry_day(symbol: str, check_date: Optional[date] = None) -> bool:
+    """Return True when check_date is the active weekly expiry for the symbol."""
+    if check_date is None:
+        check_date = datetime.now(IST).date()
+    if not is_trading_day(check_date):
+        return False
+
+    normalized = _normalize_symbol_alias(symbol)
+    try:
+        return get_expiry_date(normalized, from_date=check_date) == check_date
+    except Exception:
+        return False
+
+
+def is_monthly_expiry_day(check_date: Optional[date] = None, symbol: str = "NIFTY 50") -> bool:
+    """Return True when check_date is the symbol's monthly expiry day."""
+    if check_date is None:
+        check_date = datetime.now(IST).date()
+    if not is_trading_day(check_date):
+        return False
+
+    try:
+        expiry_weekday = _resolve_weekly_expiry_day_name(symbol, check_date)
+        return get_monthly_expiry(check_date.year, check_date.month, weekday_name=expiry_weekday) == check_date
+    except Exception:
+        return False
+
+
+def is_expiry_thursday_session(symbol: str, check_date: Optional[date] = None) -> bool:
+    """Legacy-named helper used by APEX; returns True on the symbol's active weekly expiry session."""
+    if check_date is None:
+        check_date = datetime.now(IST).date()
+
+    normalized = _normalize_symbol_alias(symbol)
+    return is_weekly_expiry_day(normalized, check_date)
+
+
+def is_monthly_expiry_session(symbol: str, check_date: Optional[date] = None) -> bool:
+    """Return True when check_date is the symbol's monthly expiry session."""
+    if check_date is None:
+        check_date = datetime.now(IST).date()
+
+    normalized = _normalize_symbol_alias(symbol)
+    return is_monthly_expiry_day(check_date, symbol=normalized)

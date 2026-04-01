@@ -42,8 +42,41 @@ def fetch_instrument_token():
     futs.sort(key=lambda x: datetime.strptime(x["expiry"], "%d%b%Y"))
     return futs[0]
 
+
+def calculate_amihud_q1_autocorr(df_5m):
+    """Compute lag-1 return autocorrelation within the lowest Amihud quartile on 30m bars."""
+    df = df_5m.copy()
+    if df.empty:
+        return np.nan, 0
+
+    bars_30m = df.resample("30min", origin="start_day", offset="15min").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    })
+    bars_30m = bars_30m.dropna(subset=["open", "high", "low", "close"])
+    if bars_30m.empty:
+        return np.nan, 0
+
+    bars_30m["ret"] = bars_30m["close"].pct_change()
+    bars_30m["amihud"] = bars_30m["ret"].abs() / bars_30m["volume"].replace(0, np.nan)
+
+    valid = bars_30m.dropna(subset=["ret", "amihud"]).copy()
+    if len(valid) < 3:
+        return np.nan, len(valid)
+
+    q1_cutoff = valid["amihud"].quantile(0.25)
+    q1 = valid[valid["amihud"] <= q1_cutoff].copy()
+    if len(q1) < 3:
+        return np.nan, len(q1)
+
+    autocorr = q1["ret"].corr(q1["ret"].shift(1))
+    return (float(autocorr), len(q1)) if pd.notna(autocorr) else (np.nan, len(q1))
+
 def calculate_joint_classifier(df_5m):
-    # Strictly the 10:45 - 11:15 anomaly window
+    # Strictly the 10:45 - 11:10 anomaly window
     df = df_5m.copy()
 
     # Needs 20 prior bars for autocorr
@@ -71,13 +104,13 @@ def calculate_joint_classifier(df_5m):
 
     df = df.dropna(subset=["autocorr_20", "body_fraction", "target_ret"]).copy()
 
-    # GATE: 10:45 - 11:15 Window ONLY
+    # GATE: Included bar timestamps are 10:45, 10:50, 10:55, 11:00, 11:05, 11:10
     # Map index to times
     times = df.index.time
     mask_time = [ ((t.hour == 10 and t.minute >= 45) or (t.hour == 11 and t.minute <= 10)) for t in times ]
 
     df_window = df[mask_time].copy()
-    print(f"Total bars present in 10:45-11:15 window: {len(df_window)}")        
+    print(f"Total bars present in 10:45-11:10 window: {len(df_window)}")        
 
     # JOINT CONDITION (UPDATED FROM OPTIMIZATION)
     # 1-bar Autocorr >= 0.02 AND Body Fraction <= 0.60
@@ -112,10 +145,10 @@ def calculate_joint_classifier(df_5m):
     acc = df_signals["correct"].mean() * 100
 
     cat4_low = df_signals[df_signals["cat4_score"] <= 1]
-    cat4_high = df_signals[df_signals["cat4_score"] == 3]
+    cat4_mid = df_signals[df_signals["cat4_score"] == 2]
     
     acc_low = cat4_low["correct"].mean() * 100 if len(cat4_low) > 0 else 0
-    acc_high = cat4_high["correct"].mean() * 100 if len(cat4_high) > 0 else 0
+    acc_mid = cat4_mid["correct"].mean() * 100 if len(cat4_mid) > 0 else 0
 
     print(f"\n=========================================================")       
     print(f"   SEBI 11 AM MARGIN WINDOW: JOINT CLASSIFIER (OOS) ")
@@ -126,19 +159,22 @@ def calculate_joint_classifier(df_5m):
     print(f"---------------------------------------------------------")
     print(f"   SECONDARY HYPOTHESIS: CAT 4 ALIGNMENT INVERSION")
     print(f"Score 0-1 (Conflict)  : {len(cat4_low)} trades | Acc: {acc_low:.1f}%")
-    print(f"Score 3 (Full Align)  : {len(cat4_high)} trades | Acc: {acc_high:.1f}%")
-    if len(cat4_low) > 0 and len(cat4_high) > 0:
-        print(f"Difference            : {(acc_low - acc_high):.1f}%")
+    print(f"Score 2 (Mid Align)   : {len(cat4_mid)} trades | Acc: {acc_mid:.1f}%")
+    if len(cat4_low) > 0 and len(cat4_mid) > 0:
+        print(f"Difference            : {(acc_low - acc_mid):.1f}%")
     print(f"=========================================================")
 
-    if acc >= 58.0 and len(df_signals) >= 40:
+    n_signals = len(df_signals)
+    if n_signals < 40:
+        print("RESULT: EXTEND. Sample size below n=40; continue accumulation.")
+    elif acc >= 58.0:
         print("RESULT: STATISTICALLY CONFIRMED. Hypothesis Validated.")
-    elif acc >= 53.0 and len(df_signals) >= 40:
+    elif acc >= 53.0:
         print("RESULT: PROVISIONALLY VALIDATED. Requires 6-Month Data Extension.")
     else:
-        print("RESULT: NULL REJECT. Path fails OOS check. Pivot to Daily Timeframe.")
+        print("RESULT: REJECT. Below 53% with n>=40. Pivot to Daily Timeframe.")
 
-    return acc, len(df_signals)
+    return acc, n_signals
 
 def main():
     print("--- PROMETHEUS MONDAY PROTOCOL INITIATED ---")
@@ -178,7 +214,14 @@ def main():
 
     print(f"Protocol Check Passed. Valid 5M Futures Extracted: {len(df)} bars.")
 
-    calculate_joint_classifier(df)
+    amihud_q1_ac, amihud_q1_n = calculate_amihud_q1_autocorr(df)
+    if pd.isna(amihud_q1_ac):
+        print(f"Amihud Q1 Autocorr (30m): N/A (insufficient valid bars, n={amihud_q1_n})")
+    else:
+        print(f"Amihud Q1 Autocorr (30m): {amihud_q1_ac:.4f} (n={amihud_q1_n})")
+
+    acc, n_trades = calculate_joint_classifier(df)
+    print(f"Summary: Joint classifier accuracy={acc:.1f}% | n={n_trades}")
 
 if __name__ == "__main__":
     main()

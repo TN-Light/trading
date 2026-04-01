@@ -15,7 +15,16 @@ from .strike_gravity import StrikeGravityMapper
 from .expiry_clock import ExpiryClock
 
 from prometheus.signals.technical import calculate_vwap, calculate_session_vwap, calculate_ema, calculate_supertrend, calculate_rsi
-from prometheus.utils.indian_market import get_atm_strike, days_to_expiry, get_lot_size, get_strike_interval
+from prometheus.utils.indian_market import (
+    get_atm_strike,
+    days_to_expiry,
+    get_lot_size,
+    get_strike_interval,
+    is_weekly_expiry_day,
+    is_expiry_thursday_session,
+    is_monthly_expiry_session,
+    get_expiry_date,
+)
 from prometheus.utils.options_math import black_scholes_price, calculate_greeks
 
 from loguru import logger
@@ -72,6 +81,23 @@ class ApexSignalGenerator:
 
         current_bar = data_so_far.iloc[-1]
         dt = pd.to_datetime(current_bar.get("timestamp", data_so_far.index[-1]))
+        bar_date = dt.date()
+
+        # Expiry-session context tags for runtime routing and forward validation.
+        try:
+            dte = max(0, int(days_to_expiry(self.symbol, from_date=bar_date)))
+        except Exception:
+            dte = 1
+        is_expiry_day = bool(is_weekly_expiry_day(self.symbol, bar_date))
+        is_expiry_thursday = bool(is_expiry_thursday_session(self.symbol, bar_date))
+        is_monthly_expiry = bool(is_monthly_expiry_session(self.symbol, bar_date))
+
+        # Gamma Ambush mode: only allow entries in the 10:45-11:15 window.
+        if is_expiry_thursday:
+            hhmm = dt.hour * 100 + dt.minute
+            if hhmm < 1045 or hhmm > 1115:
+                self.stats["reject_aes"] += 1
+                return None
 
         # --- 1. 5-Component Technical Stack ---
         df = data_so_far
@@ -167,6 +193,16 @@ class ApexSignalGenerator:
             self.stats["reject_confluence"] += 1
             return None
 
+        # Thursday expiry directional flow gate aligned to session VWAP.
+        if is_expiry_thursday:
+            gate_vwap = curr_svwap if not pd.isna(curr_svwap) else curr_vwap
+            if signal_direction > 0 and close <= gate_vwap:
+                self.stats["reject_confluence"] += 1
+                return None
+            if signal_direction < 0 and close >= gate_vwap:
+                self.stats["reject_confluence"] += 1
+                return None
+
         # --- 2. QRD and Context ---
         qrd_state = self.qrd.estimate(data_so_far)
         time_alpha = self.expiry.evaluate_window(dt, self.symbol)
@@ -236,34 +272,69 @@ class ApexSignalGenerator:
             self.stats["reject_aes"] += 1
             return None
 
-        # --- 4. Option Pricing & Dual-Trigger Stop ---
-        try:
-            dte = max(1, days_to_expiry(self.symbol, from_date=dt.date()))
-        except:
-            dte = 1
+        # Monthly expiry policy: suppress options unless conviction is very high.
+        if is_monthly_expiry and edge_score <= 72:
+            self.stats["reject_aes"] += 1
+            return None
 
+        # --- 4. Option Pricing & Dual-Trigger Stop ---
         atm_strike = get_atm_strike(close, self.symbol)
-        
+
         if signal_direction > 0:
-            strike = atm_strike
             opt_type = "CE"
         else:
-            strike = atm_strike
             opt_type = "PE"
 
-        T = float(dte) / 365.0
+        pricing_dte = max(1, int(dte))
+        T = float(pricing_dte) / 365.0
         daily_vol = max(1e-6, float(atr) / close)
         sigma = daily_vol * np.sqrt(78 * 252) # intraday 5min approx
         if pd.isna(sigma) or sigma == 0:
             sigma = 0.15
         r = 0.065
 
-        premium = black_scholes_price(close, strike, T, r, sigma, opt_type)
-        if pd.isna(premium) or premium <= 0:
-            self.stats["reject_pricing"] += 1
-            return None
-            
-        greeks = calculate_greeks(close, strike, T, r, sigma, opt_type)
+        strike = atm_strike
+        premium = None
+        greeks = None
+
+        # Gamma Ambush strike routing: OTM-first with strict premium band.
+        if is_expiry_thursday:
+            interval = get_strike_interval(self.symbol)
+            if opt_type == "CE":
+                offsets = [1, 2, 3, 0, -1]
+            else:
+                offsets = [-1, -2, -3, 0, 1]
+
+            premium_floor = 15.0
+            premium_ceiling = 50.0
+            target_mid = (premium_floor + premium_ceiling) / 2.0
+
+            best = None
+            for off in offsets:
+                candidate_strike = atm_strike + (off * interval)
+                candidate_premium = black_scholes_price(close, candidate_strike, T, r, sigma, opt_type)
+                if pd.isna(candidate_premium) or candidate_premium <= 0:
+                    continue
+
+                if premium_floor <= float(candidate_premium) <= premium_ceiling:
+                    distance = abs(float(candidate_premium) - target_mid)
+                    if best is None or distance < best[0]:
+                        best = (distance, candidate_strike, float(candidate_premium))
+
+            if best is None:
+                self.stats["reject_pricing"] += 1
+                return None
+
+            strike = best[1]
+            premium = best[2]
+            greeks = calculate_greeks(close, strike, T, r, sigma, opt_type)
+        else:
+            premium = black_scholes_price(close, strike, T, r, sigma, opt_type)
+            if pd.isna(premium) or premium <= 0:
+                self.stats["reject_pricing"] += 1
+                return None
+            greeks = calculate_greeks(close, strike, T, r, sigma, opt_type)
+
         delta = abs(greeks.get("delta", 0.5))
 
         # --- TVI GATE (Theta Vulnerability Index) ---
@@ -271,7 +342,7 @@ class ApexSignalGenerator:
         # Weekly options with 1-2 DTE run 3-5x the annualized estimate intraday.
         theta = abs(greeks.get("theta", 0.0))
         DTE_MULTS = {0: 5.0, 1: 4.5, 2: 3.5, 3: 2.5, 4: 2.0}
-        implied_dte = int(min(dte, 4))
+        implied_dte = int(min(pricing_dte, 4))
         dte_multiplier = DTE_MULTS.get(implied_dte, 1.0)
         
         # Max bars allowed by velocity gate
@@ -309,6 +380,15 @@ class ApexSignalGenerator:
 
         self.stats["signals_passed"] += 1
 
+        lot_size = get_lot_size(self.symbol)
+        lots = max(1, int(quantity // max(lot_size, 1)))
+
+        expiry_date_str = ""
+        try:
+            expiry_date_str = get_expiry_date(self.symbol, from_date=bar_date).isoformat()
+        except Exception:
+            expiry_date_str = ""
+
         return {
             "action": f"BUY_{opt_type}",
             "direction": "bullish" if signal_direction > 0 else "bearish",      
@@ -327,5 +407,16 @@ class ApexSignalGenerator:
             "max_bars": 8,  # Reduced max hold time to match velocity gate expectation
             "delta": delta,
             "strike": strike,
-            "instrument_type": "options"
+            "instrument_type": "options",
+            "option_type": opt_type,
+            "expiry": expiry_date_str,
+            "dte": int(dte),
+            "is_expiry_day": is_expiry_day,
+            "is_expiry_thursday": is_expiry_thursday,
+            "is_monthly_expiry": is_monthly_expiry,
+            "bar_timestamp": dt.isoformat(),
+            "spot_at_signal": round(float(close), 2),
+            "lot_size": lot_size,
+            "lots": lots,
+            "lot_cost": round(float(premium) * lot_size, 2),
         }
