@@ -145,14 +145,15 @@ class ZerodhaCostModel:
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
         self.brokerage_per_order = cfg.get("options_brokerage", 20)
-        # Correct Zerodha STT rates (options 0.10%, futures 0.01%)
-        self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.10) / 100
-        self.stt_futures_pct = cfg.get("stt_futures", 0.01) / 100
-        self.transaction_charges_pct = cfg.get("transaction_charges", 0.053) / 100
+        self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.15) / 100
+        self.stt_futures_pct = cfg.get("stt_futures", 0.05) / 100
+        self.transaction_charges_options_pct = cfg.get("transaction_charges_options", 0.03503) / 100
+        self.transaction_charges_futures_pct = cfg.get("transaction_charges_futures", 0.00173) / 100
         self.gst_pct = cfg.get("gst", 18.0) / 100
         self.sebi_charges_pct = cfg.get("sebi_charges", 0.0001) / 100
         self.stamp_duty_pct = cfg.get("stamp_duty", 0.003) / 100
         self.slippage_pct = cfg.get("slippage_pct", 0.15) / 100  # realistic options slippage
+        self.enable_collateral_penalty = cfg.get("enable_collateral_penalty", True)
 
     def calculate_costs(
         self,
@@ -161,15 +162,15 @@ class ZerodhaCostModel:
         instrument_type: str = "options"
     ) -> Dict:
         """Calculate all trading costs for a round-trip trade."""
-        # Brokerage: Flat Rs 20 per executed order for F&O (options/futures)
-        # The 0.03% cap only applies to equity cash/intraday, NOT F&O
+        # Brokerage: applying the 2026 Rs 40 collateral penalty logic
+        base_brokerage = 40 if self.enable_collateral_penalty else self.brokerage_per_order
         if instrument_type in ("options", "futures"):
-            leg1_brok = self.brokerage_per_order  # Rs 20 flat
-            leg2_brok = self.brokerage_per_order  # Rs 20 flat
+            leg1_brok = base_brokerage
+            leg2_brok = base_brokerage
         else:
-            # Equity: Rs 20 or 0.03%, whichever is lower
-            leg1_brok = min(self.brokerage_per_order, buy_value * 0.0003)
-            leg2_brok = min(self.brokerage_per_order, sell_value * 0.0003)
+            # Equity: Rs 20 (or Rs 40) or 0.03%, whichever is lower
+            leg1_brok = min(base_brokerage, buy_value * 0.0003)
+            leg2_brok = min(base_brokerage, sell_value * 0.0003)
         brokerage = leg1_brok + leg2_brok
 
         # STT (Securities Transaction Tax) — only on sell side
@@ -179,7 +180,10 @@ class ZerodhaCostModel:
             stt = sell_value * self.stt_futures_pct
 
         # Transaction charges — on both sides
-        transaction = (buy_value + sell_value) * self.transaction_charges_pct
+        if instrument_type == "options":
+            transaction = (buy_value + sell_value) * self.transaction_charges_options_pct
+        else:
+            transaction = (buy_value + sell_value) * self.transaction_charges_futures_pct
 
         # GST on brokerage + transaction charges
         gst = (brokerage + transaction) * self.gst_pct

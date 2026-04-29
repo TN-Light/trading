@@ -159,6 +159,8 @@ class Prometheus:
                 api_key=get_credential("broker.api_key") or get("broker.api_key", ""),
                 api_secret=get_credential("broker.api_secret") or get("broker.api_secret", ""),
                 access_token=get_credential("broker.access_token") or get("broker.access_token", ""),
+                sebi_algo_id=get("broker.sebi_algo_id", "PROM-A26"),
+                ops_limit=get("broker.algo_api_ops_limit", 10),
             )
             if not self.broker.connect():
                 logger.error("KiteExecutor connection failed! Falling back to PaperTrader.")
@@ -7608,6 +7610,8 @@ def main():
                         api_key=get_credential("broker.api_key") or get("broker.api_key", ""),
                         api_secret=get_credential("broker.api_secret") or get("broker.api_secret", ""),
                         access_token=get_credential("broker.access_token") or get("broker.access_token", ""),
+                        sebi_algo_id=get("broker.sebi_algo_id", "PROM-A26"),
+                        ops_limit=get("broker.algo_api_ops_limit", 10),
                     )
                     if kite.connect():
                         prometheus.broker = kite

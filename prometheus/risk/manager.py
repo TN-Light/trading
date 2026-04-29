@@ -258,6 +258,20 @@ class RiskManager:
         if any(p.get("symbol") == trade.get("symbol") for p in self._open_positions):
             violations.append("Duplicate instrument position not allowed (symbol already open)")
 
+        # 11. Regulatory 2026 Edge Thresholds
+        # Reject trades mathematically doomed by the Union Budget April 2026 STT realities.
+        entry_price = trade.get("entry_price", 0)
+        target_price = trade.get("target_price", 0)
+        if entry_price and target_price:
+            expected_pts = abs(target_price - entry_price)
+            # If the trade is an options structure, the underlying needs to move ~6 pts just to clear the 2.12 pt option BEP + slippage.
+            # If futures, needs >15 pts index move to clear 14.83pt BEP.
+            instrument_type = trade.get("instrument_type", "options")
+            if instrument_type == "options" and expected_pts < 6.0:
+                violations.append(f"Expected index move ({expected_pts:.2f} pts) yields < 3 option pts. Triggers negative EV under SEBI 2026 rules.")
+            elif instrument_type == "futures" and expected_pts < 15.0:
+                violations.append(f"Expected index move ({expected_pts:.2f} pts) < SEBI 2026 Futures BEP (14.83 pts).")
+
         # Warnings (non-blocking)
         if trade_cost > max_position_value * 0.8:
             warnings.append(f"Position size near limit ({trade_cost/max_position_value*100:.0f}%)")

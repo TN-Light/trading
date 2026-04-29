@@ -21,20 +21,20 @@ PRE_OPEN_START = time(9, 0)
 PRE_OPEN_END = time(9, 8)
 
 # ---------------------------------------------------------------------------
-# Lot Sizes (updated periodically by NSE — keep current)
+# Lot Sizes (Updated for 2026 SEBI Contract Value Mandates)
 # ---------------------------------------------------------------------------
 LOT_SIZES = {
-    "NIFTY 50": 65,  # 2026 revision
-    "NIFTY BANK": 15,
-    "NIFTY FIN SERVICE": 25,
-    "NIFTY": 65,     # 2026 revision
-    "BANKNIFTY": 15,
-    "FINNIFTY": 25,
-    "SENSEX": 10,
+    "NIFTY 50": 65,          # 2026 revision (down from 75)
+    "NIFTY BANK": 30,        # Nov 2024 SEBI revision (up from 15)
+    "NIFTY FIN SERVICE": 60, # 2026 revision (down from 65, originally 25)
+    "NIFTY": 65,     
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "SENSEX": 20,            # Nov 2024 SEBI revision (up from 10)
     "NIFTY IT": 25,
-    "NIFTY MIDCAP SELECT": 50,
+    "NIFTY MIDCAP SELECT": 120, # Nov 2024 SEBI revision (up from 50)
     "NIFTY NEXT 50": 25,
-    # Stock F&O lot sizes — add as needed
+    # Stock F&O lot sizes
     "RELIANCE": 250,
     "TCS": 150,
     "INFY": 300,
@@ -337,6 +337,14 @@ def is_weekly_expiry_day(symbol: str, check_date: Optional[date] = None) -> bool
         return False
 
     normalized = _normalize_symbol_alias(symbol)
+    
+    # SEBI Nov 2024 Mandate: Only one weekly expiry per exchange.
+    # Weekly expiries for BANKNIFTY, FINNIFTY, etc., no longer exist.
+    ALLOWED_WEEKLY_SYMBOLS = {"NIFTY 50", "SENSEX", "NIFTY"}
+    if normalized not in ALLOWED_WEEKLY_SYMBOLS:
+        # If it's not Nifty or Sensex, it can only be a monthly expiry day
+        return False 
+
     try:
         return get_expiry_date(normalized, from_date=check_date) == check_date
     except Exception:

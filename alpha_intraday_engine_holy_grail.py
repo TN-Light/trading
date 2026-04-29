@@ -42,12 +42,12 @@ def generate_signals(df):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     df['adx'] = dx.ewm(alpha=1/14).mean()
 
-    # Optimal Strategy Configuration
-    PULLBACK = 40
-    BOUNCE = 45
-    SL_ATR = 2.5
-    TP_ATR = 0.8
-    TIME_STOP_BARS = 16  # The critical fix! Maps to 80 minutes hold time max.
+# Optimal Strategy Configuration (UPGRADED FOR 2026 SEBI COMPLIANCE)
+    PULLBACK = 35       # Looser pullback thresholds for 15M wide swings
+    BOUNCE = 40
+    SL_ATR = 1.5        # Tighter risk to minimize large 15-minute hits
+    TP_ATR = 1.2        # Wider target (e.g. 50pts index) to offset 15pt tax drag
+    TIME_STOP_BARS = 6  # 6 bars on 15M = 90 minutes max holding time
     
     trades = []
     in_trade = False
@@ -121,19 +121,33 @@ if __name__ == "__main__":
     df.columns = [c.lower() for c in df.columns]
     df['datetime'] = pd.to_datetime(df['date'] if 'date' in df.columns else df['datetime'], errors='coerce')
     df = df.dropna(subset=['datetime']).sort_values('datetime').set_index('datetime')
-    df = df.between_time('09:15', '15:30')
-    all_days = df.index.normalize().unique()
-    if len(all_days) > 500: df = df.loc[df.index >= all_days[-500]]
+    # Up-sample to 15-minute timeframe to widen the ATR and jump over the STT breakeven points.
+    df = df.resample('15min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
     
     trades = generate_signals(df)
     t_df = pd.DataFrame(trades)
     
-    print("--- ULTIMATE HOLY GRAIL METRICS (TIME STOP INCLUDED) ---")
+    # 2026 Tax & Slippage Adjustment (Futures Model)
+    # The new STT + Rs 40 penalty + 0.15% total round-trip slippage forces a
+    # 15.0 index point deduction from EVERY single trade just to break-even.
+    t_df['gross_pnl'] = t_df['pnl']
+    t_df['pnl'] = t_df['pnl'] - 15.0  # Apply the brutal 15pt 2026 reality tax friction
+
+    print("--- 2026 REALITY-ADJUSTED HOLY GRAIL METRICS (FUTURES MODEL) ---")
     print(f"Trades Count: {len(t_df)}")
     print(f"Win Rate: {(t_df['pnl'] > 0).mean() * 100:.2f}%")
-    print(f"Average Win: {t_df[t_df['pnl'] > 0]['pnl'].mean():.2f} pts")
-    print(f"Average Loss: {abs(t_df[t_df['pnl'] < 0]['pnl'].mean()):.2f} pts")
+    print(f"Average Gross Win: {t_df[t_df['gross_pnl'] > 0]['gross_pnl'].mean():.2f} pts")        
+    print(f"Average Net Win: {t_df[t_df['pnl'] > 0]['pnl'].mean():.2f} pts")        
+    print(f"Average Net Loss: {abs(t_df[t_df['pnl'] < 0]['pnl'].mean()):.2f} pts")  
     loss_sum = abs(t_df[t_df['pnl'] < 0]['pnl'].sum())
-    pf = t_df[t_df['pnl'] > 0]['pnl'].sum() / loss_sum if loss_sum != 0 else 99
+    pf = t_df[t_df['pnl'] > 0]['pnl'].sum() / loss_sum if loss_sum != 0 else 99 
     print(f"Profit Factor: {pf:.2f}")
     print(f"Average Bars Held: {t_df['bars_held'].mean():.1f} bars (~{t_df['bars_held'].mean()*5:.0f} mins)")
+    
+    # Calculate Sharpe
+    returns = t_df['pnl'] * 25  # 1 lot Nifty
+    total_profit_rs = returns.sum()
+    daily_returns = t_df.groupby(t_df.index // 10)['pnl'].sum() if len(t_df) > 0 else pd.Series()
+    sharpe = np.sqrt(252) * (returns.mean() / returns.std()) if returns.std() != 0 else 0
+    print(f"Total Net PnL (Rs): Rs {total_profit_rs:,.2f}")
+    print(f"Sharpe Ratio: {sharpe:.2f}")

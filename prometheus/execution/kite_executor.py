@@ -37,13 +37,14 @@ class KiteExecutor(BrokerBase):
         ProductType.CNC: "CNC",
     }
 
-    def __init__(self, api_key: str, api_secret: str, access_token: str = ""):
+    def __init__(self, api_key: str, api_secret: str, access_token: str = "", sebi_algo_id: str = "PROM-A26", ops_limit: int = 10):
         self.api_key = api_key
         self.api_secret = api_secret
         self.access_token = access_token
+        self.sebi_algo_id = sebi_algo_id
         self.kite = None
         self._last_order_time = 0
-        self._min_order_interval = 0.5  # seconds between orders (rate limit safety)
+        self._min_order_interval = 1.0 / ops_limit + 0.01  # SEBI April 2026: 10 OPS hard limit limit safety
 
     def connect(self) -> bool:
         """Connect and authenticate with Kite."""
@@ -94,6 +95,12 @@ class KiteExecutor(BrokerBase):
         if elapsed < self._min_order_interval:
             time.sleep(self._min_order_interval - elapsed)
 
+        if order.order_type == OrderType.MARKET:
+            logger.error("SEBI April 2026 Rule: Market orders are strictly prohibited via API. Convert to Limit+MPP.")
+            order.status = OrderStatus.REJECTED
+            order.message = "Market Order Prohibited"
+            return order
+
         try:
             params = {
                 "tradingsymbol": order.tradingsymbol,
@@ -103,7 +110,7 @@ class KiteExecutor(BrokerBase):
                 "order_type": self.ORDER_TYPE_MAP[order.order_type],
                 "product": self.PRODUCT_MAP[order.product],
                 "variety": "regular",
-                "tag": order.tag[:20] if order.tag else "PROMETHEUS",
+                "tag": order.tag[:20] if order.tag else self.sebi_algo_id[:20],
             }
 
             if order.order_type == OrderType.LIMIT:

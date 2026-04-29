@@ -36,9 +36,11 @@ backtest:
     sebi_charges: 0.0001
     slippage_pct: 0.15
     stamp_duty: 0.003
-    stt_futures: 0.01
-    stt_options_sell: 0.1
-    transaction_charges: 0.053
+    stt_futures: 0.05
+    stt_options_sell: 0.15
+    transaction_charges_options: 0.03503
+    transaction_charges_futures: 0.00173
+    enable_collateral_penalty: true
   end_date: '2025-12-31'
   initial_capital: 15000
   slippage_pct: 0.05
@@ -47,6 +49,8 @@ broker:
   access_token: ''
   api_key: ''
   api_secret: ''
+  algo_api_ops_limit: 10
+  sebi_algo_id: 'PROM-A26'
   base_url: https://api.kite.trade
   max_orders_per_second: 3
   name: zerodha
@@ -443,20 +447,6 @@ signals:
 strategies:
   active_modules:
   - trend
-  - volatility
-  - expiry
-  expiry:
-    days_to_expiry_max: 2
-    enabled: true
-    entry_type: debit_spread
-    instruments:
-    - NIFTY 50
-    - NIFTY BANK
-    min_iv_percentile: 50
-  mean_reversion:
-    enabled: false
-    instruments:
-    - NIFTY 50
   trend:
     enabled: true
     entry_type: options_buying
@@ -467,7 +457,7 @@ strategies:
     min_signal_strength: 0.7
     target_rr_ratio: 2.5
   volatility:
-    enabled: true
+    enabled: false
     entry_type: straddle_buy
     event_proximity_days: 2
     instruments:
@@ -475,6 +465,18 @@ strategies:
     - NIFTY BANK
     iv_percentile_trigger: 30
     max_position_cost: 0.2
+  expiry:
+    enabled: false
+    days_to_expiry_max: 2
+    entry_type: debit_spread
+    instruments:
+    - NIFTY 50
+    - NIFTY BANK
+    min_iv_percentile: 50
+  mean_reversion:
+    enabled: false
+    instruments:
+    - NIFTY 50
 swing:
   index_scan_times:
   - '13:00'
