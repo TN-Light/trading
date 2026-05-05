@@ -19,6 +19,31 @@ CONFIG_DIR = Path(__file__).parent
 SETTINGS_FILE = CONFIG_DIR / "settings.yaml"
 CREDENTIALS_FILE = CONFIG_DIR / "credentials.yaml"
 
+CREDENTIAL_ENV_MAP = {
+    "broker.api_key": "PROM_BROKER_API_KEY",
+    "broker.api_secret": "PROM_BROKER_API_SECRET",
+    "broker.access_token": "PROM_BROKER_ACCESS_TOKEN",
+    "zerodha.api_key": "PROM_BROKER_API_KEY",
+    "zerodha.api_secret": "PROM_BROKER_API_SECRET",
+    "zerodha.access_token": "PROM_BROKER_ACCESS_TOKEN",
+    "telegram.bot_token": "PROM_TELEGRAM_BOT_TOKEN",
+    "telegram.chat_id": "PROM_TELEGRAM_CHAT_ID",
+    "groq.api_key": "PROM_GROQ_API_KEY",
+    "gemini.api_key": "PROM_GEMINI_API_KEY",
+    "angelone.api_key": "PROM_ANGELONE_API_KEY",
+    "angelone.client_code": "PROM_ANGELONE_CLIENT_CODE",
+    "angelone.password": "PROM_ANGELONE_PASSWORD",
+    "angelone.totp_secret": "PROM_ANGELONE_TOTP_SECRET",
+}
+
+
+def _get_env_credential(key_path: str) -> Optional[str]:
+    env_key = CREDENTIAL_ENV_MAP.get(key_path)
+    if not env_key:
+        return None
+    value = os.getenv(env_key, "").strip()
+    return value or None
+
 
 def load_config(settings_path: Optional[str] = None) -> dict:
     """Load main settings configuration."""
@@ -74,8 +99,15 @@ def get_credential(key_path: str) -> Optional[str]:
     Example: get_credential("zerodha.api_key")
     Falls back: broker.* -> zerodha.* for backwards compatibility.
     """
+    env_override = _get_env_credential(key_path)
+    if env_override:
+        return env_override
+
     if not _credentials:
-        load_credentials()
+        try:
+            load_credentials()
+        except FileNotFoundError:
+            return None
 
     keys = key_path.split(".")
     value = _credentials

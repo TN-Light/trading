@@ -265,7 +265,9 @@ class OrderManager:
         managed.is_expiry_thursday = bool(signal.get("is_expiry_thursday", False))
         managed.is_monthly_expiry = bool(signal.get("is_monthly_expiry", False))
         try:
-            managed.spot_at_signal = float(signal.get("spot_at_signal", signal.get("spot_price", 0.0)) or 0.0)
+            managed.spot_at_signal = float(
+                signal.get("spot_at_signal", signal.get("signal_spot", signal.get("spot_price", 0.0))) or 0.0
+            )
         except Exception:
             managed.spot_at_signal = 0.0
         managed.bar_timestamp = str(signal.get("bar_timestamp", ""))
@@ -280,6 +282,8 @@ class OrderManager:
             "entry_price": entry_order.average_price,
             "quantity": total_qty,
             "cost": entry_order.average_price * total_qty,
+            "delta": signal.get("delta", 0.5),
+            "spot_at_signal": managed.spot_at_signal,
         })
 
         # Log to database
@@ -464,11 +468,14 @@ class OrderManager:
         entry_premium: float
     ) -> Optional[Order]:
         """Place a stop-loss order for an options position."""
-        # For options buying: SL is based on premium, not index level
-        # Estimate option premium at SL level using rough delta
-        delta = 0.5  # ATM assumption
-        index_sl_distance = abs(sl_index_price - entry_premium / delta)  # rough mapping
-        premium_sl = max(entry_premium * 0.50, entry_premium - index_sl_distance * delta)
+        # For options buying: SL is based on premium, not index level.
+        sl_premium = float(sl_index_price or 0)
+        if sl_premium <= 0:
+            return None
+        if entry_premium > 0 and sl_premium > entry_premium * 5:
+            logger.warning("Stop-loss looks like index level; falling back to 50% premium.")
+            sl_premium = entry_premium * 0.50
+        premium_sl = sl_premium
 
         sl_order = Order(
             tradingsymbol=tradingsymbol,

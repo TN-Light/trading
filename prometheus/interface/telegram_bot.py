@@ -715,6 +715,12 @@ class TelegramBot:
         rr = signal.get("risk_reward", 0)
         regime = signal.get("regime", "")
         reasoning = signal.get("reasoning", "")
+        trade_mode = str(signal.get("trade_mode") or signal.get("timeframe") or "").lower()
+        hold_line = ""
+        if trade_mode == "swing":
+            hold_line = "\nHold: <code>overnight carry</code>"
+        elif trade_mode == "intraday":
+            hold_line = "\nHold: <code>same-day square-off</code>"
 
         if action == "HOLD":
             return
@@ -729,9 +735,13 @@ class TelegramBot:
                 f"{symbol} | {direction}",
                 f"Capital: <code>Rs {account_capital:,.0f}</code>",
                 f"Confidence: <code>{confidence:.0%}</code>",
+            ]
+            if hold_line:
+                lines.append(hold_line.strip())
+            lines.extend([
                 "",
                 "<b>Eligible (Best -> Worst)</b>",
-            ]
+            ])
 
             for i, c in enumerate(ranked, 1):
                 lines.extend([
@@ -782,6 +792,7 @@ class TelegramBot:
             f"{cost_line}"
             f"Entry <code>Rs {entry:,.2f}</code> | SL <code>Rs {sl:,.2f}</code> | Target <code>Rs {target:,.2f}</code>\n"
             f"Regime: {regime.upper()} ({quality} — {wr})"
+            f"{hold_line}"
             f"{caution}\n"
         )
         if reasoning:
@@ -889,6 +900,7 @@ class TelegramBot:
                 "risk_reward": r.get("risk_reward", 0),
                 "regime": r.get("regime", ""),
                 "reasoning": r.get("reasoning", ""),
+                "trade_mode": r.get("timeframe", ""),
             })
 
     def alert_order_placed(self, order_info: Dict):

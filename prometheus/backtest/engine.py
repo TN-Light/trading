@@ -12,14 +12,18 @@ Key principles:
   - Monte Carlo simulation for robustness testing
 """
 
+import os
+import pickle
 import pandas as pd
 import numpy as np
 import math
+import time
 from typing import Dict, List, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 from itertools import combinations
+from pathlib import Path
 
 from prometheus.utils.logger import logger
 
@@ -360,6 +364,126 @@ class BacktestEngine:
             if capital > self._capital_tracker.get("peak", capital):
                 self._capital_tracker["peak"] = capital
 
+    @staticmethod
+    def _checkpoint_data_signature(data: pd.DataFrame) -> Dict[str, str]:
+        if data is None or data.empty:
+            return {"data_len": 0, "first_timestamp": "", "last_timestamp": ""}
+
+        first_timestamp = ""
+        last_timestamp = ""
+        if "timestamp" in data.columns and len(data) > 0:
+            try:
+                first_timestamp = str(pd.to_datetime(data["timestamp"].iloc[0]))
+                last_timestamp = str(pd.to_datetime(data["timestamp"].iloc[-1]))
+            except Exception:
+                first_timestamp = str(data["timestamp"].iloc[0])
+                last_timestamp = str(data["timestamp"].iloc[-1])
+
+        return {
+            "data_len": int(len(data)),
+            "first_timestamp": first_timestamp,
+            "last_timestamp": last_timestamp,
+        }
+
+    def _build_run_checkpoint(
+        self,
+        data: pd.DataFrame,
+        strategy_name: str,
+        warmup_bars: int,
+        next_bar_index: int,
+        capital: float,
+        peak_capital: float,
+        positions: List[Dict],
+        daily_pnl: float,
+        daily_trades: int,
+        intraday_trades: int,
+        last_date: Optional[str],
+        pending_signal: Optional[Dict],
+        pending_bars_waited: int,
+    ) -> Dict:
+        return {
+            "version": 1,
+            "strategy_name": strategy_name,
+            "warmup_bars": int(warmup_bars),
+            "next_bar_index": int(next_bar_index),
+            "capital": float(capital),
+            "peak_capital": float(peak_capital),
+            "trades": list(self.trades),
+            "equity_curve": list(self.equity_curve),
+            "positions": [dict(position) for position in positions],
+            "daily_pnl": float(daily_pnl),
+            "daily_trades": int(daily_trades),
+            "intraday_trades": int(intraday_trades),
+            "last_date": last_date,
+            "pending_signal": dict(pending_signal) if pending_signal is not None else None,
+            "pending_bars_waited": int(pending_bars_waited),
+            "current_capital": float(self.current_capital),
+            "capital_tracker": dict(self._capital_tracker) if self._capital_tracker is not None else None,
+            "entry_timing_stats": dict(self.entry_timing_stats),
+            "risk_overlay_stats": dict(self.risk_overlay_stats),
+            "data_signature": self._checkpoint_data_signature(data),
+        }
+
+    def _restore_run_checkpoint(self, checkpoint: Dict):
+        self.trades = list(checkpoint.get("trades", []))
+        self.equity_curve = list(checkpoint.get("equity_curve", []))
+        self._warmup_bars = int(checkpoint.get("warmup_bars", getattr(self, "_warmup_bars", 0)))
+        self.current_capital = float(checkpoint.get("current_capital", self.initial_capital))
+
+        stored_capital_tracker = checkpoint.get("capital_tracker")
+        if stored_capital_tracker is not None:
+            if self._capital_tracker is not None:
+                self._capital_tracker.clear()
+                self._capital_tracker.update(stored_capital_tracker)
+            else:
+                self._capital_tracker = dict(stored_capital_tracker)
+
+        stored_entry_stats = checkpoint.get("entry_timing_stats")
+        if stored_entry_stats is not None:
+            self.entry_timing_stats = dict(stored_entry_stats)
+
+        stored_risk_stats = checkpoint.get("risk_overlay_stats")
+        if stored_risk_stats is not None:
+            self.risk_overlay_stats = dict(stored_risk_stats)
+
+    def _load_run_checkpoint(self, checkpoint_path: Path) -> Optional[Dict]:
+        if checkpoint_path is None or not checkpoint_path.exists():
+            return None
+
+        try:
+            with checkpoint_path.open("rb") as handle:
+                checkpoint = pickle.load(handle)
+            if isinstance(checkpoint, dict):
+                return checkpoint
+        except Exception as exc:
+            logger.warning(f"Failed to load checkpoint {checkpoint_path}: {exc}")
+        return None
+
+    def _save_run_checkpoint(self, checkpoint_path: Path, checkpoint: Dict):
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+        with temp_path.open("wb") as handle:
+            pickle.dump(checkpoint, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temp_path, checkpoint_path)
+
+    def _checkpoint_matches_current_run(
+        self,
+        checkpoint: Dict,
+        data: pd.DataFrame,
+        strategy_name: str,
+        warmup_bars: int,
+    ) -> bool:
+        if not checkpoint or checkpoint.get("version") != 1:
+            return False
+        if checkpoint.get("strategy_name") != strategy_name:
+            return False
+        if int(checkpoint.get("warmup_bars", -1)) != int(warmup_bars):
+            return False
+
+        checkpoint_signature = checkpoint.get("data_signature") or {}
+        current_signature = self._checkpoint_data_signature(data)
+        return checkpoint_signature == current_signature
+
     def _compute_dsq(self, data_so_far: pd.DataFrame) -> Optional[Tuple[float, float, float]]:
         """
         Compute Domain Shift Quotient from realized volatility.
@@ -492,7 +616,9 @@ class BacktestEngine:
         data: pd.DataFrame,
         signal_generator: Callable,
         strategy_name: str = "default",
-        warmup_bars: int = 50
+        warmup_bars: int = 50,
+        checkpoint_path: Optional[str] = None,
+        checkpoint_interval_seconds: int = 300,
     ) -> BacktestResult:
         """
         Run backtest on historical data.
@@ -504,26 +630,66 @@ class BacktestEngine:
             strategy_name: Name for the backtest
             warmup_bars: Number of bars to skip for indicator warmup
         """
-        capital = self.initial_capital
-        self._sync_capital(capital)
-        peak_capital = capital
-        self.trades = []
-        self.equity_curve = [capital]
-        self._warmup_bars = warmup_bars
+        checkpoint_file = Path(checkpoint_path) if checkpoint_path else None
+        resume_checkpoint = None
+        if checkpoint_file is not None:
+            resume_checkpoint = self._load_run_checkpoint(checkpoint_file)
+            if resume_checkpoint is not None and not self._checkpoint_matches_current_run(
+                resume_checkpoint,
+                data=data,
+                strategy_name=strategy_name,
+                warmup_bars=warmup_bars,
+            ):
+                logger.warning(f"Ignoring stale checkpoint {checkpoint_file}")
+                resume_checkpoint = None
 
-        positions = []  # Multi-position: list of open positions
-        daily_pnl = 0.0
-        daily_trades = 0
-        intraday_trades = 0  # Separate counter for intraday session mode
-        last_date = None
+        if resume_checkpoint is not None:
+            self._restore_run_checkpoint(resume_checkpoint)
+            capital = float(resume_checkpoint.get("capital", self.initial_capital))
+            peak_capital = float(resume_checkpoint.get("peak_capital", capital))
+            positions = [dict(position) for position in resume_checkpoint.get("positions", [])]
+            daily_pnl = float(resume_checkpoint.get("daily_pnl", 0.0))
+            daily_trades = int(resume_checkpoint.get("daily_trades", 0))
+            intraday_trades = int(resume_checkpoint.get("intraday_trades", 0))
+            last_date = resume_checkpoint.get("last_date")
+            pending_signal = resume_checkpoint.get("pending_signal")
+            pending_bars_waited = int(resume_checkpoint.get("pending_bars_waited", 0))
+            start_bar = max(int(resume_checkpoint.get("next_bar_index", warmup_bars)), warmup_bars)
+            logger.info(
+                f"Resuming backtest from checkpoint {checkpoint_file} at bar {start_bar}/{max(len(data) - warmup_bars, 1)}"
+            )
+        else:
+            capital = self.initial_capital
+            self._sync_capital(capital)
+            peak_capital = capital
+            self.trades = []
+            self.equity_curve = [capital]
+            self._warmup_bars = warmup_bars
 
-        # Entry timing state
-        pending_signal = None
-        pending_bars_waited = 0
+            positions = []  # Multi-position: list of open positions
+            daily_pnl = 0.0
+            daily_trades = 0
+            intraday_trades = 0  # Separate counter for intraday session mode
+            last_date = None
+
+            # Entry timing state
+            pending_signal = None
+            pending_bars_waited = 0
+            start_bar = warmup_bars
+
+        if checkpoint_file is not None and resume_checkpoint is None:
+            logger.info(f"Checkpointing enabled: {checkpoint_file}")
 
         logger.info(f"Starting backtest: {strategy_name} on {len(data)} bars")
 
-        for i in range(warmup_bars, len(data)):
+        progress_interval = 10000
+        last_checkpoint_save = time.monotonic()
+        for i in range(start_bar, len(data)):
+            if i == start_bar or ((i - start_bar) % progress_interval == 0 and i > start_bar):
+                logger.info(
+                    f"Backtest progress: {strategy_name} bar {i - warmup_bars + 1}/{max(len(data) - warmup_bars, 1)}"
+                )
+
             current_bar = data.iloc[i]
             current_time = str(current_bar.get("timestamp", i))
             current_date = str(current_bar.get("timestamp", ""))[:10]
@@ -614,7 +780,6 @@ class BacktestEngine:
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
-                    daily_trades += 1
                     self._sync_capital(capital)
                     closed_indices.append(pidx)
             # Remove closed positions (reverse order to preserve indices)
@@ -633,6 +798,7 @@ class BacktestEngine:
                         )
                         if filled:
                             positions.append(fill_result)
+                            daily_trades += 1
                             intraday_trades += 1
                             pending_signal = None
                             pending_bars_waited = 0
@@ -661,6 +827,7 @@ class BacktestEngine:
                             pending_signal, current_bar, current_time
                         )
                         positions.append(new_pos)
+                        daily_trades += 1
                         intraday_trades += 1
                         pending_signal = None
                         pending_bars_waited = 0
@@ -692,6 +859,31 @@ class BacktestEngine:
             if capital > peak_capital:
                 peak_capital = capital
 
+            if checkpoint_file is not None and checkpoint_interval_seconds is not None:
+                elapsed_since_checkpoint = time.monotonic() - last_checkpoint_save
+                should_save = checkpoint_interval_seconds <= 0 or elapsed_since_checkpoint >= checkpoint_interval_seconds
+                if should_save:
+                    checkpoint_state = self._build_run_checkpoint(
+                        data=data,
+                        strategy_name=strategy_name,
+                        warmup_bars=warmup_bars,
+                        next_bar_index=i + 1,
+                        capital=capital,
+                        peak_capital=peak_capital,
+                        positions=positions,
+                        daily_pnl=daily_pnl,
+                        daily_trades=daily_trades,
+                        intraday_trades=intraday_trades,
+                        last_date=last_date,
+                        pending_signal=pending_signal,
+                        pending_bars_waited=pending_bars_waited,
+                    )
+                    self._save_run_checkpoint(checkpoint_file, checkpoint_state)
+                    last_checkpoint_save = time.monotonic()
+                    logger.info(
+                        f"Checkpoint saved: {checkpoint_file.name} (bar {i + 1}/{len(data)})"
+                    )
+
         # Close any remaining positions at last bar
         for pos in positions:
             if pos.get("instrument_type") == "options":
@@ -706,6 +898,12 @@ class BacktestEngine:
             )
             self.trades.append(trade)
             self._sync_capital(capital)
+
+        if checkpoint_file is not None and checkpoint_file.exists():
+            try:
+                checkpoint_file.unlink()
+            except Exception as exc:
+                logger.warning(f"Failed to remove checkpoint {checkpoint_file}: {exc}")
 
         # Calculate metrics
         return self._calculate_metrics(strategy_name, data, capital)
@@ -1118,11 +1316,11 @@ class BacktestEngine:
             # Simplified estimate: gamma contribution = 0.5 × gamma × (dS)²
             # We estimate gamma from delta: ATM gamma peaks at delta=0.5
             # gamma ≈ N'(d1) / (S × sigma × sqrt(T)) ≈ 0.4 / (S × 0.20 × sqrt(T))
-            # For practical use: gamma_pct = delta × (1 - delta) × gamma_scale
+            # For practical use: gamma_pct = |delta| × (1 - |delta|) × gamma_scale
             # gamma_scale calibrated so ATM weekly has ~0.0008 gamma per index point
             spot_price = prev_close
             gamma_scale = 2.0 / max(spot_price, 1.0)  # ~0.0001 for NIFTY 22000
-            gamma = delta * (1 - abs(delta)) * gamma_scale
+            gamma = abs(delta) * (1 - abs(delta)) * gamma_scale
 
             if position["direction"] == "bullish":
                 # Call option: premium moves WITH index, minus theta, plus gamma convexity
@@ -1137,19 +1335,20 @@ class BacktestEngine:
                 gamma_high = 0.5 * gamma * index_move_low ** 2
                 gamma_low = 0.5 * gamma * index_move_high ** 2
                 gamma_close = 0.5 * gamma * index_move_close ** 2
-                premium_high = current_premium - delta * index_move_low + gamma_high - theta_decay
-                premium_low = current_premium - delta * index_move_high + gamma_low - theta_decay
-                premium_close = current_premium - delta * index_move_close + gamma_close - theta_decay
+                premium_high = current_premium + delta * index_move_low + gamma_high - theta_decay
+                premium_low = current_premium + delta * index_move_high + gamma_low - theta_decay
+                premium_close = current_premium + delta * index_move_close + gamma_close - theta_decay
 
             # Update delta for next bar (delta drift / charm approximation)
             # Call: underlying up → delta increases (moves ITM)
             # Put:  underlying up → delta decreases (moves OTM)
             if spot_price > 0:
                 delta_shift = gamma * index_move_close  # approximate charm
-                if position["direction"] == "bearish":
-                    delta_shift = -delta_shift  # put delta moves opposite to calls
                 new_delta = delta + delta_shift
-                new_delta = max(0.05, min(0.95, new_delta))  # clamp to valid range
+                if position["direction"] == "bearish":
+                    new_delta = min(-0.05, max(-0.95, new_delta))
+                else:
+                    new_delta = max(0.05, min(0.95, new_delta))
                 position["delta"] = new_delta
 
             # Clamp premiums — can't go below zero

@@ -1,33 +1,24 @@
 @echo off
 :: ============================================================================
 :: PROMETHEUS Trading Service — Auto-Start Launcher
-:: Runs COMBINED mode: Swing (1PM + 3:35PM) + Intraday (9:45-14:30) + Multi-Account
+:: Runs SWING paper mode: 15-minute scans from the first valid 09:30 close
 :: ============================================================================
 
 cd /d "C:\Users\amanu\Desktop\Trading"
+set "ROOT=%CD%"
+set "PYTHON=%ROOT%\.venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=C:\Program Files\Python312\python.exe"
 
-:: Log file for debugging
-set LOGFILE=C:\Users\amanu\Desktop\Trading\prometheus_service.log
-
-:: Rotate log if > 10 MB (10485760 bytes)
-if exist "%LOGFILE%" (
-    for %%A in ("%LOGFILE%") do (
-        if %%~zA GTR 10485760 (
-            if exist "%LOGFILE%.2" del "%LOGFILE%.2"
-            if exist "%LOGFILE%.1" ren "%LOGFILE%.1" prometheus_service.log.2
-            ren "%LOGFILE%" prometheus_service.log.1
-        )
-    )
-)
+set "LOGDIR=%ROOT%\logs"
+if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>&1
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"`) do set "TS=%%A"
+set "LOGFILE=%LOGDIR%\prometheus_service_%TS%.log"
 
 echo [%date% %time%] PROMETHEUS service starting... >> "%LOGFILE%"
-echo [%date% %time%] Mode: COMBINED (swing + intraday) + MULTI-ACCOUNT >> "%LOGFILE%"
+echo [%date% %time%] Mode: SWING PAPER (15-minute scans, first valid scan ~09:30 IST) >> "%LOGFILE%"
 
-:: Run combined mode: swing + intraday with 4 paper accounts
-:: --combined  = both swing scans (1PM, 3:35PM) + intraday scans (9:45-14:30)
-:: --multi-account = 4 parallel accounts (15K, 50K, 1L, 2L)
-:: --data-source hybrid = yfinance validation gate + Angel One execution feeds
-:: Intraday scan auto-aligns to bar interval (5min bars→300s, 15min bars→900s)
-"C:\Program Files\Python312\python.exe" prometheus/main.py paper --combined --multi-account --data-source hybrid --fetch-retries 2 >> "%LOGFILE%" 2>&1
+:: Run swing-only paper mode
+:: --data-source auto = Kite if available, else Angel One/yfinance fallbacks
+"%PYTHON%" prometheus/main.py paper --data-source auto --fetch-retries 2 >> "%LOGFILE%" 2>&1
 
 echo [%date% %time%] PROMETHEUS service stopped. >> "%LOGFILE%"

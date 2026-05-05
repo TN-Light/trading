@@ -1,0 +1,4 @@
+regime_at_entry,trades,wins,losses,win_rate,net_pnl,avg_profit,avg_loss,profit_factor,avg_hold_min,avg_trade_pnl
+markdown,21,13,8,61.9,22506.66,1912.11,293.85,10.57,775.0,1071.75
+markup,12,7,5,58.3,10596.52,1620.68,149.65,15.16,911.2,883.04
+accumulation,2,1,1,50.0,455.9,518.73,62.83,8.26,2055.0,227.95

@@ -449,29 +449,36 @@ class DataEngine:
 
     def _get_source_order(self, symbol: str, interval: str, days: int) -> List[str]:
         """Resolve provider priority based on mode and data characteristics."""
-        
-        # Hardcode override: Always try local CSV first for large backtesting if it's NIFTY and intraday
+        sources: List[str] = []
+
+        # Hardcode override: try local CSV first for large NIFTY intraday backtests,
+        # but still allow fallbacks if the file is missing or stale.
         if symbol == "NIFTY 50" and interval in ["5minute", "5m"]:
-            return ["csv"]
-            
+            sources.append("csv")
+
         if self.historical_source != "auto":
             # Hybrid architecture: use yfinance candles for validation gates,
             # while execution-side pricing/option chain still prefers Angel One.
             if self.historical_source == "hybrid":
-                return ["yfinance"]
-            return [self.historical_source]
-
-        sources: List[str] = []
+                if "yfinance" not in sources:
+                    sources.append("yfinance")
+            else:
+                if self.historical_source not in sources:
+                    sources.append(self.historical_source)
+            return sources
         intraday_intervals = {"5minute", "5m", "15minute", "15m", "minute", "1m"}
 
         if self.kite.is_connected() and KiteDataFeed.INDEX_TOKENS.get(symbol):
-            sources.append("kite")
+            if "kite" not in sources:
+                sources.append("kite")
 
-        # Prefer Angel One for long intraday history where yfinance is capped.
-        if self.angelone and interval in intraday_intervals and days > 59:
-            sources.append("angelone")
+        # Prefer Angel One for intraday history when available.
+        if self.angelone and interval in intraday_intervals:
+            if "angelone" not in sources:
+                sources.append("angelone")
 
-        sources.append("yfinance")
+        if "yfinance" not in sources:
+            sources.append("yfinance")
         return sources
 
     def _fetch_from_source(

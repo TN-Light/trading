@@ -280,3 +280,9 @@ Alerts (optional): python-telegram-bot
 - `python run_regression_guard.py --base-ref HEAD~1 --target-ref WORKTREE --symbols "NIFTY 50" "NIFTY BANK" "SENSEX" --days 1825 3650 5475 --data-source yfinance --fetch-retries 2 --allow-degrade` → **strict no-degrade PASS** across all tracked metrics (PF, Sharpe, Calmar, MaxDD, PBO).
 - `python run_regression_guard.py --base-ref HEAD~1 --target-ref WORKTREE --symbols "NIFTY 50" "NIFTY BANK" "SENSEX" --days 1825 3650 5475 --data-source yfinance --fetch-retries 2` → **strict mode PASS**, exit code **0**.
 - `prometheus/config/deployment_filters.yaml` now emits symbol whitelist: **NIFTY 50**.
+
+## Session 30 Updates (May 4, 2026)
+
+- Swing-15m is the locked execution path for paper/live alerts and execution.
+- Do not mix swing logic with a separate intraday execution path unless the user explicitly asks for it.
+- Treat 15-minute bars as the swing timeframe for this workflow; keep any intraday code isolated or disabled.
