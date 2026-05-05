@@ -139,17 +139,24 @@ intraday:
   allowed_instruments:
   - NIFTY 50
   - NIFTY BANK
+  - NIFTY FIN SERVICE
+  - NIFTY IT
+  - SENSEX
   bar_interval: auto
+  use_backtest_generator: true
   breakeven_ratio: 0.5
   enabled: false
   instruments:
   - NIFTY 50
   - NIFTY BANK
+  - NIFTY FIN SERVICE
+  - NIFTY IT
+  - SENSEX
   last_entry_time: '14:30'
   max_daily_trades: 4
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
-  skip_first_minutes: 30
+  skip_first_minutes: 15
   square_off_time: '15:15'
   time_stop_bars_15min: 16
   time_stop_bars_5min: 36
@@ -324,84 +331,49 @@ market:
   exchange: NSE
   holidays_calendar: india_nse
   indices:
-  - NIFTY 50
-  - NIFTY BANK
-  - NIFTY FIN SERVICE
-  - NIFTY IT
-  - NIFTY MIDCAP SELECT
   - SENSEX
+  - NIFTY IT
+  - NIFTY FIN SERVICE
+  - NIFTY BANK
+  - NIFTY 50
   lot_sizes:
     NIFTY 50: 50
     NIFTY BANK: 15
     NIFTY FIN SERVICE: 40
     SENSEX: 10
-  stocks:
-  - HDFCBANK
-  - ICICIBANK
-  - SBIN
-  - AXISBANK
-  - KOTAKBANK
-  - INDUSINDBK
-  - PNB
-  - IDFCFIRSTB
-  - TCS
-  - INFY
-  - WIPRO
-  - HCLTECH
-  - TECHM
-  - LTIM
-  - TATAMOTORS
-  - TMPV
-  - M&M
-  - MARUTI
-  - BAJAJ-AUTO
-  - HEROMOTOCO
-  - RELIANCE
-  - ONGC
-  - NTPC
-  - POWERGRID
-  - ADANIENT
-  - ADANIPORTS
-  - SUNPHARMA
-  - DRREDDY
-  - CIPLA
-  - DIVISLAB
-  - ITC
-  - HINDUNILVR
-  - NESTLEIND
-  - BRITANNIA
-  - BAJFINANCE
-  - BAJAJFINSV
-  - SBILIFE
-  - HDFCLIFE
-  - TATASTEEL
-  - JSWSTEEL
-  - HINDALCO
-  - ULTRACEMCO
-  - LT
-  - TITAN
-  - ASIANPAINT
+  stocks: []
   trading_hours:
     end: '15:30'
     pre_open_end: 09:08
     pre_open_start: 09:00
     start: 09:15
+paper:
+  capital_overrides:
+    brackets:
+      tier1:
+        base_target: 5.0
+        max_capital: 29999
+        max_loss_per_trade: 300
+        min_margin: 0
+        min_rr: 2.5
+        name: 15K Paper Capture
+        sl_atr_mult: 1.0
+  risk_overrides:
+    consecutive_losses_pause: 10
+    drawdown_halt_pct: 100.0
+    max_daily_loss_pct: 100.0
+    max_daily_trades: 20
+    max_single_position_pct: 150.0
+    max_weekly_loss_pct: 100.0
+    pause_duration_minutes: 15
 multi_account:
+  enabled: true
   accounts:
-  - capital: 15000
-    label: micro_15k
-  - capital: 50000
-    label: starter_50k
   - capital: 100000
-    label: growth_100k
+    label: paper_100k
     risk_overrides:
       drawdown_halt_pct: 15.0
       max_open_positions: 3
-  - capital: 200000
-    label: full_200k
-    risk_overrides:
-      drawdown_halt_pct: 15.0
-      max_open_positions: 4
 position_monitor:
   breakeven_ratio: 0.6
   confirmation_timeout: 1800
@@ -476,6 +448,9 @@ strategies:
     iv_percentile_trigger: 30
     max_position_cost: 0.2
 swing:
+  use_backtest_generator: true
+  enable_midday_scan: false
+  catch_up_post_close: true
   index_scan_times:
   - '13:00'
   - '15:35'

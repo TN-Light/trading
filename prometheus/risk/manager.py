@@ -83,9 +83,15 @@ class RiskManager:
         self.current_capital = initial_capital
         self.peak_capital = initial_capital
         
-        # Initialize the bracket manager
+        def _deep_merge_dicts(base: Dict, overlay: Dict) -> Dict:
+            merged = dict(base or {})
+            for key, value in (overlay or {}).items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key] = _deep_merge_dicts(merged[key], value)
+                else:
+                    merged[key] = value
+            return merged
         from prometheus.config import get_capital_config
-        self.bracket_manager = CapitalBracketManager(get_capital_config())
 
         # Daily limits
         self.max_daily_loss = config.get("max_daily_loss", 5000)
@@ -114,7 +120,12 @@ class RiskManager:
         self.drawdown_halt_pct = config.get("drawdown_halt_pct", 10.0)
 
         # Intraday limits
-        self.max_intraday_trades = config.get("max_intraday_trades", 4)
+        capital_override = config.get("capital_config_override") or config.get("capital_config")
+        if capital_override:
+            capital_config = _deep_merge_dicts(get_capital_config(), capital_override)
+        else:
+            capital_config = get_capital_config()
+        self.bracket_manager = CapitalBracketManager(capital_config)
         self._intraday_trades_today = 0
 
         # State tracking
@@ -460,7 +471,16 @@ class RiskManager:
             delta = pos.get("delta", 0.5)
 
             # Option P&L ≈ delta × spot_change × quantity
-            spot_change = entry * spot_change_pct / 100
+            spot_ref = (
+                pos.get("spot_at_signal")
+                or pos.get("spot_price")
+                or pos.get("signal_spot")
+                or pos.get("underlying")
+                or 0
+            )
+            if spot_ref <= 0:
+                spot_ref = entry
+            spot_change = spot_ref * spot_change_pct / 100
             option_change = delta * spot_change
 
             if direction == "bearish":

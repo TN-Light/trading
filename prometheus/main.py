@@ -54,6 +54,7 @@ import yaml
 # ── PROMETHEUS Modules ───────────────────────────────────────────────────────
 from prometheus.config import load_config, get, get_credential, get_risk_limits, get_capital_config
 from prometheus.utils.logger import logger, setup_logging
+from prometheus.utils.preflight import run_preflight
 from prometheus.utils.indian_market import (
     is_market_open, is_trading_day, days_to_expiry,
     get_lot_size, get_atm_strike, get_expiry_date, get_strike_interval, IST
@@ -85,6 +86,7 @@ from prometheus.backtest.engine import BacktestEngine, ZerodhaCostModel
 from prometheus.execution.broker import BrokerBase, Order, OrderSide, OrderType, ProductType
 from prometheus.execution.paper_trader import PaperTrader
 from prometheus.execution.order_manager import OrderManager
+from prometheus.execution.kite_executor import generate_tradingsymbol
 
 from prometheus.interface.cli_dashboard import CLIDashboard
 from prometheus.interface.telegram_bot import TelegramBot
@@ -98,15 +100,24 @@ class Prometheus:
     Master orchestrator — wires all subsystems together.
     """
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        mode_override: Optional[str] = None,
+        allow_paper_fallback: bool = True,
+    ):
         # Load config
         cfg_path = config_path or str(PROJECT_ROOT / "config" / "settings.yaml")
         self.config = load_config(cfg_path)
         setup_logging(get("logging.level", "INFO"))
 
+        self.allow_paper_fallback = allow_paper_fallback
+
         logger.info("=" * 60)
         logger.info("  PROMETHEUS Trading System v1.0")
         logger.info("=" * 60)
+
+        mode = mode_override or get("system.mode", "paper")
 
         # Capital
         cap_cfg = get_capital_config()
@@ -147,10 +158,16 @@ class Prometheus:
         self.selector = StrategySelector(strat_cfg, self.capital)
 
         # Risk Manager
-        self.risk = RiskManager(get_risk_limits(), self.initial_capital)
+        risk_cfg = dict(get_risk_limits())
+        if mode == "paper":
+            paper_cfg = get("paper", {})
+            risk_cfg.update(paper_cfg.get("risk_overrides", {}))
+            capital_overrides = paper_cfg.get("capital_overrides", {})
+            if capital_overrides:
+                risk_cfg["capital_config_override"] = capital_overrides
+        self.risk = RiskManager(risk_cfg, self.initial_capital)
 
         # Execution
-        mode = get("system.mode", "paper")
         if mode in ("paper", "backtest", "signal", "dry_run"):
             self.broker = PaperTrader(self.initial_capital)
         elif mode in ("semi_auto", "full_auto"):
@@ -161,9 +178,15 @@ class Prometheus:
                 access_token=get_credential("broker.access_token") or get("broker.access_token", ""),
             )
             if not self.broker.connect():
-                logger.error("KiteExecutor connection failed! Falling back to PaperTrader.")
-                self.broker = PaperTrader(self.initial_capital)
-                mode = "dry_run"
+                msg = "KiteExecutor connection failed."
+                if self.allow_paper_fallback:
+                    logger.error(f"{msg} Falling back to PaperTrader.")
+                    self.broker = PaperTrader(self.initial_capital)
+                    mode = "dry_run"
+                else:
+                    raise RuntimeError(
+                        f"{msg} Aborting live mode. Set --allow-paper-fallback to continue in dry_run."
+                    )
         else:
             self.broker = PaperTrader(self.initial_capital)
         self.order_manager = OrderManager(self.broker, self.risk, mode)
@@ -213,6 +236,9 @@ class Prometheus:
         self._last_trade_reject_alerts: Dict[Tuple[str, str], datetime] = {}
         self._scan_lock = threading.Lock()
         self._scan_in_progress = False
+        self._paper_loop_active = False
+        self._paper_loop_started_at = None
+        self._paper_scan_interval_seconds = None
 
         n_stocks = len(self.stock_symbols)
         logger.info(
@@ -258,6 +284,7 @@ class Prometheus:
                 label=acc["label"],
                 initial_capital=acc["capital"],
                 risk_overrides=acc.get("risk_overrides", {}),
+                capital_overrides=acc.get("capital_overrides", {}),
             ))
         if not accounts:
             accounts = MultiAccountPaperTrader.DEFAULT_ACCOUNTS
@@ -967,6 +994,19 @@ class Prometheus:
             logger.warning(f"No intraday data for {symbol}")
             return None
 
+        return self._analyze_intraday_from_data(symbol, data_primary, data_bias, bar_interval)
+
+    def _analyze_intraday_from_data(
+        self,
+        symbol: str,
+        data_primary: pd.DataFrame,
+        data_bias: pd.DataFrame,
+        bar_interval: str,
+    ) -> Optional[FusedSignal]:
+        """Intraday analysis using supplied data slices (live-path replay helper)."""
+        if data_primary is None or data_primary.empty:
+            return None
+
         spot = data_primary["close"].iloc[-1]
 
         # 2. Technical signals
@@ -1144,6 +1184,334 @@ class Prometheus:
             return list(base_symbols)
         return filtered
 
+    def _get_intraday_backtest_signal(
+        self,
+        symbol: str,
+        bar_interval: str,
+    ) -> Optional[Dict]:
+        """Generate intraday signal using backtest signal generator logic."""
+        data_primary = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+        if data_primary.empty:
+            return None
+
+        if bar_interval == "5minute":
+            data_bias = self.data.fetch_historical(symbol, days=10, interval="15minute")
+        else:
+            data_bias = self.data.fetch_historical(symbol, days=30, interval="60minute")
+
+        data_daily = self.data.fetch_historical(symbol, days=120, interval="day")
+        regime_state = self.regime_detector.detect(data_daily) if len(data_daily) >= 50 else None
+
+        hourly_bias_map = self._compute_intraday_bias(data_bias)
+
+        capital = self._get_current_equity()
+        capital_tracker = {"capital": capital, "peak": capital}
+
+        intraday_cfg = get("intraday", {})
+        intraday_v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg.get("v2", {}), dict) else {}
+        intraday_v2_enabled = intraday_v2_cfg.get("enabled", True)
+        intra_profile = self._apply_intraday_ab_profile(
+            self._resolve_capital_profile("intraday", capital).get("profile", {}),
+            symbol=symbol,
+            intraday_v2_cfg=intraday_v2_cfg,
+        )
+
+        intraday_overrides = {
+            "breakeven_ratio": intra_profile.get("breakeven_ratio", intraday_cfg.get("breakeven_ratio", 0.5)),
+            "use_default_weights": True,
+            "weight_overrides": {
+                "signal_supertrend": 1.0,
+                "signal_ema": 0.75,
+                "signal_vwap": 1.0,
+            },
+        }
+
+        if intraday_v2_enabled:
+            intraday_overrides.update({
+                "confluence_trending": intra_profile.get("confluence_trending", intraday_v2_cfg.get("confluence_trending", 4.25)),
+                "confluence_sideways": intra_profile.get("confluence_sideways", intraday_v2_cfg.get("confluence_sideways", 5.0)),
+                "min_rr": intra_profile.get("min_rr", intraday_v2_cfg.get("min_rr", 2.0)),
+                "kelly_wr": intra_profile.get("kelly_wr", intraday_v2_cfg.get("kelly_wr", 0.40)),
+                "time_stop_bars": intra_profile.get("time_stop_bars", intraday_v2_cfg.get("time_stop_bars", 14)),
+                "target_atr_mult": intra_profile.get("target_atr_mult", intraday_v2_cfg.get("target_atr_mult", 2.2)),
+                "min_net_edge": intra_profile.get("min_net_edge", intraday_v2_cfg.get("min_net_edge", 2.0)),
+                "require_vwap_alignment": intraday_v2_cfg.get("require_vwap_alignment", True),
+                "require_ema_alignment": intraday_v2_cfg.get("require_ema_alignment", True),
+                "require_supertrend_alignment": intraday_v2_cfg.get("require_supertrend_alignment", True),
+                "require_volume_surge": intraday_v2_cfg.get("require_volume_surge", True),
+                "breakout_lookback": intraday_v2_cfg.get("breakout_lookback", 12),
+                "breakout_atr_buffer": intraday_v2_cfg.get("breakout_atr_buffer", 0.10),
+                "trendday_prefilter": intraday_v2_cfg.get("trendday_prefilter", False),
+                "trendday_persistence_min": intraday_v2_cfg.get("trendday_persistence_min", 0.55),
+                "orb_atr_buffer": intraday_v2_cfg.get("orb_atr_buffer", 0.10),
+                "persistence_lookback": intraday_v2_cfg.get("persistence_lookback", 8),
+                "trendday_breakout_override_atr": intraday_v2_cfg.get("trendday_breakout_override_atr", 0.60),
+                "vol_adaptive_trailing": intraday_v2_cfg.get("vol_adaptive_trailing", False),
+                "event_risk_gate_enabled": intraday_v2_cfg.get("event_risk_gate", {}).get("enabled", False),
+                "event_block_before_min": intraday_v2_cfg.get("event_risk_gate", {}).get("block_before_minutes", 15),
+                "event_block_after_min": intraday_v2_cfg.get("event_risk_gate", {}).get("block_after_minutes", 15),
+                "use_oi_pcr_filter": intraday_v2_cfg.get("use_oi_pcr_filter", False),
+                "pcr_refresh_minutes": intraday_v2_cfg.get("pcr_refresh_minutes", 30),
+                "pcr_intraday_signal_delta": intraday_v2_cfg.get("pcr_intraday_signal_delta", 0.20),
+                "oi_sr_tolerance_pct": intraday_v2_cfg.get("oi_sr_tolerance_pct", 0.0025),
+                "vix_sell_only_below": intraday_v2_cfg.get("vix_sell_only_below", 12.0),
+                "vix_buy_only_above": intraday_v2_cfg.get("vix_buy_only_above", 18.0),
+                "ce_high_vix_edge_penalty": intraday_v2_cfg.get("ce_high_vix_edge_penalty", 0.25),
+                "dead_zone_start": intraday_v2_cfg.get("dead_zone_start", "11:30"),
+                "dead_zone_end": intraday_v2_cfg.get("dead_zone_end", "13:30"),
+                "afternoon_window_start": intraday_v2_cfg.get("afternoon_window_start", "14:00"),
+                "use_second_window": intraday_v2_cfg.get("use_second_window", True),
+                "gap_fade_threshold_pct": intraday_v2_cfg.get("gap_fade_threshold_pct", 0.30),
+                "skip_1dte_buying": intraday_v2_cfg.get("skip_1dte_buying", True),
+                "monday_1dte_guard": intraday_v2_cfg.get("monday_1dte_guard", True),
+                "monday_override_score": intraday_v2_cfg.get("monday_override_score", 5.5),
+                "monday_override_breakout_atr": intraday_v2_cfg.get("monday_override_breakout_atr", 0.9),
+                "premium_targeting_enabled": intraday_v2_cfg.get("premium_targeting_enabled", True),
+                "target_premium_rs": intraday_v2_cfg.get("target_premium_rs", 200.0),
+                "target_delta_min": intraday_v2_cfg.get("target_delta_min", 0.55),
+                "target_delta_max": intraday_v2_cfg.get("target_delta_max", 0.70),
+                "fixed_premium_sl_enabled": intraday_v2_cfg.get("fixed_premium_sl_enabled", True),
+                "fixed_premium_sl_pct": intraday_v2_cfg.get("fixed_premium_sl_pct", 0.20),
+                "expiry_late_scalp_only": intraday_v2_cfg.get("expiry_late_scalp_only", True),
+                "expiry_late_target_atr": intraday_v2_cfg.get("expiry_late_target_atr", 1.0),
+                "allow_counter_bias_when_strong": intraday_v2_cfg.get("allow_counter_bias_when_strong", False),
+                "counter_bias_min_net_edge": intraday_v2_cfg.get("counter_bias_min_net_edge", 2.5),
+                "counter_bias_breakout_atr": intraday_v2_cfg.get("counter_bias_breakout_atr", 0.8),
+                "intraday_v2_disable_mr": intraday_v2_cfg.get("disable_mean_reversion", True),
+                "weight_overrides": {
+                    "signal_supertrend": intraday_v2_cfg.get("weight_supertrend", 1.25),
+                    "signal_ema": intraday_v2_cfg.get("weight_ema", 1.0),
+                    "signal_vwap": intraday_v2_cfg.get("weight_vwap", 1.25),
+                },
+            })
+
+        ab_cfg = self._get_intraday_ab_cfg()
+        if ab_cfg:
+            if "trendday_prefilter" in ab_cfg:
+                intraday_overrides["trendday_prefilter"] = bool(ab_cfg.get("trendday_prefilter"))
+            if "trendday_persistence_min" in ab_cfg:
+                intraday_overrides["trendday_persistence_min"] = float(ab_cfg.get("trendday_persistence_min", 0.55))
+            if "orb_atr_buffer" in ab_cfg:
+                intraday_overrides["orb_atr_buffer"] = float(ab_cfg.get("orb_atr_buffer", 0.10))
+            if "persistence_lookback" in ab_cfg:
+                intraday_overrides["persistence_lookback"] = int(ab_cfg.get("persistence_lookback", 8))
+            if "trendday_breakout_override_atr" in ab_cfg:
+                intraday_overrides["trendday_breakout_override_atr"] = float(ab_cfg.get("trendday_breakout_override_atr", 0.60))
+            if "vol_adaptive_trailing" in ab_cfg:
+                intraday_overrides["vol_adaptive_trailing"] = bool(ab_cfg.get("vol_adaptive_trailing"))
+            if "event_risk_gate_enabled" in ab_cfg:
+                intraday_overrides["event_risk_gate_enabled"] = bool(ab_cfg.get("event_risk_gate_enabled"))
+            if "event_risk_events" in ab_cfg:
+                intraday_overrides["event_risk_events"] = ab_cfg.get("event_risk_events", [])
+            if "use_oi_pcr_filter" in ab_cfg:
+                intraday_overrides["use_oi_pcr_filter"] = bool(ab_cfg.get("use_oi_pcr_filter"))
+            if "pcr_intraday_signal_delta" in ab_cfg:
+                intraday_overrides["pcr_intraday_signal_delta"] = float(ab_cfg.get("pcr_intraday_signal_delta", 0.20))
+            if "vix_sell_only_below" in ab_cfg:
+                intraday_overrides["vix_sell_only_below"] = float(ab_cfg.get("vix_sell_only_below", 12.0))
+            if "vix_buy_only_above" in ab_cfg:
+                intraday_overrides["vix_buy_only_above"] = float(ab_cfg.get("vix_buy_only_above", 18.0))
+            if "skip_1dte_buying" in ab_cfg:
+                intraday_overrides["skip_1dte_buying"] = bool(ab_cfg.get("skip_1dte_buying"))
+            if "target_premium_rs" in ab_cfg:
+                intraday_overrides["target_premium_rs"] = float(ab_cfg.get("target_premium_rs", 200.0))
+            if "allow_counter_bias_when_strong" in ab_cfg:
+                intraday_overrides["allow_counter_bias_when_strong"] = bool(ab_cfg.get("allow_counter_bias_when_strong"))
+            if "counter_bias_min_net_edge" in ab_cfg:
+                intraday_overrides["counter_bias_min_net_edge"] = float(ab_cfg.get("counter_bias_min_net_edge", 2.5))
+            if "counter_bias_breakout_atr" in ab_cfg:
+                intraday_overrides["counter_bias_breakout_atr"] = float(ab_cfg.get("counter_bias_breakout_atr", 0.8))
+
+        signal_gen = self._make_signal_generator(
+            regime_state=regime_state,
+            hourly_bias_map=hourly_bias_map,
+            capital=capital,
+            primary_interval=bar_interval,
+            symbol=symbol,
+            param_overrides=intraday_overrides,
+            parrondo=False,
+            capital_tracker=capital_tracker,
+        )
+
+        signal = signal_gen(data_primary)
+        if signal:
+            try:
+                signal["bar_timestamp"] = str(data_primary["timestamp"].iloc[-1])
+            except Exception:
+                signal["bar_timestamp"] = ""
+        return signal
+
+    def _convert_backtest_signal_for_execution(self, signal: Optional[Dict]) -> Optional[Dict]:
+        """Map backtest signal dict into an executable intraday order signal."""
+        if not signal:
+            return None
+
+        strategy = str(signal.get("strategy", ""))
+        if strategy.startswith("expiry_"):
+            return None
+
+        direction = signal.get("direction", "")
+        if direction not in ("bullish", "bearish"):
+            return None
+
+        action = "BUY_CE" if direction == "bullish" else "BUY_PE"
+        option_type = "CE" if direction == "bullish" else "PE"
+
+        out = dict(signal)
+        out["action"] = action
+        out["option_type"] = out.get("option_type") or option_type
+
+        entry = float(out.get("entry_price", 0) or 0)
+        sl = float(out.get("stop_loss", 0) or 0)
+        target = float(out.get("target", 0) or 0)
+        risk = abs(entry - sl)
+        reward = abs(target - entry)
+        if not out.get("risk_reward"):
+            out["risk_reward"] = round(reward / risk, 2) if risk > 0 else 0.0
+
+        score = float(out.get("bull_score", 0) or out.get("bear_score", 0) or 0)
+        if not out.get("confidence"):
+            out["confidence"] = min(1.0, score / 6.0) if score > 0 else 0.0
+
+        strike = float(out.get("strike", 0) or 0)
+        expiry = str(out.get("option_expiry_date", "") or out.get("expiry", "") or "")
+        symbol = str(out.get("symbol", ""))
+
+        lot_size = int(out.get("lot_size") or get_lot_size(symbol) or 0)
+        out["lot_size"] = lot_size
+        quantity = int(out.get("quantity", 0) or 0)
+        if lot_size > 0 and quantity > 0:
+            out["lots"] = max(1, int(quantity / lot_size))
+
+        if strike > 0 and expiry:
+            sym_upper = symbol.upper()
+            if "SENSEX" in sym_upper:
+                underlying = "SENSEX"
+            elif "NIFTY IT" in sym_upper or "NIFTYIT" in sym_upper:
+                underlying = "NIFTYIT"
+            elif "BANK" in sym_upper:
+                underlying = "BANKNIFTY"
+            elif "FIN" in sym_upper:
+                underlying = "FINNIFTY"
+            else:
+                underlying = "NIFTY"
+            out["instrument"] = generate_tradingsymbol(underlying, expiry, strike, out["option_type"])
+
+        return out
+
+    def _get_intraday_signal_for_execution(
+        self,
+        symbol: str,
+        bar_interval: str,
+        use_backtest_generator: bool,
+    ) -> Optional[Dict]:
+        """Return an executable intraday signal dict for the given mode."""
+        if use_backtest_generator:
+            backtest_signal = self._get_intraday_backtest_signal(symbol, bar_interval)
+            execution_signal = self._convert_backtest_signal_for_execution(backtest_signal)
+            if execution_signal:
+                execution_signal["trade_mode"] = "intraday"
+                execution_signal.setdefault("timeframe", "intraday")
+            return execution_signal
+
+        signal = self.analyze_intraday(symbol, bar_interval)
+        if signal and signal.action != "HOLD":
+            execution_signal = self.refine_with_strategy(signal)
+            if execution_signal:
+                execution_signal["trade_mode"] = "intraday"
+                execution_signal.setdefault("timeframe", "intraday")
+            return execution_signal
+        return None
+
+    def _get_swing_backtest_signal(
+        self,
+        symbol: str,
+        primary_interval: str = "day",
+    ) -> Optional[Dict]:
+        """Generate swing signal using backtest signal generator logic."""
+        primary_interval = primary_interval or "day"
+        data_primary = pd.DataFrame()
+        data_hourly = pd.DataFrame()
+        data_daily = pd.DataFrame()
+
+        if primary_interval == "15minute":
+            data_primary = self.data.fetch_historical(symbol, days=60, interval="15minute")
+            data_hourly = self.data.fetch_historical(symbol, days=60, interval="60minute")
+            data_daily = self.data.fetch_historical(symbol, days=365, interval="day")
+            if data_daily.empty:
+                data_daily = data_primary
+            if data_primary.empty:
+                logger.warning(f"No 15minute data for {symbol}. Falling back to daily bars.")
+                data_primary = data_daily
+                data_hourly = data_daily
+                primary_interval = "day"
+        else:
+            data_daily = self.data.fetch_historical(symbol, days=365, interval="day")
+            if data_daily.empty:
+                return None
+            data_primary = data_daily
+            data_hourly = data_daily
+
+        if data_primary.empty:
+            return None
+
+        regime_state = self.regime_detector.detect(data_daily) if len(data_daily) >= 50 else None
+        if primary_interval == "day":
+            hourly_bias_map = self._compute_daily_bias(data_daily)
+        else:
+            hourly_bias_map = self._compute_intraday_bias(data_hourly)
+
+        capital = float(self.initial_capital)
+        capital_tracker = {"capital": capital, "peak": capital}
+        swing_cfg = get("swing", {})
+        use_parrondo = bool(swing_cfg.get("parrondo", False))
+        param_overrides = {"mr_min_score": 2.5} if primary_interval != "day" else None
+
+        signal_gen = self._make_signal_generator(
+            regime_state=regime_state,
+            hourly_bias_map=hourly_bias_map,
+            capital=capital,
+            primary_interval=primary_interval,
+            symbol=symbol,
+            param_overrides=param_overrides,
+            parrondo=use_parrondo,
+            capital_tracker=capital_tracker,
+        )
+
+        signal = signal_gen(data_primary)
+        if signal:
+            try:
+                signal["bar_timestamp"] = str(data_primary["timestamp"].iloc[-1])
+            except Exception:
+                signal["bar_timestamp"] = ""
+        return signal
+
+    def _get_swing_signal_for_execution(
+        self,
+        symbol: str,
+        use_backtest_generator: bool,
+        primary_interval: str = "day",
+    ) -> Optional[Dict]:
+        """Return an executable swing signal dict for the given mode."""
+        if use_backtest_generator:
+            backtest_signal = self._get_swing_backtest_signal(
+                symbol, primary_interval=primary_interval
+            )
+            execution_signal = self._convert_backtest_signal_for_execution(backtest_signal)
+            if execution_signal:
+                execution_signal["trade_mode"] = "swing"
+                execution_signal.setdefault("timeframe", "swing")
+            return execution_signal
+
+        signal = self.analyze(symbol)
+        if signal and signal.action != "HOLD":
+            execution_signal = self.refine_with_strategy(signal)
+            if execution_signal:
+                execution_signal["trade_mode"] = "swing"
+                execution_signal.setdefault("timeframe", "swing")
+            return execution_signal
+        return None
+
     def scan_all(self) -> list:
         """Scan all configured symbols and return signals."""
         signals = []
@@ -1162,6 +1530,7 @@ class Prometheus:
         """
         symbol = signal.symbol
         base_dict = signal.to_dict()
+        base_dict["trade_mode"] = "swing"
 
         if signal.action == "HOLD":
             return base_dict
@@ -1183,6 +1552,16 @@ class Prometheus:
             vix=self.data.get_vix(),
         )
         strategy_name = selection.get("strategy", signal.strategy or "trend")
+
+        # Volatility module is selected during high-vol regimes, but the paper/live
+        # execution path only wires trend/expiry setups. Without a volatility setup,
+        # fall back to trend so signals remain executable.
+        if strategy_name == "volatility":
+            logger.warning(
+                "Volatility strategy selected but no execution path is wired; "
+                "falling back to trend for executable swing signals."
+            )
+            strategy_name = "trend"
 
         # Fetch data needed by strategy modules
         data_hourly = self.data.fetch_historical(symbol, days=30, interval="60minute")
@@ -1216,6 +1595,7 @@ class Prometheus:
                         enriched["confidence"] = signal.confidence
                         enriched["reasoning"] = signal.reasoning
                         enriched["contributing_signals"] = signal.contributing_signals
+                        enriched["trade_mode"] = "swing"
                         # Map action for order_manager
                         if setup.option_type == "CE":
                             enriched["action"] = "BUY_CE"
@@ -1239,6 +1619,7 @@ class Prometheus:
                     enriched["direction"] = signal.direction
                     enriched["confidence"] = signal.confidence
                     enriched["entry_price"] = setup.total_cost
+                    enriched["trade_mode"] = "swing"
                     logger.info(f"Expiry strategy refined: {setup.strategy_type}")
                     self._feed_real_premium(enriched)
                     return enriched
@@ -1248,6 +1629,7 @@ class Prometheus:
 
         # Feed real premium if Angel One is available (for PaperTrader uses)
         result = base_dict
+        result["trade_mode"] = "swing"
         self._feed_real_premium(result)
         return result
 
@@ -1372,20 +1754,43 @@ class Prometheus:
     # ─────────────────────────────────────────────────────────────────────
     def run_paper_mode(self, interval_seconds: int = 300):
         """
-        Paper trading — simulates real trading with virtual money.
+        Swing paper trading on 15-minute bars.
 
-        Uses smart 3:35 PM scan timing (daily candle must be complete for
-        valid daily-bar signals).  When a signal fires, it auto-executes
-        paper trades through the full pipeline: signal → strategy refinement
-        → risk check → paper order placement → P&L tracking.
+        Telegram alerts are enabled, scans run every 15 minutes, and eligible
+        signals are auto-executed as paper trades. The first valid scan is
+        after the opening 15-minute candle closes (around 09:30 IST).
 
         Telegram commands (/scan, /status, etc.) work anytime.
         """
-        self.running = True
-        self.dashboard.show_header()
-        self._setup_telegram_commands()
-        self.telegram.alert_system_start()
-        logger.info("Starting PAPER TRADING mode...")
+        scan_interval = max(900, int(interval_seconds))
+        self._paper_loop_active = True
+        self._paper_loop_started_at = datetime.now()
+        self._paper_scan_interval_seconds = scan_interval
+        try:
+            self.running = True
+            self.dashboard.show_header()
+            self._setup_telegram_commands()
+            self.telegram.alert_system_start()
+            self.telegram.send_message(
+                "\U0001f7e2 <b>PAPER SWING MODE ACTIVE</b>\n"
+                "Scans: every 15 minutes\n"
+                "First valid scan: 09:30 IST\n"
+                "Eligible signals will be auto-paper-traded."
+            )
+            logger.info("Starting PAPER TRADING mode...")
+            logger.info("Paper mode locked to swing logic on 15-minute bars.")
+            self._run_paper_mode_swing_15m(interval_seconds=scan_interval)
+        finally:
+            self._paper_loop_active = False
+            self.running = False
+        return
+
+        # Legacy daily-candle paper loop (kept for reference, currently bypassed).
+
+        swing_cfg = get("swing", {})
+        use_backtest_generator = bool(swing_cfg.get("use_backtest_generator", False))
+        enable_midday_scan = bool(swing_cfg.get("enable_midday_scan", True))
+        catch_up_post_close = bool(swing_cfg.get("catch_up_post_close", True))
 
         _did_midday_scan = False           # Track if today's mid-day scan ran
         _did_post_close_scan = False      # Track if today's post-close scan ran
@@ -1409,8 +1814,9 @@ class Prometheus:
                     _did_post_close_scan = False
                     _did_send_daily_summary = False
                     _today_traded_symbols.clear()
+                    scan_msg = "Scans at 1:00 PM (early) & 3:35 PM (primary)." if enable_midday_scan else "Scan at 3:35 PM (primary)."
                     self.dashboard.show_status_line(
-                        "Pre-market. Scans at 1:00 PM (early) & 3:35 PM (primary)."
+                        f"Pre-market. {scan_msg}"
                     )
                     time.sleep(60)
                     continue
@@ -1418,7 +1824,7 @@ class Prometheus:
                 # ── MID-DAY EARLY SCAN: 1:00 PM ──
                 # Daily candle ~75% formed. Only fire for VERY strong signals.
                 # Higher confidence threshold filters out noise from incomplete candle.
-                if dtime(13, 0) <= current_time <= dtime(13, 15) and not _did_midday_scan:
+                if enable_midday_scan and not use_backtest_generator and dtime(13, 0) <= current_time <= dtime(13, 15) and not _did_midday_scan:
                     logger.info("Mid-day scan — looking for high-confluence signals...")
                     _mid_found = 0
 
@@ -1457,29 +1863,28 @@ class Prometheus:
 
                 # ── PRIMARY SCAN: After market close (3:35-4:00 PM) ──
                 # Daily candle is complete → signals are valid for next-day entry
-                if dtime(15, 35) <= current_time <= dtime(16, 0) and not _did_post_close_scan:
-                    logger.info("Daily candle closed — running paper trade scan...")
+                is_post_close_window = dtime(15, 35) <= current_time <= dtime(16, 0)
+                is_catch_up = catch_up_post_close and current_time > dtime(16, 0)
+                if (is_post_close_window or is_catch_up) and not _did_post_close_scan:
+                    scan_label = "POST-CLOSE SCAN" if is_post_close_window else "POST-CLOSE CATCH-UP"
+                    logger.info(f"{scan_label}: running paper trade scan...")
                     self.telegram.send_message(
-                        "\U0001f50d <b>POST-CLOSE SCAN (Paper)</b>\n"
+                        f"\U0001f50d <b>{scan_label} (Paper)</b>\n"
                         "Daily candle complete. Scanning & auto-executing paper trades..."
                     )
 
                     for symbol in self.symbols:
-                        signal = self.analyze(symbol)
-                        if signal:
-                            self.dashboard.show_signal(signal.to_dict())
-
-                            if signal.action != "HOLD" and symbol not in _today_traded_symbols:
-                                # Refine through strategy module for strike/premium/sizing
-                                refined = self.refine_with_strategy(signal)
+                        refined = self._get_swing_signal_for_execution(
+                            symbol, use_backtest_generator
+                        )
+                        if refined:
+                            self.dashboard.show_signal(refined)
+                            if refined.get("action") != "HOLD" and symbol not in _today_traded_symbols:
                                 self._alert_signal(refined)
-
-                                # Execute in paper mode
                                 position = self._execute_signal_with_feedback(
                                     refined, confirm=False, context="post-close"
                                 )
                                 self._dispatch_multi_account(refined)
-
                                 if position:
                                     _today_traded_symbols.add(symbol)
                                     self.dashboard.show_status_line(
@@ -1522,10 +1927,11 @@ class Prometheus:
 
                     _did_post_close_scan = True
                     logger.info("Post-close paper scan complete.")
+                    next_scan_msg = "Next scan: tomorrow 1:00 PM (early) & 3:35 PM (primary)." if enable_midday_scan else "Next scan: tomorrow 3:35 PM (primary)."
                     self.telegram.send_message(
                         "\u2705 <b>PAPER SCAN COMPLETE</b>\n"
                         "All paper trades executed above (if any).\n"
-                        "Next scan: tomorrow 1:00 PM (early) & 3:35 PM (primary)."
+                        f"{next_scan_msg}"
                     )
                     time.sleep(60)
                     continue
@@ -1547,8 +1953,9 @@ class Prometheus:
                         } for p in positions]
                         self.dashboard.show_positions(pos_data)
 
+                    scan_msg = "Scans: 1 PM (early) & 3:35 PM (primary)." if enable_midday_scan else "Scan: 3:35 PM (primary)."
                     self.dashboard.show_status_line(
-                        f"Market open. Scans: 1 PM (early) & 3:35 PM (primary). "
+                        f"Market open. {scan_msg} "
                         f"Open positions: {len(positions)}. "
                         f"/scan in Telegram for on-demand."
                     )
@@ -1560,9 +1967,8 @@ class Prometheus:
                     self._send_daily_summary()
                     _did_send_daily_summary = True
 
-                self.dashboard.show_status_line(
-                    "Market closed. Next: trading day 1:00 PM & 3:35 PM IST."
-                )
+                next_day_msg = "Market closed. Next: trading day 1:00 PM & 3:35 PM IST." if enable_midday_scan else "Market closed. Next: trading day 3:35 PM IST."
+                self.dashboard.show_status_line(next_day_msg)
                 time.sleep(60)
 
             except KeyboardInterrupt:
@@ -1579,6 +1985,169 @@ class Prometheus:
                 logger.error(f"Paper mode error: {e}")
                 self.telegram.alert_system_error(str(e))
                 time.sleep(30)
+
+    def _run_paper_mode_swing_15m(self, interval_seconds: int = 300):
+        """Paper loop locked to swing logic on 15-minute bars."""
+        # Start trailing monitor and restore persisted state for crash recovery.
+        self._start_position_monitor()
+        self._restore_equity_state()
+        self._restore_persisted_positions()
+
+        scan_interval = max(900, int(interval_seconds))
+        self._paper_scan_interval_seconds = scan_interval
+        skip_minutes = int(get("intraday.skip_first_minutes", 15))
+        intraday_cfg = get("intraday", {})
+        time_stop_bars = int(intraday_cfg.get("time_stop_bars_15min", 16))
+        price_refresh_seconds = int(get("paper.price_refresh_seconds", 30))
+        _last_scan_time = None
+        _last_price_refresh = None
+        _last_bar_ts: Dict[str, str] = {}
+        _today_traded_symbols = set()
+        _did_send_daily_summary = False
+
+        while self.running:
+            try:
+                now = datetime.now()
+
+                if not is_trading_day(now.date()):
+                    self.dashboard.show_status_line("Market holiday. Waiting...")
+                    time.sleep(60)
+                    continue
+
+                current_time = now.time()
+
+                # Pre-market reset
+                if current_time < dtime(9, 15):
+                    _last_scan_time = None
+                    _last_bar_ts.clear()
+                    _today_traded_symbols.clear()
+                    _did_send_daily_summary = False
+                    self.dashboard.show_status_line(
+                        "Pre-market. Swing-15m scan starts after open."
+                    )
+                    time.sleep(60)
+                    continue
+
+                # Skip opening noise
+                market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+                if (now - market_open).total_seconds() < skip_minutes * 60:
+                    self.dashboard.show_status_line(
+                        "Skipping opening noise. Swing-15m scan starts shortly."
+                    )
+                    time.sleep(30)
+                    continue
+
+                if is_market_open(now):
+                    if not _last_price_refresh or (now - _last_price_refresh).total_seconds() >= price_refresh_seconds:
+                        self._refresh_open_paper_prices()
+                        _last_price_refresh = now
+
+                    if _last_scan_time and (now - _last_scan_time).total_seconds() < scan_interval:
+                        time.sleep(10)
+                        continue
+
+                    logger.info(f"Swing-15m paper scan (every {scan_interval}s)...")
+                    cycle_signals = 0
+
+                    for symbol in self.symbols:
+                        refined = self._get_swing_signal_for_execution(
+                            symbol, True, primary_interval="15minute"
+                        )
+                        if not refined:
+                            continue
+
+                        bar_ts = str(refined.get("bar_timestamp", ""))
+                        if bar_ts and _last_bar_ts.get(symbol) == bar_ts:
+                            continue
+                        if bar_ts:
+                            _last_bar_ts[symbol] = bar_ts
+
+                        if refined.get("action") != "HOLD" and symbol not in _today_traded_symbols:
+                            cycle_signals += 1
+                            self.dashboard.show_signal(refined)
+                            self._alert_signal(refined)
+                            position = self._execute_signal_with_feedback(
+                                refined, confirm=False, context="swing-15m"
+                            )
+                            self._dispatch_multi_account(refined)
+                            if position:
+                                _today_traded_symbols.add(symbol)
+                                ts = self.order_manager.create_trailing_state(position.position_id)
+                                if ts:
+                                    ts.trade_mode = "swing"
+                                    ts.bar_interval = "15minute"
+                                    ts.max_bars = time_stop_bars
+                                    self.position_monitor.add_position(ts)
+                                    self._handle_state_persist(ts)
+                                self.dashboard.show_status_line(
+                                    f"Paper trade opened: {position.position_id}"
+                                )
+
+                    summary_ts = now.strftime("%d %b %Y %H:%M")
+                    if cycle_signals == 0:
+                        self.telegram.send_message(
+                            "\U0001f50e <b>Swing-15m scan complete</b>\n"
+                            f"<code>{summary_ts}</code>\n"
+                            "Eligible signals: <b>0</b>\n"
+                            "No trade setup this cycle."
+                        )
+                    else:
+                        self.telegram.send_message(
+                            "\U0001f50e <b>Swing-15m scan complete</b>\n"
+                            f"<code>{summary_ts}</code>\n"
+                            f"Eligible signals: <b>{cycle_signals}</b>\n"
+                            "Auto paper execution attempted for eligible setups."
+                        )
+
+                    _last_scan_time = now
+                    time.sleep(5)
+                    continue
+
+                # After hours
+                if not _did_send_daily_summary and current_time >= dtime(16, 0):
+                    self._send_daily_summary()
+                    _did_send_daily_summary = True
+
+                self.dashboard.show_status_line(
+                    "Market closed. Next scan: trading day after open."
+                )
+                time.sleep(60)
+
+            except KeyboardInterrupt:
+                self.running = False
+                total_pnl = self.order_manager.close_all_positions("session_end")
+                if self.multi_account:
+                    self.multi_account.close_all("session_end")
+                self._persist_equity_state()
+                self.stop()
+                logger.info(f"Paper trading stopped. Session P&L: Rs {total_pnl:+,.0f}")
+                break
+            except Exception as e:
+                logger.error(f"Paper mode error: {e}")
+                self.telegram.alert_system_error(str(e))
+                time.sleep(30)
+
+    def _refresh_open_paper_prices(self):
+        """Refresh option LTPs for open paper positions (best-effort)."""
+        if not isinstance(self.broker, PaperTrader):
+            return
+        if not getattr(self.data, "angelone_options", None):
+            return
+
+        for managed in self.order_manager.managed_positions.values():
+            if managed.status != "open":
+                continue
+            if not managed.tradingsymbol:
+                continue
+            signal = {
+                "symbol": managed.symbol,
+                "strike": managed.strike,
+                "option_type": managed.option_type,
+                "expiry": managed.expiry_date,
+                "instrument": managed.tradingsymbol,
+                "tradingsymbol": managed.tradingsymbol,
+            }
+            self._feed_real_premium(signal)
 
     # ─────────────────────────────────────────────────────────────────────
     # POSITION MONITOR HELPERS (shared by semi_auto, full_auto, dry_run)
@@ -2656,6 +3225,7 @@ class Prometheus:
         square_off_time = dtime(square_off_h, square_off_m)
         intraday_instruments = self._get_intraday_instruments(self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
+        use_backtest_generator = bool(intraday_cfg.get("use_backtest_generator", False))
         pilot_cfg = intraday_cfg.get("v2", {}).get("pilot_guardrails", {})
         pilot_block_new = bool(pilot_cfg.get("block_new_entries_on_breach", True))
         pilot_force_square_off = bool(pilot_cfg.get("force_square_off_on_breach", True))
@@ -2785,9 +3355,10 @@ class Prometheus:
                     if symbol in _today_traded_symbols:
                         continue
 
-                    signal = self.analyze_intraday(symbol, bar_interval)
-                    if signal and signal.action != "HOLD":
-                        refined = self.refine_with_strategy(signal)
+                    refined = self._get_intraday_signal_for_execution(
+                        symbol, bar_interval, use_backtest_generator
+                    )
+                    if refined and refined.get("action") != "HOLD":
                         self._alert_signal(refined)
 
                         position = self._execute_signal_with_feedback(
@@ -2955,6 +3526,7 @@ class Prometheus:
         square_off_time = dtime(square_off_h, square_off_m)
         intraday_instruments = self._get_intraday_instruments(self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
+        use_backtest_generator = bool(intraday_cfg.get("use_backtest_generator", False))
         pilot_cfg = intraday_cfg.get("v2", {}).get("pilot_guardrails", {})
         pilot_block_new = bool(pilot_cfg.get("block_new_entries_on_breach", True))
         pilot_force_square_off = bool(pilot_cfg.get("force_square_off_on_breach", True))
@@ -3137,9 +3709,10 @@ class Prometheus:
                             for isym in intraday_instruments:
                                 if isym in _intra_traded_symbols:
                                     continue
-                                signal = self.analyze_intraday(isym, bar_interval)
-                                if signal and signal.action != "HOLD":
-                                    refined = self.refine_with_strategy(signal)
+                                refined = self._get_intraday_signal_for_execution(
+                                    isym, bar_interval, use_backtest_generator
+                                )
+                                if refined and refined.get("action") != "HOLD":
                                     self._alert_signal(refined)
                                     position = self._execute_signal_with_feedback(
                                         refined, confirm=False, context=f"{mode_label} intraday"
@@ -3239,6 +3812,44 @@ class Prometheus:
                     bias_map[date_key] = "bearish"
                 else:
                     bias_map[date_key] = "neutral"
+        return bias_map
+
+    def _compute_intraday_bias(self, data_bias: pd.DataFrame) -> dict:
+        """Compute bias map from intraday higher-timeframe data."""
+        bias_map = {}
+        if data_bias is None or data_bias.empty or len(data_bias) < 10:
+            return bias_map
+
+        vwap_df = calculate_vwap(data_bias.copy())
+        for i in range(10, len(data_bias)):
+            chunk = data_bias.iloc[max(0, i - 20):i + 1]
+            date_key = str(chunk["timestamp"].iloc[-1])[:10]
+
+            recent_h = chunk.tail(5)
+            highs = recent_h["high"].values
+            lows = recent_h["low"].values
+
+            hh_count = sum(1 for j in range(1, len(highs)) if highs[j] > highs[j - 1])
+            hl_count = sum(1 for j in range(1, len(lows)) if lows[j] > lows[j - 1])
+            lh_count = sum(1 for j in range(1, len(highs)) if highs[j] < highs[j - 1])
+            ll_count = sum(1 for j in range(1, len(lows)) if lows[j] < lows[j - 1])
+
+            close_val = recent_h["close"].iloc[-1]
+            if "vwap" in vwap_df.columns and i < len(vwap_df):
+                vwap_val = vwap_df["vwap"].iloc[i]
+            else:
+                vwap_val = close_val
+
+            bull_points = hh_count + hl_count + (1 if close_val > vwap_val else 0)
+            bear_points = lh_count + ll_count + (1 if close_val < vwap_val else 0)
+
+            if bull_points >= 4 and bull_points > bear_points + 1:
+                bias_map[date_key] = "bullish"
+            elif bear_points >= 4 and bear_points > bull_points + 1:
+                bias_map[date_key] = "bearish"
+            else:
+                bias_map[date_key] = "neutral"
+
         return bias_map
 
     def _make_signal_generator(
@@ -3746,7 +4357,8 @@ class Prometheus:
         def _build_signal(direction, premium, premium_sl, premium_target,
                           total_quantity, reasons, time_stop_bars, be_ratio, strategy_prefix="pro",
                           signal_features=None, signal_spot=0.0, atr_at_signal=0.0,
-                          option_expiry_date=""):
+                          option_expiry_date="", strike=0.0, option_type="",
+                          lot_size=0, lots=0):
             """Build the final signal dict."""
             sig = {
                 "symbol": symbol,
@@ -3763,7 +4375,11 @@ class Prometheus:
                 "breakeven_ratio": be_ratio,
                 "signal_spot": signal_spot,
                 "atr_at_signal": atr_at_signal,
-                "option_expiry_date": "",  # DTE theta disabled — use bars-held fallback
+                "option_expiry_date": option_expiry_date,
+                "strike": float(strike or 0),
+                "option_type": option_type or "",
+                "lot_size": int(lot_size or 0),
+                "lots": int(lots or 0),
             }
             # Attach signal features for regression training
             if signal_features:
@@ -4062,6 +4678,9 @@ class Prometheus:
 
             be_ratio = overrides.get("breakeven_ratio", profile.get("breakeven_ratio", 0.6))
 
+            option_type = "CE" if direction == "bullish" else "PE"
+            lots = int(total_quantity / lot_size) if lot_size else 0
+
             # --- Signal features for regression training ---
             signal_features = {
                 "signal_liqsweep": ind["sweep_direction"] == direction,
@@ -4085,7 +4704,9 @@ class Prometheus:
                                 total_quantity, reasons, time_stop_bars, be_ratio, "pro",
                                 signal_features=signal_features,
                                 signal_spot=current, atr_at_signal=atr,
-                                option_expiry_date=expiry_str)
+                                option_expiry_date=expiry_str,
+                                strike=strike, option_type=option_type,
+                                lot_size=lot_size, lots=lots)
             sig["delta"] = delta
             sig["vol_adaptive_trailing"] = bool(overrides.get("vol_adaptive_trailing", False))
             vol_frac = float(atr) / max(float(current), 1e-9)
@@ -4247,6 +4868,9 @@ class Prometheus:
 
             mr_be = overrides.get("mr_breakeven_ratio", 0.4)
 
+            option_type = "CE" if direction == "bullish" else "PE"
+            lots = int(total_quantity / lot_size) if lot_size else 0
+
             # Build signal features for proper trade attribution
             mr_signal_features = {
                 "bull_score": float(mr_bull_score),
@@ -4268,7 +4892,9 @@ class Prometheus:
                                 total_quantity, reasons, time_stop_bars, mr_be, "mr",
                                 signal_features=mr_signal_features,
                                 signal_spot=current, atr_at_signal=atr,
-                                option_expiry_date=expiry_str)
+                                option_expiry_date=expiry_str,
+                                strike=strike, option_type=option_type,
+                                lot_size=lot_size, lots=lots)
             sig["delta"] = delta
             sig["vol_adaptive_trailing"] = bool(overrides.get("vol_adaptive_trailing", False))
             vol_frac = float(atr) / max(float(current), 1e-9)
@@ -4669,15 +5295,14 @@ class Prometheus:
 
 
         print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
-        if param_overrides and param_overrides.get('apex'):
+        if param_overrides and param_overrides.get("apex"):
             from prometheus.signals.apex_generator import ApexSignalGenerator
             apex_gen = ApexSignalGenerator(symbol)
-            if 'data_slice' in locals() and data_slice is not None:
-                apex_gen.precompute(data_slice)
-            elif 'data_primary' in locals() and data_primary is not None:
-                apex_gen.precompute(data_primary)
+            apex_gen.precompute(data_slice)
+
             def _mock_gen(data_so_far, current_oi=None):
                 return apex_gen.generate(data_so_far, current_oi)
+
             signal_gen = _mock_gen
 
         result = engine.run(
@@ -4956,15 +5581,14 @@ class Prometheus:
         warmup = 20 if bar_interval == "5minute" else 10
 
         print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
-        if param_overrides and param_overrides.get('apex'):
+        if param_overrides and param_overrides.get("apex"):
             from prometheus.signals.apex_generator import ApexSignalGenerator
             apex_gen = ApexSignalGenerator(symbol)
-            if 'data_slice' in locals() and data_slice is not None:
-                apex_gen.precompute(data_slice)
-            elif 'data_primary' in locals() and data_primary is not None:
-                apex_gen.precompute(data_primary)
+            apex_gen.precompute(data_slice)
+
             def _mock_gen(data_so_far, current_oi=None):
                 return apex_gen.generate(data_so_far, current_oi)
+
             signal_gen = _mock_gen
 
         result = engine.run(
@@ -5086,8 +5710,8 @@ class Prometheus:
         print(f" Session: 09:45-14:30 entries | 15:15 square-off")
         print(f"{'='*70}")
 
-        if apex:
-            param_overrides = param_overrides or {}
+        if param_overrides and param_overrides.get("apex"):
+            param_overrides = dict(param_overrides)
             param_overrides["apex"] = True
         result, engine = self._run_intraday_backtest_on_slice(
             data_slice=data_intraday,
@@ -5179,8 +5803,8 @@ class Prometheus:
 
         # In-sample
         print(f"\n--- IN-SAMPLE (Train: {train_start} to {train_end}) ---")
-        if apex:
-            param_overrides = param_overrides or {}
+        if param_overrides and param_overrides.get("apex"):
+            param_overrides = dict(param_overrides)
             param_overrides["apex"] = True
         result_is, engine_is = self._run_intraday_backtest_on_slice(
             data_slice=data_train,
@@ -5208,8 +5832,8 @@ class Prometheus:
 
         # Out-of-sample
         print(f"\n--- OUT-OF-SAMPLE (Test: {test_start} to {test_end}) ---")
-        if apex:
-            param_overrides = param_overrides or {}
+        if param_overrides and param_overrides.get("apex"):
+            param_overrides = dict(param_overrides)
             param_overrides["apex"] = True
         result_oos, engine_oos = self._run_intraday_backtest_on_slice(
             data_slice=data_test,
@@ -5500,15 +6124,14 @@ class Prometheus:
 
 
         print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
-        if param_overrides and param_overrides.get('apex'):
+        if param_overrides and param_overrides.get("apex"):
             from prometheus.signals.apex_generator import ApexSignalGenerator
             apex_gen = ApexSignalGenerator(symbol)
-            if 'data_slice' in locals() and data_slice is not None:
-                apex_gen.precompute(data_slice)
-            elif 'data_primary' in locals() and data_primary is not None:
-                apex_gen.precompute(data_primary)
+            apex_gen.precompute(data_primary)
+
             def _mock_gen(data_so_far, current_oi=None):
                 return apex_gen.generate(data_so_far, current_oi)
+
             signal_gen = _mock_gen
 
         result = engine.run(
@@ -6781,6 +7404,7 @@ class Prometheus:
                         "risk_reward": signal.risk_reward,
                         "regime": r_str,
                         "reasoning": signal.reasoning,
+                        "trade_mode": "swing",
                     })
 
                     refined = self.refine_with_strategy(signal)
@@ -6874,6 +7498,7 @@ class Prometheus:
         tg.register_command("scan", self._tg_cmd_scan)
         tg.register_command("scan_count", self._tg_cmd_scan_count)
         tg.register_command("status", self._tg_cmd_status)
+        tg.register_command("checkpapertrade", self._tg_cmd_checkpapertrade)
         tg.register_command("pnl", self._tg_cmd_pnl)
         tg.register_command("regime", self._tg_cmd_regime)
         tg.register_command("start", self._tg_cmd_help)  # Telegram auto-sends /start
@@ -6890,12 +7515,16 @@ class Prometheus:
         if self.multi_account is not None:
             labels = [s.config.label for s in self.multi_account.stacks.values()]
             ma_info = f"\U0001f4b3 Accounts: {', '.join(labels)}\n\n"
+        scan_line = "/scan          Swing + Intraday scan"
+        if not bool(get("intraday.enabled", False)):
+            scan_line = "/scan          Swing scan"
         return (
             f"\U0001f4d6 <b>PROMETHEUS</b>\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
             f"{ma_info}"
-            f"/scan          Swing + Intraday scan\n"
+            f"{scan_line}\n"
             f"/status        System status\n"
+            f"/checkpapertrade  Paper loop health\n"
             f"/pnl            Today's P&amp;L\n"
             f"/positions   Open positions\n"
             f"/regime       Market regime\n"
@@ -6910,13 +7539,35 @@ class Prometheus:
         
         import concurrent.futures
 
+        use_backtest_generator = bool(get("swing.use_backtest_generator", False))
+        swing_interval = "15minute" if self.mode in ("paper", "dry_run") else "day"
+
         def _scan_swing(symbol):
             try:
+                if use_backtest_generator:
+                    sig = self._get_swing_backtest_signal(
+                        symbol, primary_interval=swing_interval
+                    )
+                    if not sig:
+                        return None
+                    refined = self._convert_backtest_signal_for_execution(sig)
+                    if not refined or refined.get("action") == "HOLD":
+                        return None
+                    score = float(sig.get("bull_score", 0) or sig.get("bear_score", 0) or 0)
+                    raw_confidence = min(1.0, score / 6.0) if score > 0 else 0.0
+                    sig_count = sum(1 for k, v in sig.items() if k.startswith("signal_") and bool(v))
+                    rr = float(refined.get("risk_reward", 0) or 0.0)
+                    if raw_confidence >= 0.65 and sig_count >= 4 and rr >= 2.0:
+                        return (
+                            f"• {symbol}: {refined.get('action')} "
+                            f"(Conf: {raw_confidence:.2f}, Sigs: {sig_count}, R:R: {rr:.2f})"
+                        )
+
                 signal = self.analyze(symbol)
                 if signal and signal.action != "HOLD":
                     n_sigs = len(signal.contributing_signals) if signal.contributing_signals else 0
                     if signal.confidence >= 0.65 and n_sigs >= 4 and signal.risk_reward >= 2.0:
-                        return f"• {symbol}: {signal.action} (Conf: {signal.confidence:.2f}, Sigs: {n_sigs}, R:R: {signal.risk_reward:.2f})"
+                        return f"• {symbol}: {signal.action} (Conf: {signal.confidence:.2f}, Sigs: {n_sigs}, R:R: {signal.risk_reward:.2f})"
             except Exception as e:
                 logger.debug(f"/scan_count error on {symbol}: {e}")
             return None
@@ -6938,26 +7589,28 @@ class Prometheus:
                     swing_count += 1
                     swing_details.append(ds)
 
+        intraday_enabled = bool(get("intraday.enabled", False))
         intra_count = 0
         intra_details = []
-        intraday_cfg = self.config.get("intraday", {})
-        intraday_symbols = self._get_intraday_instruments(self.symbols)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            for di in executor.map(_scan_intra, intraday_symbols):
-                if di:
-                    intra_count += 1
-                    intra_details.append(di)
+        if intraday_enabled:
+            intraday_symbols = self._get_intraday_instruments(self.symbols)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                for di in executor.map(_scan_intra, intraday_symbols):
+                    if di:
+                        intra_count += 1
+                        intra_details.append(di)
 
         res = f"📊 <b>LIVE SCAN RESULTS</b>\n\n"
         res += f"<b>🦅 Swing Signals (>=65% Conf, 4+ Sigs): {swing_count}</b>\n"
         if swing_details:
             res += "\n".join(swing_details) + "\n"
         
-        res += f"\n<b>⚡ Intraday Signals (15m bias): {intra_count}</b>\n"
-        if intra_details:
-            res += "\n".join(intra_details) + "\n"
+        if intraday_enabled:
+            res += f"\n<b>⚡ Intraday Signals (15m bias): {intra_count}</b>\n"
+            if intra_details:
+                res += "\n".join(intra_details) + "\n"
             
-        if swing_count == 0 and intra_count == 0:
+        if swing_count == 0 and (not intraday_enabled or intra_count == 0):
             res += "\n<i>No signals currently pass the 4-Gate System.</i>"
             
         return res
@@ -6989,10 +7642,12 @@ class Prometheus:
 
         n_total = len(self.all_symbols)
         try:
+            intraday_enabled = bool(get("intraday.enabled", False))
+            scan_mode = "swing" if not intraday_enabled else "swing + intraday"
             self.telegram.send_message(
                 f"\U0001f50e Scanning {n_total} symbols "
                 f"({len(self.symbols)} indices + {len(self.stock_symbols)} stocks, "
-                f"swing + intraday)... please wait."
+                f"{scan_mode})... please wait."
             )
 
             # Regime multipliers (same as run_scan)
@@ -7000,25 +7655,62 @@ class Prometheus:
                 "markup": 1.00, "markdown": 0.95, "accumulation": 0.75,
                 "distribution": 0.70, "volatile": 0.55, "unknown": 0.40,
             }
-            SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
+            SIGNAL_ONLY = {"NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
+            use_backtest_generator = bool(get("swing.use_backtest_generator", False))
+            swing_interval = "15minute" if self.mode in ("paper", "dry_run") else "day"
 
             def _scan_one_cmd(symbol):
                 try:
+                    if use_backtest_generator:
+                        sig = self._get_swing_backtest_signal(
+                            symbol, primary_interval=swing_interval
+                        )
+                        if not sig:
+                            return None
+                        refined = self._convert_backtest_signal_for_execution(sig)
+                        if not refined:
+                            return None
+                        score = float(sig.get("bull_score", 0) or sig.get("bear_score", 0) or 0)
+                        raw_confidence = min(1.0, score / 6.0) if score > 0 else 0.0
+                        regime_str = str(sig.get("regime_at_entry", "unknown") or "unknown")
+                        regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
+                        adj_confidence = raw_confidence * regime_mult
+                        sig_count = sum(1 for k, v in sig.items() if k.startswith("signal_") and bool(v))
+                        return {
+                            "symbol": symbol,
+                            "action": refined.get("action", "HOLD"),
+                            "raw_confidence": raw_confidence,
+                            "adj_confidence": adj_confidence,
+                            "regime": regime_str,
+                            "signal_count": sig_count,
+                            "entry_price": refined.get("entry_price", sig.get("entry_price", 0)),
+                            "stop_loss": refined.get("stop_loss", sig.get("stop_loss", 0)),
+                            "target": refined.get("target", sig.get("target", 0)),
+                            "risk_reward": refined.get("risk_reward", sig.get("risk_reward", 0)),
+                            "reasoning": "backtest_generator",
+                            "executable": symbol not in SIGNAL_ONLY,
+                            "timeframe": "swing",
+                            "instrument": refined.get("instrument", ""),
+                            "strike": refined.get("strike", 0),
+                            "option_type": refined.get("option_type", ""),
+                            "expiry": refined.get("expiry", refined.get("option_expiry_date", "")),
+                        }
+
                     signal = self.analyze(symbol)
                     if not signal:
                         return None
-                        
+
                     data = self.data.fetch_historical(symbol, days=90, interval="day")
                     regime_str = "unknown"
                     if not data.empty:
                         regime = self.regime_detector.detect(data)
                         regime_str = regime.regime.value
-                        
+
                     raw_confidence = signal.confidence
                     regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
                     adj_confidence = raw_confidence * regime_mult
                     sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
-                    
+
                     return {
                         "symbol": symbol,
                         "action": signal.action,
@@ -7046,12 +7738,11 @@ class Prometheus:
             # Intraday scan (during market hours only)
             from datetime import time as dtime
             now = datetime.now()
-            intraday_cfg = self.config.get("intraday", {})
             intraday_instruments = self._get_intraday_instruments(self.symbols[:2])
             mkt_open = dtime(9, 15)
             mkt_close = dtime(15, 15)
 
-            if mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
+            if intraday_enabled and mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
                 bar_interval = self._select_intraday_interval()
 
                 def _scan_intra_cmd(symbol):
@@ -7151,6 +7842,90 @@ class Prometheus:
                     f"<code>{p.quantity}x</code>  "
                     f"<code>Rs {pnl:+,.0f}</code>\n"
                 )
+
+        return text
+
+    def _tg_cmd_checkpapertrade(self, args: str = "") -> str:
+        """Handle /checkpapertrade command — show paper-loop health."""
+        active = bool(getattr(self, "_paper_loop_active", False))
+        started_at = getattr(self, "_paper_loop_started_at", None)
+        interval_seconds = getattr(self, "_paper_scan_interval_seconds", None)
+        mode_str = self.mode.upper()
+
+        primary_state = self.risk.get_portfolio_state()
+        primary_positions = self.broker.get_positions() if hasattr(self.broker, "get_positions") else []
+        primary_n_pos = len(primary_positions)
+
+        if self.multi_account is not None:
+            summaries = self.multi_account.get_summary_table()
+            account_count = 1 + len(summaries)
+            total_initial = primary_state.capital + sum(s.get("initial", 0) for s in summaries)
+            total_equity = primary_state.capital + sum(s.get("equity", 0) for s in summaries)
+            total_positions = primary_n_pos + sum(s.get("open_positions", 0) for s in summaries)
+            total_trades = primary_state.trades_today + sum(s.get("trades", 0) for s in summaries)
+        else:
+            account_count = 1
+            total_initial = primary_state.capital
+            total_equity = primary_state.capital
+            total_positions = primary_n_pos
+            total_trades = primary_state.trades_today
+
+        interval_text = f"{interval_seconds // 60} minutes" if interval_seconds else "15 minutes"
+        if active:
+            status_line = "\U0001f7e2 <b>LIVE</b>"
+        elif self.mode in ("paper", "dry_run"):
+            status_line = "\U0001f7e1 <b>CONFIGURED, NOT RUNNING</b>"
+        else:
+            status_line = "\u26aa <b>NOT IN PAPER MODE</b>"
+
+        text = (
+            f"\U0001f50d <b>PAPER TRADE CHECK</b>\n"
+            f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
+            f"Status:     {status_line}\n"
+            f"Mode:       <b>{mode_str}</b>\n"
+            f"Accounts:   <code>{account_count}</code>\n"
+            f"Primary:    <b>15K PAPER</b>\n"
+            f"Scan loop:  <code>{interval_text}</code>\n"
+            f"Positions:  <code>{total_positions}</code>\n"
+            f"Trades:     <code>{total_trades}</code>\n"
+            f"Equity:     <code>Rs {total_equity:,.0f}</code>\n"
+            f"Capital:    <code>Rs {total_initial:,.0f}</code>\n"
+        )
+
+        if primary_positions:
+            text += "\n<b>Primary Open Positions</b>\n"
+            for p in primary_positions:
+                pnl = getattr(p, "unrealized_pnl", 0)
+                pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
+                text += (
+                    f"  {pnl_emoji} {p.tradingsymbol}  "
+                    f"<code>{p.quantity}x</code>  "
+                    f"<code>Rs {pnl:+,.0f}</code>\n"
+                )
+
+        if self.multi_account is not None:
+            text += "\n<b>Secondary Paper Accounts</b>\n"
+            for s in self.multi_account.get_summary_table():
+                pnl_emoji = "\U0001f7e2" if s["pnl"] >= 0 else "\U0001f534"
+                text += (
+                    f"  {pnl_emoji} {s['label']}  "
+                    f"<code>Rs {s['equity']:,.0f}</code>  "
+                    f"<code>{s['open_positions']} pos</code>  "
+                    f"<code>{s['trades']} trades</code>\n"
+                )
+
+        if active and started_at:
+            uptime = datetime.now() - started_at
+            total_minutes = int(uptime.total_seconds() // 60)
+            hours, minutes = divmod(total_minutes, 60)
+            uptime_text = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+            text += f"Uptime:     <code>{uptime_text}</code>\n"
+
+        if not active:
+            if self.mode in ("paper", "dry_run"):
+                text += "\n<i>The paper stack is configured, but the live loop is not currently running.</i>"
+            else:
+                text += "\n<i>This process is not in paper mode.</i>"
 
         return text
 
@@ -7350,6 +8125,7 @@ def main():
             "  python main.py dry_run --intraday      Intraday dry run\n"
             "  python main.py signal                  Signal-only mode\n"
             "  python main.py setup                   First-time setup wizard\n"
+            "  python main.py full_auto --preflight   Run production preflight checks\n"
         ),
     )
 
@@ -7385,6 +8161,18 @@ def main():
         "--config", "-c",
         default=None,
         help="Path to custom config file",
+    )
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        default=False,
+        help="Run production preflight checks and exit",
+    )
+    parser.add_argument(
+        "--allow-paper-fallback",
+        action="store_true",
+        default=False,
+        help="Allow live modes to downgrade to dry_run if broker connection fails",
     )
     parser.add_argument(
         "--data-source",
@@ -7584,42 +8372,37 @@ def main():
     # DD throttle always on — structural protection for small accounts
     args.dd_throttle = True
 
+    # Preflight checks
+    preflight_report = run_preflight(
+        config_path=args.config,
+        mode=args.mode,
+        allow_paper_fallback=args.allow_paper_fallback,
+    )
+    if args.preflight:
+        print(preflight_report.format())
+        if not preflight_report.ok():
+            sys.exit(2)
+        return
+    if args.mode in ("semi_auto", "full_auto") and not preflight_report.ok():
+        print(preflight_report.format())
+        sys.exit(2)
+
     # Initialize system
-    prometheus = Prometheus(config_path=args.config)
+    prometheus = Prometheus(
+        config_path=args.config,
+        mode_override=args.mode,
+        allow_paper_fallback=args.allow_paper_fallback,
+    )
     prometheus.data.configure_historical_fetch(
         source=args.data_source,
         retries=args.fetch_retries,
     )
 
-    # Override mode from CLI (settings.yaml is default, CLI takes precedence)
-    if args.mode in ("semi_auto", "full_auto", "dry_run"):
-        cli_mode = args.mode
-        if cli_mode == "dry_run":
-            # Force PaperTrader for dry run
-            if not isinstance(prometheus.broker, PaperTrader):
-                prometheus.broker = PaperTrader(prometheus.initial_capital)
-                prometheus.order_manager = OrderManager(prometheus.broker, prometheus.risk, "dry_run")
-        elif cli_mode in ("semi_auto", "full_auto"):
-            # If settings.yaml says paper but CLI says live mode, switch broker
-            if isinstance(prometheus.broker, PaperTrader):
-                try:
-                    from prometheus.execution.kite_executor import KiteExecutor
-                    kite = KiteExecutor(
-                        api_key=get_credential("broker.api_key") or get("broker.api_key", ""),
-                        api_secret=get_credential("broker.api_secret") or get("broker.api_secret", ""),
-                        access_token=get_credential("broker.access_token") or get("broker.access_token", ""),
-                    )
-                    if kite.connect():
-                        prometheus.broker = kite
-                        prometheus.order_manager = OrderManager(prometheus.broker, prometheus.risk, cli_mode)
-                        logger.info(f"Switched to KiteExecutor for {cli_mode} mode")
-                    else:
-                        logger.warning("Kite connect failed. Running in dry_run mode (PaperTrader).")
-                        args.mode = "dry_run"
-                except Exception as e:
-                    logger.warning(f"KiteExecutor unavailable ({e}). Running in dry_run mode.")
-                    args.mode = "dry_run"
-        prometheus.mode = args.mode
+    if prometheus.mode != args.mode:
+        logger.warning(
+            f"Mode adjusted from {args.mode} to {prometheus.mode} based on broker availability."
+        )
+        args.mode = prometheus.mode
 
     # Override symbols if specified
     if args.symbol:
@@ -7709,7 +8492,6 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
-                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
                 param_overrides=hq_overrides if hq_overrides else None,
                 force_refresh=args.force_refresh,
             )
@@ -7718,7 +8500,7 @@ def main():
         prometheus.run_signal_mode(interval_seconds=args.interval)
 
     elif args.mode == "paper":
-        if getattr(args, "multi_account", False):
+        if getattr(args, "multi_account", False) or bool(get("multi_account.enabled", False)):
             prometheus.init_multi_account()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
@@ -7820,7 +8602,6 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
-                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
                 force_refresh=args.force_refresh,
             )
 

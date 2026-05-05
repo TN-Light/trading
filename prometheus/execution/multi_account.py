@@ -28,6 +28,7 @@ class AccountConfig:
     label: str                  # "micro_15k", "starter_50k", etc.
     initial_capital: float      # 15000, 50000, 100000, 200000
     risk_overrides: Dict = field(default_factory=dict)
+    capital_overrides: Dict = field(default_factory=dict)
 
 
 class AccountStack:
@@ -40,6 +41,8 @@ class AccountStack:
         # Merge risk overrides into config
         merged_risk = dict(risk_config)
         merged_risk.update(config.risk_overrides)
+        if config.capital_overrides:
+            merged_risk["capital_config_override"] = config.capital_overrides
         self.risk = RiskManager(merged_risk, config.initial_capital)
         self.order_manager = OrderManager(self.trader, self.risk, "paper")
         self.equity_curve: List[float] = [config.initial_capital]
@@ -83,10 +86,7 @@ class MultiAccountPaperTrader:
     """
 
     DEFAULT_ACCOUNTS = [
-        AccountConfig("micro_15k", 15000),
-        AccountConfig("starter_50k", 50000),
-        AccountConfig("growth_100k", 100000),
-        AccountConfig("full_200k", 200000),
+        AccountConfig("paper_100k", 100000),
     ]
 
     def __init__(self, accounts: List[AccountConfig] = None, risk_config: Dict = None):
