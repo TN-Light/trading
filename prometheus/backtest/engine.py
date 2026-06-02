@@ -248,6 +248,8 @@ class BacktestEngine:
         dsq_soft: float = 0.25,
         dsq_hard: float = 0.60,
         dsq_min_scalar: float = 0.25,
+        # ── Max drawdown circuit breaker ──
+        max_dd_halt: float = 0.0,              # Hard cap on max DD (e.g. 0.15 = 15%). 0 = disabled (default)
         # ── Intraday session enforcement (opt-in, default off) ──
         intraday_session: bool = False,
         session_open_time: str = "09:45",      # Skip bars before this
@@ -298,6 +300,9 @@ class BacktestEngine:
             "dsq_scaled": 0,
             "dsq_filtered": 0,
         }
+        # ── Max DD circuit breaker ──
+        self.max_dd_halt = float(max_dd_halt) if max_dd_halt else 0.0
+        self._dd_halt_active = False
         # ── Intraday session ──
         self.intraday_session = intraday_session
         if intraday_session:
@@ -658,12 +663,14 @@ class BacktestEngine:
             logger.info(
                 f"Resuming backtest from checkpoint {checkpoint_file} at bar {start_bar}/{max(len(data) - warmup_bars, 1)}"
             )
+            _equity_peak = [max(self.equity_curve)] if self.equity_curve else [capital]
         else:
             capital = self.initial_capital
             self._sync_capital(capital)
             peak_capital = capital
             self.trades = []
             self.equity_curve = [capital]
+            _equity_peak = [capital]  # Mutable tracker for DD circuit breaker
             self._warmup_bars = warmup_bars
 
             positions = []  # Multi-position: list of open positions
@@ -745,6 +752,27 @@ class BacktestEngine:
                         can_enter_new = False
                 except Exception:
                     pass
+
+            # Max DD circuit breaker: freeze entries when DD exceeds threshold
+            # Uses equity (capital + unrealized) not just realized capital
+            if self.max_dd_halt > 0 and len(self.equity_curve) > 1:
+                equity_now = self.equity_curve[-1]
+                # Track peak equity incrementally (avoid O(n) max() every bar)
+                if equity_now > _equity_peak[0]:
+                    _equity_peak[0] = equity_now
+                if _equity_peak[0] > 0:
+                    current_dd_pct = (_equity_peak[0] - equity_now) / _equity_peak[0]
+                    if current_dd_pct >= self.max_dd_halt:
+                        if not self._dd_halt_active:
+                            logger.warning(
+                                f"DD circuit breaker triggered: {current_dd_pct*100:.1f}% >= {self.max_dd_halt*100:.0f}% threshold. "
+                                f"Freezing new entries until equity recovers."
+                            )
+                            self._dd_halt_active = True
+                        can_enter_new = False
+                    elif self._dd_halt_active and current_dd_pct < self.max_dd_halt * 0.7:
+                        logger.info(f"DD circuit breaker released: DD {current_dd_pct*100:.1f}% recovered below resume threshold")
+                        self._dd_halt_active = False
 
             # Check daily loss limit (fixed 3% of initial capital)
             daily_loss_limit = self.initial_capital * 0.03
@@ -858,6 +886,7 @@ class BacktestEngine:
             # Track peak
             if capital > peak_capital:
                 peak_capital = capital
+
 
             if checkpoint_file is not None and checkpoint_interval_seconds is not None:
                 elapsed_since_checkpoint = time.monotonic() - last_checkpoint_save

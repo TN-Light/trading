@@ -240,6 +240,11 @@ class Prometheus:
         self._paper_loop_started_at = None
         self._paper_scan_interval_seconds = None
 
+        # Signal deduplication — prevents restart replay of same alerts
+        self._alerted_signals: Dict[str, float] = {}
+        self._alerted_signals_file = str(PROJECT_ROOT.parent / "data" / "alerted_signals.json")
+        self._load_alerted_signals()
+
         n_stocks = len(self.stock_symbols)
         logger.info(
             f"Mode: {self.mode} | Capital: Rs {self.capital:,.0f} | "
@@ -396,7 +401,13 @@ class Prometheus:
             ranked_signal["account_label"] = label
             ranked_signal["account_capital"] = capital
             ranked_signal["eligible_strikes"] = routed
-            self.telegram.alert_new_signal(ranked_signal)
+            sym = refined_signal.get("symbol", "")
+            act = refined_signal.get("action", "HOLD")
+            if not self._is_signal_duplicate(sym, act, account=label):
+                self._mark_signal_alerted(sym, act, account=label)
+                self.telegram.alert_new_signal(ranked_signal, source="multi")
+            else:
+                logger.info(f"[{label}] Signal dedupe: {sym} {act} already alerted")
 
             execution_signal = self._build_execution_signal_from_candidate(
                 refined_signal, routed[0]
@@ -2855,7 +2866,62 @@ class Prometheus:
         """Send generic signal alert only for single-account mode."""
         if self.multi_account is not None:
             return
-        self.telegram.alert_new_signal(refined_signal)
+        symbol = refined_signal.get("symbol", "")
+        action = refined_signal.get("action", "HOLD")
+        if action == "HOLD":
+            return
+        if self._is_signal_duplicate(symbol, action):
+            logger.info(f"Signal dedupe: {symbol} {action} already alerted")
+            return
+        self._mark_signal_alerted(symbol, action)
+        self.telegram.alert_new_signal(refined_signal, source="auto")
+
+    # ── Signal deduplication helpers ──────────────────────────────────────
+
+    def _signal_dedupe_key(self, symbol: str, action: str, account: str = "primary") -> str:
+        """Build a date-scoped key so dedupe resets each trading day."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        return f"{today}:{symbol}:{action}:{account}"
+
+    def _is_signal_duplicate(self, symbol: str, action: str, account: str = "primary",
+                             cooldown_seconds: int = 1800) -> bool:
+        """Check if the same signal was already alerted within the cooldown window."""
+        key = self._signal_dedupe_key(symbol, action, account)
+        prev_ts = self._alerted_signals.get(key, 0)
+        return (time.time() - prev_ts) < cooldown_seconds
+
+    def _mark_signal_alerted(self, symbol: str, action: str, account: str = "primary"):
+        """Record that a signal was alerted (persists to file for crash recovery)."""
+        key = self._signal_dedupe_key(symbol, action, account)
+        self._alerted_signals[key] = time.time()
+        self._save_alerted_signals()
+
+    def _load_alerted_signals(self):
+        """Load alerted signals from JSON file, pruning entries older than today."""
+        import json
+        try:
+            with open(self._alerted_signals_file, "r") as f:
+                data = json.load(f)
+            today = datetime.now().strftime("%Y-%m-%d")
+            # Keep only today's entries
+            self._alerted_signals = {
+                k: v for k, v in data.items() if k.startswith(today)
+            }
+        except (FileNotFoundError, json.JSONDecodeError, Exception):
+            self._alerted_signals = {}
+
+    def _save_alerted_signals(self):
+        """Persist alerted signals to JSON file."""
+        import json
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            # Only persist today's entries to keep file small
+            to_save = {k: v for k, v in self._alerted_signals.items() if k.startswith(today)}
+            os.makedirs(os.path.dirname(self._alerted_signals_file), exist_ok=True)
+            with open(self._alerted_signals_file, "w") as f:
+                json.dump(to_save, f)
+        except Exception as e:
+            logger.debug(f"Alerted signals save error: {e}")
 
     # ─────────────────────────────────────────────────────────────────────
     # FULL AUTO MODE

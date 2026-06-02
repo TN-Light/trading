@@ -1,4 +1,0 @@
-volatility_regime,trades,wins,losses,win_rate,net_pnl,avg_profit,avg_loss,profit_factor,avg_hold_min,avg_trade_pnl
-extreme,16,10,6,62.5,15539.64,1789.48,392.53,7.6,625.3,971.23
-unknown,16,8,8,50.0,12651.31,1682.25,100.84,16.68,1072.5,790.71
-high,3,3,0,100.0,5368.13,1789.38,0.0,inf,1385.0,1789.38

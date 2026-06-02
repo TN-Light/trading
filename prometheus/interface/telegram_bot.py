@@ -700,8 +700,14 @@ class TelegramBot:
     # Pre-formatted alert methods (outbound)
     # -----------------------------------------------------------------------
 
-    def alert_new_signal(self, signal: Dict):
-        """Send a compact mobile-friendly trading signal alert."""
+    def alert_new_signal(self, signal: Dict, source: str = ""):
+        """Send a compact mobile-friendly trading signal alert.
+
+        Args:
+            signal: Signal data dict.
+            source: Origin tag — 'scan' (manual /scan), 'auto' (auto-scan loop),
+                    'multi' (multi-account dispatch), or '' (legacy/untagged).
+        """
         action = signal.get("action", "HOLD")
         symbol = signal.get("symbol", "")
         instrument = signal.get("instrument", "")
@@ -731,7 +737,8 @@ class TelegramBot:
             account_capital = float(signal.get("account_capital", 0) or 0)
             direction = "BULLISH" if "CE" in action else "BEARISH"
             lines = [
-                f"\U0001f3af <b>{account_label} SIGNAL</b>",
+                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+                f"\U0001f4ca <b>SECONDARY \u2014 {account_label}</b>",
                 f"{symbol} | {direction}",
                 f"Capital: <code>Rs {account_capital:,.0f}</code>",
                 f"Confidence: <code>{confidence:.0%}</code>",
@@ -784,8 +791,16 @@ class TelegramBot:
             if risk_1lot > 0:
                 cost_line += f"Risk(1 lot): <code>Rs {risk_1lot:,.0f}</code>\n"
 
+        # Source tag for alert segregation
+        if source == "scan":
+            source_tag = "  \U0001f4e1 <i>/scan</i>"
+        elif source == "auto":
+            source_tag = "  \u26a1 <i>auto</i>"
+        else:
+            source_tag = ""
+
         text = (
-            f"{emoji} <b>NEW SIGNAL</b>\n"
+            f"{emoji} <b>NEW SIGNAL</b>{source_tag}\n"
             f"{symbol} | {action} | {direction}\n"
             f"Confidence: <code>{confidence:.0%}</code> | R:R: <code>1:{rr:.1f}</code>\n"
             f"{contract_line}"
@@ -901,7 +916,7 @@ class TelegramBot:
                 "regime": r.get("regime", ""),
                 "reasoning": r.get("reasoning", ""),
                 "trade_mode": r.get("timeframe", ""),
-            })
+            }, source="scan")
 
     def alert_order_placed(self, order_info: Dict):
         """Alert when an order is placed."""
