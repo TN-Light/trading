@@ -98,6 +98,8 @@ class BacktestResult:
     trades: List[Dict]
     psr_pct: float = 0.0
     min_track_record_len: int = 0
+    realized_dd_pct: float = 0.0
+    realized_equity_curve: List[float] = None
 
     def summary(self) -> str:
         """Human-readable summary."""
@@ -670,6 +672,7 @@ class BacktestEngine:
             peak_capital = capital
             self.trades = []
             self.equity_curve = [capital]
+            self.realized_equity_curve = [capital]
             _equity_peak = [capital]  # Mutable tracker for DD circuit breaker
             self._warmup_bars = warmup_bars
 
@@ -882,6 +885,7 @@ class BacktestEngine:
                         unrealized += (pos["entry_price"] - current_bar["close"]) * pos["quantity"]
 
             self.equity_curve.append(capital + unrealized)
+            self.realized_equity_curve.append(capital)
 
             # Track peak
             if capital > peak_capital:
@@ -1627,11 +1631,19 @@ class BacktestEngine:
 
         total_costs = sum(t.costs for t in self.trades)
 
-        # Drawdown
+        # Drawdown (unrealized — includes intra-position mark-to-market)
         equity = np.array(self.equity_curve)
         peak = np.maximum.accumulate(equity)
         drawdown = (peak - equity) / peak * 100
         max_drawdown = drawdown.max()
+
+        # Realized drawdown (only at trade-close events, no intra-position swings)
+        realized_dd = 0.0
+        if hasattr(self, 'realized_equity_curve') and self.realized_equity_curve:
+            req = np.array(self.realized_equity_curve)
+            rpeak = np.maximum.accumulate(req)
+            rdrawdown = np.where(rpeak > 0, (rpeak - req) / rpeak * 100, 0)
+            realized_dd = float(rdrawdown.max())
 
         # Detect bar frequency for correct annualization
         if "timestamp" in data.columns and len(data) >= 2:
@@ -1779,6 +1791,8 @@ class BacktestEngine:
             total_costs=round(total_costs, 2),
             equity_curve=self.equity_curve,
             drawdown_curve=drawdown.tolist(),
+            realized_dd_pct=round(realized_dd, 2),
+            realized_equity_curve=getattr(self, 'realized_equity_curve', None),
             monthly_returns=monthly_returns,
             trades=[{
                 "entry": t.entry_time,
