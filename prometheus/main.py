@@ -2488,6 +2488,18 @@ class Prometheus:
 
     def _restore_persisted_positions(self):
         """Restore open positions from SQLite after crash/restart."""
+        # First, auto-close stale positions (older than 24h) — these are ghosts
+        # from previous sessions that were never properly closed.
+        stale_closed = self.store.close_stale_positions(max_age_hours=24)
+        if stale_closed > 0:
+            logger.warning(
+                f"Auto-closed {stale_closed} stale position(s) older than 24h in DB."
+            )
+            self.telegram.send_message(
+                f"\U0001f9f9 Cleaned up {stale_closed} stale position(s) "
+                f"from previous sessions (older than 24h)."
+            )
+
         saved = self.store.load_open_positions()
         if not saved or not self.position_monitor:
             return
@@ -7637,36 +7649,39 @@ class Prometheus:
         self.telegram.send_message("🔍 Running deep signal count across all instruments... please wait 1-2 mins.")
         
         import concurrent.futures
+        from prometheus.pipeline.data_bridge import DataBridge
+        from prometheus.pipeline.signal_evaluator import SignalEvaluator
+        from prometheus.pipeline.signal_converter import SignalConverter
 
-        use_backtest_generator = bool(get("swing.use_backtest_generator", False))
         swing_interval = "15minute" if self.mode in ("paper", "dry_run") else "day"
+
+        bridge_sc = DataBridge(self.data)
+        converter_sc = SignalConverter()
+        if not hasattr(self, "_tg_scan_evaluator"):
+            self._tg_scan_evaluator = SignalEvaluator(self)
+        evaluator_sc = self._tg_scan_evaluator
 
         def _scan_swing(symbol):
             try:
-                if use_backtest_generator:
-                    sig = self._legacy_get_swing_backtest_signal(
-                        symbol, primary_interval=swing_interval
-                    )
-                    if not sig:
-                        return None
-                    refined = self._legacy_convert_backtest_signal_for_execution(sig)
-                    if not refined or refined.get("action") == "HOLD":
-                        return None
-                    score = float(sig.get("bull_score", 0) or sig.get("bear_score", 0) or 0)
-                    raw_confidence = min(1.0, score / 6.0) if score > 0 else 0.0
-                    sig_count = sum(1 for k, v in sig.items() if k.startswith("signal_") and bool(v))
-                    rr = float(refined.get("risk_reward", 0) or 0.0)
-                    if raw_confidence >= 0.65 and sig_count >= 4 and rr >= 2.0:
-                        return (
-                            f"• {symbol}: {refined.get('action')} "
-                            f"(Conf: {raw_confidence:.2f}, Sigs: {sig_count}, R:R: {rr:.2f})"
-                        )
+                scan_data = bridge_sc.fetch_scan_data(symbol, interval=swing_interval)
+                if not scan_data.is_usable:
+                    return None
 
-                signal = self.analyze(symbol)
-                if signal and signal.action != "HOLD":
-                    n_sigs = len(signal.contributing_signals) if signal.contributing_signals else 0
-                    if signal.confidence >= 0.65 and n_sigs >= 4 and signal.risk_reward >= 2.0:
-                        return f"• {symbol}: {signal.action} (Conf: {signal.confidence:.2f}, Sigs: {n_sigs}, R:R: {signal.risk_reward:.2f})"
+                sig_result = evaluator_sc.evaluate(scan_data)
+                if not sig_result or not sig_result.has_signal:
+                    return None
+
+                exe = converter_sc.convert(sig_result, symbol)
+                if not exe:
+                    return None
+
+                sig_count = len(exe.reasons) if exe.reasons else 0
+                rr = exe.risk_reward
+                if exe.confidence >= 0.65 and sig_count >= 4 and rr >= 2.0:
+                    return (
+                        f"\u2022 {symbol}: {exe.action} "
+                        f"(Conf: {exe.confidence:.2f}, Sigs: {sig_count}, R:R: {rr:.2f})"
+                    )
             except Exception as e:
                 logger.debug(f"/scan_count error on {symbol}: {e}")
             return None
@@ -7755,75 +7770,54 @@ class Prometheus:
                 "distribution": 0.70, "volatile": 0.55, "unknown": 0.40,
             }
             SIGNAL_ONLY = {"NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
-            use_backtest_generator = bool(get("swing.use_backtest_generator", False))
             swing_interval = "15minute" if self.mode in ("paper", "dry_run") else "day"
+
+            from prometheus.pipeline.data_bridge import DataBridge
+            from prometheus.pipeline.signal_evaluator import SignalEvaluator
+            from prometheus.pipeline.signal_converter import SignalConverter
+
+            bridge = DataBridge(self.data)
+            converter = SignalConverter()
+            if not hasattr(self, "_tg_scan_evaluator"):
+                self._tg_scan_evaluator = SignalEvaluator(self)
+            evaluator = self._tg_scan_evaluator
 
             def _scan_one_cmd(symbol):
                 try:
-                    if use_backtest_generator:
-                        sig = self._legacy_get_swing_backtest_signal(
-                            symbol, primary_interval=swing_interval
-                        )
-                        if not sig:
-                            return None
-                        refined = self._legacy_convert_backtest_signal_for_execution(sig)
-                        if not refined:
-                            return None
-                        score = float(sig.get("bull_score", 0) or sig.get("bear_score", 0) or 0)
-                        raw_confidence = min(1.0, score / 6.0) if score > 0 else 0.0
-                        regime_str = str(sig.get("regime_at_entry", "unknown") or "unknown")
-                        regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
-                        adj_confidence = raw_confidence * regime_mult
-                        sig_count = sum(1 for k, v in sig.items() if k.startswith("signal_") and bool(v))
-                        return {
-                            "symbol": symbol,
-                            "action": refined.get("action", "HOLD"),
-                            "raw_confidence": raw_confidence,
-                            "adj_confidence": adj_confidence,
-                            "regime": regime_str,
-                            "signal_count": sig_count,
-                            "entry_price": refined.get("entry_price", sig.get("entry_price", 0)),
-                            "stop_loss": refined.get("stop_loss", sig.get("stop_loss", 0)),
-                            "target": refined.get("target", sig.get("target", 0)),
-                            "risk_reward": refined.get("risk_reward", sig.get("risk_reward", 0)),
-                            "reasoning": "backtest_generator",
-                            "executable": symbol not in SIGNAL_ONLY,
-                            "timeframe": "swing",
-                            "instrument": refined.get("instrument", ""),
-                            "strike": refined.get("strike", 0),
-                            "option_type": refined.get("option_type", ""),
-                            "expiry": refined.get("expiry", refined.get("option_expiry_date", "")),
-                        }
-
-                    signal = self.analyze(symbol)
-                    if not signal:
+                    scan_data = bridge.fetch_scan_data(symbol, interval=swing_interval)
+                    if not scan_data.is_usable:
                         return None
 
-                    data = self.data.fetch_historical(symbol, days=90, interval="day")
-                    regime_str = "unknown"
-                    if not data.empty:
-                        regime = self.regime_detector.detect(data)
-                        regime_str = regime.regime.value
+                    sig_result = evaluator.evaluate(scan_data)
+                    if not sig_result or not sig_result.has_signal:
+                        return None
 
-                    raw_confidence = signal.confidence
+                    exe = converter.convert(sig_result, symbol)
+                    if not exe:
+                        return None
+
+                    regime_str = exe.regime or "unknown"
                     regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
-                    adj_confidence = raw_confidence * regime_mult
-                    sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
+                    adj_confidence = exe.confidence * regime_mult
 
                     return {
                         "symbol": symbol,
-                        "action": signal.action,
-                        "raw_confidence": raw_confidence,
+                        "action": exe.action,
+                        "raw_confidence": exe.confidence,
                         "adj_confidence": adj_confidence,
                         "regime": regime_str,
-                        "signal_count": sig_count,
-                        "entry_price": signal.entry_price,
-                        "stop_loss": signal.stop_loss,
-                        "target": signal.target,
-                        "risk_reward": signal.risk_reward,
-                        "reasoning": signal.reasoning,
+                        "signal_count": len(exe.reasons) if exe.reasons else 0,
+                        "entry_price": exe.entry_price,
+                        "stop_loss": exe.stop_loss,
+                        "target": exe.target,
+                        "risk_reward": exe.risk_reward,
+                        "reasoning": exe.strategy or "pipeline",
                         "executable": symbol not in SIGNAL_ONLY,
                         "timeframe": "swing",
+                        "instrument": exe.instrument,
+                        "strike": exe.strike,
+                        "option_type": exe.option_type,
+                        "expiry": exe.expiry,
                     }
                 except Exception as e:
                     logger.debug(f"Scan failed for {symbol}: {e}")

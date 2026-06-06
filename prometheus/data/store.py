@@ -472,6 +472,28 @@ class DataStore:
                 WHERE position_id = ?
             """, (pnl, str(datetime.now()), position_id))
 
+    def close_all_open_positions(self) -> int:
+        """Force-close ALL open managed positions in the DB. Returns count closed."""
+        with self._connection() as conn:
+            cursor = conn.execute("""
+                UPDATE managed_positions
+                SET status = 'closed', realized_pnl = 0, updated_at = ?
+                WHERE status = 'open'
+            """, (str(datetime.now()),))
+            return cursor.rowcount or 0
+
+    def close_stale_positions(self, max_age_hours: int = 24) -> int:
+        """Close open positions older than max_age_hours. Returns count closed."""
+        from datetime import timedelta
+        cutoff = str(datetime.now() - timedelta(hours=max_age_hours))
+        with self._connection() as conn:
+            cursor = conn.execute("""
+                UPDATE managed_positions
+                SET status = 'closed', realized_pnl = 0, updated_at = ?
+                WHERE status = 'open' AND entry_time < ?
+            """, (str(datetime.now()), cutoff))
+            return cursor.rowcount or 0
+
     # -----------------------------------------------------------------------
     # System State Persistence (equity across restarts)
     # -----------------------------------------------------------------------
