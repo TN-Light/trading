@@ -1352,7 +1352,7 @@ class Prometheus:
                 signal["bar_timestamp"] = ""
         return signal
 
-    def _convert_backtest_signal_for_execution(self, signal: Optional[Dict]) -> Optional[Dict]:
+    def _legacy_convert_backtest_signal_for_execution(self, signal: Optional[Dict]) -> Optional[Dict]:
         """Map backtest signal dict into an executable intraday order signal."""
         if not signal:
             return None
@@ -1419,7 +1419,7 @@ class Prometheus:
         """Return an executable intraday signal dict for the given mode."""
         if use_backtest_generator:
             backtest_signal = self._get_intraday_backtest_signal(symbol, bar_interval)
-            execution_signal = self._convert_backtest_signal_for_execution(backtest_signal)
+            execution_signal = self._legacy_convert_backtest_signal_for_execution(backtest_signal)
             if execution_signal:
                 execution_signal["trade_mode"] = "intraday"
                 execution_signal.setdefault("timeframe", "intraday")
@@ -1434,7 +1434,7 @@ class Prometheus:
             return execution_signal
         return None
 
-    def _get_swing_backtest_signal(
+    def _legacy_get_swing_backtest_signal(
         self,
         symbol: str,
         primary_interval: str = "day",
@@ -1497,7 +1497,7 @@ class Prometheus:
                 signal["bar_timestamp"] = ""
         return signal
 
-    def _get_swing_signal_for_execution(
+    def _legacy_get_swing_signal_for_execution(
         self,
         symbol: str,
         use_backtest_generator: bool,
@@ -1505,10 +1505,10 @@ class Prometheus:
     ) -> Optional[Dict]:
         """Return an executable swing signal dict for the given mode."""
         if use_backtest_generator:
-            backtest_signal = self._get_swing_backtest_signal(
+            backtest_signal = self._legacy_get_swing_backtest_signal(
                 symbol, primary_interval=primary_interval
             )
-            execution_signal = self._convert_backtest_signal_for_execution(backtest_signal)
+            execution_signal = self._legacy_convert_backtest_signal_for_execution(backtest_signal)
             if execution_signal:
                 execution_signal["trade_mode"] = "swing"
                 execution_signal.setdefault("timeframe", "swing")
@@ -1790,7 +1790,7 @@ class Prometheus:
             )
             logger.info("Starting PAPER TRADING mode...")
             logger.info("Paper mode locked to swing logic on 15-minute bars.")
-            self._run_paper_mode_swing_15m(interval_seconds=scan_interval)
+            self._run_paper_mode_pipeline(interval_seconds=scan_interval)
         finally:
             self._paper_loop_active = False
             self.running = False
@@ -1885,7 +1885,7 @@ class Prometheus:
                     )
 
                     for symbol in self.symbols:
-                        refined = self._get_swing_signal_for_execution(
+                        refined = self._legacy_get_swing_signal_for_execution(
                             symbol, use_backtest_generator
                         )
                         if refined:
@@ -1997,8 +1997,41 @@ class Prometheus:
                 self.telegram.alert_system_error(str(e))
                 time.sleep(30)
 
-    def _run_paper_mode_swing_15m(self, interval_seconds: int = 300):
-        """Paper loop locked to swing logic on 15-minute bars."""
+    def _run_paper_mode_pipeline(self, interval_seconds: int = 300):
+        """Paper loop using the new clean signal pipeline."""
+        from prometheus.pipeline.scanner import LiveScanner
+        from prometheus.config import get as cfg_get
+
+        # Start trailing monitor and restore persisted state for crash recovery.
+        self._start_position_monitor()
+        self._restore_equity_state()
+        self._restore_persisted_positions()
+
+        intraday_cfg = cfg_get("intraday", {})
+        skip_minutes = int(cfg_get("intraday.skip_first_minutes", 15))
+
+        scanner = LiveScanner(
+            prometheus_instance=self,
+            symbols=self.symbols,
+            scan_interval_seconds=max(900, int(interval_seconds)),
+            skip_first_minutes=skip_minutes,
+            max_positions=3,
+            daily_loss_limit=450.0,
+        )
+
+        try:
+            scanner.run_loop()
+        except KeyboardInterrupt:
+            scanner.stop()
+            total_pnl = self.order_manager.close_all_positions("session_end")
+            if self.multi_account:
+                self.multi_account.close_all("session_end")
+            self._persist_equity_state()
+            self.stop()
+            logger.info(f"Paper trading stopped. Session P&L: Rs {total_pnl:+,.0f}")
+
+    def _legacy_run_paper_mode_swing_15m(self, interval_seconds: int = 300):
+        """[LEGACY] Paper loop locked to swing logic on 15-minute bars."""
         # Start trailing monitor and restore persisted state for crash recovery.
         self._start_position_monitor()
         self._restore_equity_state()
@@ -2061,7 +2094,7 @@ class Prometheus:
                     cycle_signals = 0
 
                     for symbol in self.symbols:
-                        refined = self._get_swing_signal_for_execution(
+                        refined = self._legacy_get_swing_signal_for_execution(
                             symbol, True, primary_interval="15minute"
                         )
                         if not refined:
@@ -7611,12 +7644,12 @@ class Prometheus:
         def _scan_swing(symbol):
             try:
                 if use_backtest_generator:
-                    sig = self._get_swing_backtest_signal(
+                    sig = self._legacy_get_swing_backtest_signal(
                         symbol, primary_interval=swing_interval
                     )
                     if not sig:
                         return None
-                    refined = self._convert_backtest_signal_for_execution(sig)
+                    refined = self._legacy_convert_backtest_signal_for_execution(sig)
                     if not refined or refined.get("action") == "HOLD":
                         return None
                     score = float(sig.get("bull_score", 0) or sig.get("bear_score", 0) or 0)
@@ -7728,12 +7761,12 @@ class Prometheus:
             def _scan_one_cmd(symbol):
                 try:
                     if use_backtest_generator:
-                        sig = self._get_swing_backtest_signal(
+                        sig = self._legacy_get_swing_backtest_signal(
                             symbol, primary_interval=swing_interval
                         )
                         if not sig:
                             return None
-                        refined = self._convert_backtest_signal_for_execution(sig)
+                        refined = self._legacy_convert_backtest_signal_for_execution(sig)
                         if not refined:
                             return None
                         score = float(sig.get("bull_score", 0) or sig.get("bear_score", 0) or 0)
