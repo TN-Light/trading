@@ -143,3 +143,28 @@ This is an institutional-grade, highly sophisticated F&O algorithmic trading sys
 4. **Broker Resiliency Layer:** Enhance `kite_executor.py` with retry logic, exponential backoffs, and heartbeat websocket monitoring to gracefully handle dropped connections.
 
 *End of Review.*
+
+### Telegram Bot & Interface Review
+* **Signal Flow:**
+  - Signals flow through `prometheus/main.py` directly to the Telegram bot via `self.telegram.alert_new_signal(signal)`.
+  - There are multiple entry points for signals depending on the mode (`run_scan`, `run_full_auto_mode`, `run_combined_mode`).
+  - A key discrepancy observed: If backtesting produces many trades but the Telegram bot shows 0, it is typically because the live/paper mode relies on the `LossEliminationEngine` (the pre-trade kill switch) and `MultiAccount` routing constraints, which actively filter and reject "weak" signals before they are transmitted. The backtest engine handles execution completely separately (`prometheus/backtest/engine.py`) and does not always hook into the live Telegram alert flow.
+  - Furthermore, `is_expiry_thursday` and other time-based filters aggressively drop signals in live trading that might pass in a less restrictive backtest loop.
+
+### Paper Trading & Execution Realism (`prometheus/execution/paper_trader.py`)
+* The `PaperTrader` attempts to be highly realistic. It explicitly implements:
+  - **Spread Modeling:** Uses real-time bid/ask spreads from Angel One when placing market orders (`buy at ask`, `sell at bid`), avoiding the illusion of "mid-price" fills. If Angel One data is missing, it falls back to a 0.15% fixed slippage model.
+  - **Zerodha Cost Model:** It correctly subtracts STT, GST, and brokerage fees in real-time, just like the backtester.
+* **Flaws in Paper Trading:**
+  - `LIMIT` and `SL` orders assume absolute perfect limit fills (`current <= order.price -> fill exactly at order.price`). In reality, Limit orders may not be filled due to queue position, and Stop-Loss Market (SL-M) orders suffer gap slippage. The code uses `current` as the SL-M fill price, which is slightly better than using the trigger price exactly, but still lacks gap/queue simulation.
+
+### Signal Generation Discrepancies (Backtest vs. Live Telegram Bot)
+There is a structural divergence between how signals are treated in backtesting vs. live paper/Telegram modes:
+1. **Backtesting (`prometheus/backtest/engine.py`)**: Continuously iterates through historical bars and triggers trades based directly on `signal_generator` logic. If `alpha_intraday_engine.py` or the `nexus_system.py` logic finds a pattern, it enters immediately.
+2. **Live/Paper Mode (`prometheus/main.py`)**: Live loops run via `run_scan`, `run_paper_mode`, or `run_full_auto_mode`. Signals generated here are routed through multiple constraint filters:
+   - `Pre_Trade_Risk_Manager` or `LossEliminationEngine`: Hard-blocks signals if current loss sequences are high or if the ML model tags the signal as "Stop Hunt" / "Regime Mismatch".
+   - `MultiAccount` Constraints: Signals are filtered via `_route_candidates_for_capital()`. If there isn't a liquid option strike available that respects the max risk (e.g., 2% of capital), the signal is silently dropped.
+   - **Time Filters**: Live scans are triggered explicitly (e.g. `_run_paper_mode_swing_15m` runs a while loop checking specific intervals, and filters `is_expiry_thursday` or specific `catch_up_post_close` logic).
+
+**Conclusion:**
+If you see numerous trades in backtest but 0 signals on Telegram, it is because the live trading constraints (Risk Management kill-switches, capital allocation logic, and strict time-of-day execution windows) are aggressively pruning "weak" signals that the backtest naive loop simply executes.
