@@ -7657,9 +7657,15 @@ class Prometheus:
 
         bridge_sc = DataBridge(self.data)
         converter_sc = SignalConverter()
-        if not hasattr(self, "_tg_scan_evaluator"):
-            self._tg_scan_evaluator = SignalEvaluator(self)
-        evaluator_sc = self._tg_scan_evaluator
+        if not hasattr(self, "_tg_scan_evaluators"):
+            self._tg_scan_evaluators = {}
+
+        def _get_evaluator_sc(symbol):
+            if symbol not in self._tg_scan_evaluators:
+                self._tg_scan_evaluators[symbol] = SignalEvaluator(
+                    self, symbol, primary_interval=swing_interval
+                )
+            return self._tg_scan_evaluators[symbol]
 
         def _scan_swing(symbol):
             try:
@@ -7667,6 +7673,7 @@ class Prometheus:
                 if not scan_data.is_usable:
                     return None
 
+                evaluator_sc = _get_evaluator_sc(symbol)
                 sig_result = evaluator_sc.evaluate(scan_data)
                 if not sig_result or not sig_result.has_signal:
                     return None
@@ -7778,9 +7785,15 @@ class Prometheus:
 
             bridge = DataBridge(self.data)
             converter = SignalConverter()
-            if not hasattr(self, "_tg_scan_evaluator"):
-                self._tg_scan_evaluator = SignalEvaluator(self)
-            evaluator = self._tg_scan_evaluator
+            if not hasattr(self, "_tg_scan_evaluators"):
+                self._tg_scan_evaluators = {}
+
+            def _get_evaluator(symbol):
+                if symbol not in self._tg_scan_evaluators:
+                    self._tg_scan_evaluators[symbol] = SignalEvaluator(
+                        self, symbol, primary_interval=swing_interval
+                    )
+                return self._tg_scan_evaluators[symbol]
 
             def _scan_one_cmd(symbol):
                 try:
@@ -7788,6 +7801,7 @@ class Prometheus:
                     if not scan_data.is_usable:
                         return None
 
+                    evaluator = _get_evaluator(symbol)
                     sig_result = evaluator.evaluate(scan_data)
                     if not sig_result or not sig_result.has_signal:
                         return None
