@@ -724,31 +724,55 @@ class DataEngine:
         return 15.0
 
     def _fetch_vix_live(self) -> Optional[float]:
-        """Try to fetch live India VIX from data sources."""
-        # Try yfinance (no auth needed)
-        try:
-            import yfinance as yf
-            ticker = yf.Ticker("^INDIAVIX")
-            hist = ticker.history(period="5d")
-            if not hist.empty:
-                vix = float(hist["Close"].iloc[-1])
-                if 5 < vix < 100:  # sanity check
-                    logger.debug(f"get_vix: yfinance -> {vix:.2f}")
-                    return vix
-        except Exception as e:
-            logger.debug(f"get_vix: yfinance failed: {e}")
+        """Try to fetch live India VIX. Priority: Angel One > Kite > yfinance."""
+        # 1. Angel One (live, real-time if authenticated)
+        if self.angelone:
+            try:
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                params = {
+                    "exchange": "NSE",
+                    "symboltoken": "99926004",  # INDIA VIX
+                    "interval": "ONE_DAY",
+                    "fromdate": (now - timedelta(days=5)).strftime("%Y-%m-%d 09:15"),
+                    "todate": now.strftime("%Y-%m-%d 15:30"),
+                }
+                if self.angelone._ensure_connected():
+                    result = self.angelone._obj.getCandleData(params)
+                    if result and result.get("status") and result.get("data"):
+                        candles = result["data"]
+                        if candles:
+                            vix = float(candles[-1][4])  # close of latest candle
+                            if 5 < vix < 100:
+                                logger.info(f"get_vix: Angel One LIVE -> {vix:.2f}")
+                                return vix
+            except Exception as e:
+                logger.debug(f"get_vix: Angel One failed: {e}")
 
-        # Try Kite Connect
+        # 2. Kite Connect (live, real-time if authenticated)
         if self.kite.is_connected():
             try:
                 data = self.kite.kite.ltp(["NSE:INDIA VIX"])
                 vix_data = data.get("NSE:INDIA VIX", {})
                 vix = float(vix_data.get("last_price", 0))
                 if 5 < vix < 100:
-                    logger.debug(f"get_vix: kite -> {vix:.2f}")
+                    logger.info(f"get_vix: Kite LIVE -> {vix:.2f}")
                     return vix
             except Exception as e:
-                logger.debug(f"get_vix: kite failed: {e}")
+                logger.debug(f"get_vix: Kite failed: {e}")
+
+        # 3. yfinance (delayed 15-20 min, last resort)
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker("^INDIAVIX")
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                vix = float(hist["Close"].iloc[-1])
+                if 5 < vix < 100:
+                    logger.info(f"get_vix: yfinance (delayed) -> {vix:.2f}")
+                    return vix
+        except Exception as e:
+            logger.debug(f"get_vix: yfinance failed: {e}")
 
         return None
 
