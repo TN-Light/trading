@@ -128,7 +128,7 @@ class LiveScanner:
             result.data_status = scan_data.status
             result.data_error = scan_data.error_message
             
-            if scan_data.status != DataStatus.OK:
+            if scan_data.status not in (DataStatus.OK, DataStatus.STALE):
                 results.append(result)
                 continue
             

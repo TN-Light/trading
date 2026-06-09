@@ -700,7 +700,74 @@ class DataEngine:
         )
 
     def get_vix(self) -> float:
+        """Fetch India VIX from best available source. Caches for 5 minutes."""
+        # Return cached value if fresh
+        now = datetime.now()
+        if hasattr(self, '_vix_cache') and self._vix_cache is not None:
+            cached_val, cached_time = self._vix_cache
+            if (now - cached_time).total_seconds() < 300:  # 5 min cache
+                return cached_val
+
+        vix = self._fetch_vix_live()
+        if vix is not None and vix > 0:
+            self._vix_cache = (vix, now)
+            return vix
+
+        # Fallback: compute realized vol from recent NIFTY daily data
+        vix = self._estimate_vix_from_returns()
+        if vix is not None and vix > 0:
+            self._vix_cache = (vix, now)
+            return vix
+
+        # Last resort: return default
+        logger.debug("get_vix: all sources failed, using default 15.0")
         return 15.0
+
+    def _fetch_vix_live(self) -> Optional[float]:
+        """Try to fetch live India VIX from data sources."""
+        # Try yfinance (no auth needed)
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker("^INDIAVIX")
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                vix = float(hist["Close"].iloc[-1])
+                if 5 < vix < 100:  # sanity check
+                    logger.debug(f"get_vix: yfinance -> {vix:.2f}")
+                    return vix
+        except Exception as e:
+            logger.debug(f"get_vix: yfinance failed: {e}")
+
+        # Try Kite Connect
+        if self.kite.is_connected():
+            try:
+                data = self.kite.kite.ltp(["NSE:INDIA VIX"])
+                vix_data = data.get("NSE:INDIA VIX", {})
+                vix = float(vix_data.get("last_price", 0))
+                if 5 < vix < 100:
+                    logger.debug(f"get_vix: kite -> {vix:.2f}")
+                    return vix
+            except Exception as e:
+                logger.debug(f"get_vix: kite failed: {e}")
+
+        return None
+
+    def _estimate_vix_from_returns(self) -> Optional[float]:
+        """Estimate VIX from recent NIFTY 50 daily returns (realized vol proxy)."""
+        try:
+            cached = self.store.get_ohlcv("NIFTY 50", "day",
+                                          start=(datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d"),
+                                          end=datetime.now().strftime("%Y-%m-%d"))
+            if cached is not None and len(cached) >= 20:
+                returns = cached["close"].pct_change().dropna().tail(20)
+                realized_vol = float(returns.std() * (252 ** 0.5) * 100)
+                if 5 < realized_vol < 100:
+                    logger.debug(f"get_vix: realized vol proxy -> {realized_vol:.2f}")
+                    return realized_vol
+        except Exception as e:
+            logger.debug(f"get_vix: realized vol estimate failed: {e}")
+        return None
+
     def fetch_options_chain(self, symbol: str = "NIFTY 50") -> pd.DataFrame:
         """Fetch and parse options chain data. Prefers Angel One, falls back to NSE."""
         # Try Angel One first (authenticated, reliable)
