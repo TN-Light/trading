@@ -114,7 +114,7 @@ class TestDataBridgeFetch:
     
     def test_empty_hourly_falls_back_to_primary(self, mock_data_engine):
         """When hourly data is empty, it falls back to primary."""
-        def custom_fetch(symbol, days=60, interval="day"):
+        def custom_fetch(symbol, days=60, interval="day", force_refresh=False):
             if interval == "15minute":
                 return pd.DataFrame({
                     "timestamp": pd.date_range(datetime.now() - timedelta(hours=5),

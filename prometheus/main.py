@@ -7659,6 +7659,16 @@ class Prometheus:
         converter_sc = SignalConverter()
         if not hasattr(self, "_tg_scan_evaluators"):
             self._tg_scan_evaluators = {}
+        if not hasattr(self, "_tg_scan_eval_date"):
+            self._tg_scan_eval_date = None
+
+        # Daily refresh: clear stale evaluators so yesterday's signals don't persist
+        from datetime import date as _date
+        today = _date.today()
+        if self._tg_scan_eval_date != today:
+            for ev in self._tg_scan_evaluators.values():
+                ev.refresh()
+            self._tg_scan_eval_date = today
 
         def _get_evaluator_sc(symbol):
             if symbol not in self._tg_scan_evaluators:
@@ -7765,11 +7775,6 @@ class Prometheus:
         try:
             intraday_enabled = bool(get("intraday.enabled", False))
             scan_mode = "swing" if not intraday_enabled else "swing + intraday"
-            self.telegram.send_message(
-                f"\U0001f50e Scanning {n_total} symbols "
-                f"({len(self.symbols)} indices + {len(self.stock_symbols)} stocks, "
-                f"{scan_mode})... please wait."
-            )
 
             # Regime multipliers (same as run_scan)
             REGIME_MULTIPLIER = {
@@ -7787,6 +7792,16 @@ class Prometheus:
             converter = SignalConverter()
             if not hasattr(self, "_tg_scan_evaluators"):
                 self._tg_scan_evaluators = {}
+            if not hasattr(self, "_tg_scan_eval_date"):
+                self._tg_scan_eval_date = None
+
+            # Daily refresh: clear stale evaluators so yesterday's signals don't persist
+            from datetime import date as _date
+            today = _date.today()
+            if self._tg_scan_eval_date != today:
+                for ev in self._tg_scan_evaluators.values():
+                    ev.refresh()
+                self._tg_scan_eval_date = today
 
             def _get_evaluator(symbol):
                 if symbol not in self._tg_scan_evaluators:

@@ -25,8 +25,10 @@ class DataBridge:
         fetch_time = datetime.now()
         
         try:
-            primary = self._data.fetch_historical(symbol, days=60, interval=interval)
-            hourly = self._data.fetch_historical(symbol, days=60, interval='60minute')
+            # Primary and hourly MUST be fresh for live scanning — bypass cache
+            primary = self._data.fetch_historical(symbol, days=60, interval=interval, force_refresh=True)
+            hourly = self._data.fetch_historical(symbol, days=60, interval='60minute', force_refresh=True)
+            # Daily can use cache — doesn't change intraday
             daily = self._data.fetch_historical(symbol, days=365, interval='day')
         except Exception as e:
             logger.error(f"DataBridge: fetch error for {symbol}: {e}")

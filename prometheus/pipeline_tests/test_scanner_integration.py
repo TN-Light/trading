@@ -41,7 +41,7 @@ def _make_mock_prometheus(symbols=None, signal_map=None):
     primary = make_15min_bars(200, start_date=(datetime.now() - timedelta(hours=50)).strftime("%Y-%m-%d 09:15:00"))
     daily = make_daily_bars(100)
     
-    def fetch_historical(symbol, days=60, interval="day"):
+    def fetch_historical(symbol, days=60, interval="day", force_refresh=False):
         if interval in ("15minute", "60minute"):
             return primary.copy()
         return daily.copy()
@@ -222,10 +222,10 @@ class TestScanCycleIntegration:
         call_count = [0]
         original_fetch = mock_prom.data.fetch_historical.side_effect
         
-        def failing_fetch(symbol, days=60, interval="day"):
+        def failing_fetch(symbol, days=60, interval="day", force_refresh=False):
             if symbol == "NIFTY 50" and interval == "15minute":
                 raise ConnectionError("API timeout")
-            return original_fetch(symbol, days=days, interval=interval)
+            return original_fetch(symbol, days=days, interval=interval, force_refresh=force_refresh)
         
         mock_prom.data.fetch_historical = MagicMock(side_effect=failing_fetch)
         

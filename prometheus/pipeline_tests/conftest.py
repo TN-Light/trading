@@ -120,7 +120,7 @@ def mock_data_engine(sample_15min_data, sample_daily_data):
     """Mock data engine that returns test data."""
     engine = MagicMock()
     
-    def fetch_historical(symbol, days=60, interval="day"):
+    def fetch_historical(symbol, days=60, interval="day", force_refresh=False):
         if interval == "15minute":
             return sample_15min_data.copy()
         elif interval == "60minute":
