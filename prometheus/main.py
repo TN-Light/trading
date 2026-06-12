@@ -8006,7 +8006,7 @@ class Prometheus:
             f"Status:     {status_line}\n"
             f"Mode:       <b>{mode_str}</b>\n"
             f"Accounts:   <code>{account_count}</code>\n"
-            f"Primary:    <b>15K PAPER</b>\n"
+            f"Primary:    <b>{primary_state.capital / 1000:.0f}K PAPER</b>\n"
             f"Scan loop:  <code>{interval_text}</code>\n"
             f"Positions:  <code>{total_positions}</code>\n"
             f"Trades:     <code>{total_trades}</code>\n"
