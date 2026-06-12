@@ -160,8 +160,22 @@ class LiveScanner:
             # Step 5: Execute
             try:
                 self._notifier.notify_signal_alert(executable)
+                # Merge ExecutableSignal fields into raw dict for order_manager
+                exec_dict = {**executable.raw}
+                exec_dict['action'] = executable.action
+                exec_dict['instrument'] = executable.instrument or exec_dict.get('instrument', '')
+                exec_dict['confidence'] = executable.confidence
+                exec_dict['option_type'] = executable.option_type
+                if executable.strike:
+                    exec_dict['strike'] = executable.strike
+                if executable.expiry:
+                    exec_dict['option_expiry_date'] = executable.expiry
+                if executable.lot_size:
+                    exec_dict['lot_size'] = executable.lot_size
+                if executable.quantity:
+                    exec_dict['quantity'] = executable.quantity
                 position = self._prometheus.order_manager.execute_signal(
-                    executable.raw, confirm=False
+                    exec_dict, confirm=False
                 )
                 if position:
                     result.executed = True

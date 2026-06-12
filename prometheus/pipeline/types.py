@@ -146,7 +146,8 @@ class SymbolScanResult:
 
     @property
     def rejection_reason(self) -> str:
-        if self.data_status != DataStatus.OK:
+        # Only report truly unusable data statuses as rejections
+        if self.data_status not in (DataStatus.OK, DataStatus.STALE):
             return f"data:{self.data_status.value}"
         if self.signal and not self.signal.has_signal:
             return "no_signal"
