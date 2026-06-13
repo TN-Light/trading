@@ -74,6 +74,7 @@ class ExpiryStrategy:
         self.capital = capital
         self.max_trade_cost = capital * 0.15  # max 15% per expiry trade
         self.dte_max = config.get("days_to_expiry_max", 2)
+        self.current_iv = 0.15  # updated dynamically from VIX
 
     def check_expiry_opportunity(
         self,
@@ -332,7 +333,7 @@ class ExpiryStrategy:
     ) -> float:
         """Estimate option premium near expiry using Black-Scholes."""
         T = max(dte + 0.1, 0.01) / 365  # at least ~1 hour worth of time
-        sigma = 0.15  # conservative IV estimate
+        sigma = self.current_iv if self.current_iv > 0 else 0.15
         opt = OptionType.CALL if option_type == "CE" else OptionType.PUT
         price = black_scholes_price(spot, strike, T, 0.065, sigma, opt)
         return max(round(price, 2), 0.5)  # minimum 0.5 premium

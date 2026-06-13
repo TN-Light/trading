@@ -83,7 +83,7 @@ class KiteExecutor(BrokerBase):
             return False
 
     def place_order(self, order: Order) -> Order:
-        """Place an order on Kite."""
+        """Place an order on Kite with retry for transient errors."""
         if not self.kite:
             order.status = OrderStatus.REJECTED
             order.message = "Broker not connected"
@@ -94,42 +94,69 @@ class KiteExecutor(BrokerBase):
         if elapsed < self._min_order_interval:
             time.sleep(self._min_order_interval - elapsed)
 
-        try:
-            params = {
-                "tradingsymbol": order.tradingsymbol,
-                "exchange": order.exchange,
-                "transaction_type": self.SIDE_MAP[order.side],
-                "quantity": order.quantity,
-                "order_type": self.ORDER_TYPE_MAP[order.order_type],
-                "product": self.PRODUCT_MAP[order.product],
-                "variety": "regular",
-                "tag": order.tag[:20] if order.tag else "PROMETHEUS",
-            }
+        params = {
+            "tradingsymbol": order.tradingsymbol,
+            "exchange": order.exchange,
+            "transaction_type": self.SIDE_MAP[order.side],
+            "quantity": order.quantity,
+            "order_type": self.ORDER_TYPE_MAP[order.order_type],
+            "product": self.PRODUCT_MAP[order.product],
+            "variety": "regular",
+            "tag": order.tag[:20] if order.tag else "PROMETHEUS",
+        }
 
-            if order.order_type == OrderType.LIMIT:
+        if order.order_type == OrderType.LIMIT:
+            params["price"] = order.price
+        if order.order_type in (OrderType.SL, OrderType.SL_M):
+            params["trigger_price"] = order.trigger_price
+            if order.order_type == OrderType.SL:
                 params["price"] = order.price
-            if order.order_type in (OrderType.SL, OrderType.SL_M):
-                params["trigger_price"] = order.trigger_price
-                if order.order_type == OrderType.SL:
-                    params["price"] = order.price
 
-            order_id = self.kite.place_order(**params)
-            self._last_order_time = time.time()
+        # Errors that should NOT be retried (permanent failures)
+        _no_retry_keywords = [
+            "insufficient", "margin", "invalid", "not allowed",
+            "contract", "symbol", "banned", "frozen", "quantity",
+        ]
 
-            order.order_id = str(order_id)
-            order.status = OrderStatus.OPEN
-            order.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                order_id = self.kite.place_order(**params)
+                self._last_order_time = time.time()
 
-            logger.info(
-                f"Order placed: {order.side.value} {order.quantity} "
-                f"{order.tradingsymbol} @ {order.order_type.value} "
-                f"(ID: {order.order_id})"
-            )
+                order.order_id = str(order_id)
+                order.status = OrderStatus.OPEN
+                order.timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        except Exception as e:
-            order.status = OrderStatus.REJECTED
-            order.message = str(e)
-            logger.error(f"Order placement failed: {e}")
+                logger.info(
+                    f"Order placed: {order.side.value} {order.quantity} "
+                    f"{order.tradingsymbol} @ {order.order_type.value} "
+                    f"(ID: {order.order_id})"
+                )
+                return order
+
+            except Exception as e:
+                err_msg = str(e).lower()
+
+                # Don't retry permanent failures
+                if any(kw in err_msg for kw in _no_retry_keywords):
+                    order.status = OrderStatus.REJECTED
+                    order.message = str(e)
+                    logger.error(f"Order permanently rejected: {e}")
+                    return order
+
+                # Retry transient errors (network, timeout, rate limit, 5xx)
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt  # 1s, 2s
+                    logger.warning(
+                        f"Order attempt {attempt+1}/{max_retries} failed: {e}. "
+                        f"Retrying in {wait}s..."
+                    )
+                    time.sleep(wait)
+                else:
+                    order.status = OrderStatus.REJECTED
+                    order.message = f"Failed after {max_retries} attempts: {e}"
+                    logger.error(f"Order placement failed after {max_retries} retries: {e}")
 
         return order
 

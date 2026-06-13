@@ -1564,6 +1564,14 @@ class Prometheus:
         )
         strategy_name = selection.get("strategy", signal.strategy or "trend")
 
+        # Inject live IV into strategy modules (replaces hardcoded sigma=0.15)
+        vix_val = self.data.get_vix()
+        live_iv = (vix_val / 100.0) if vix_val and vix_val > 1 else 0.15
+        if hasattr(self, 'trend'):
+            self.trend.current_iv = live_iv
+        if hasattr(self, 'expiry'):
+            self.expiry.current_iv = live_iv
+
         # Volatility module is selected during high-vol regimes, but the paper/live
         # execution path only wires trend/expiry setups. Without a volatility setup,
         # fall back to trend so signals remain executable.

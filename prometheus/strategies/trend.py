@@ -99,6 +99,7 @@ class TrendStrategy:
         self.max_position_cost = capital * config.get("max_single_trade", 0.25)
         self.min_rr = config.get("target_rr_ratio", 2.5)
         self.max_sl_points = config.get("max_sl_points", 30)
+        self.current_iv = 0.15  # updated dynamically from VIX
 
     def generate_setup(
         self,
@@ -432,7 +433,7 @@ class TrendStrategy:
         # Fallback: Black-Scholes estimate
         from prometheus.utils.options_math import black_scholes_price
         T = max(dte, 1) / 365
-        sigma = 0.15  # assume 15% IV as default
+        sigma = self.current_iv if self.current_iv > 0 else 0.15
         r = 0.065     # RBI repo rate approximate
 
         opt_type = OptionType.CALL if option_type == "CE" else OptionType.PUT
