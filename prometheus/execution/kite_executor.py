@@ -327,29 +327,46 @@ def generate_tradingsymbol(
     """
     Generate Kite-compatible tradingsymbol for F&O.
 
-    Example: NIFTY2530622500CE
-    Format: {SYMBOL}{YY}{M}{DD}{STRIKE}{CE/PE}
+    Weekly:  {SYMBOL}{YY}{M}{DD}{STRIKE}{CE/PE}  e.g. SENSEX26618​74300PE
+    Monthly: {SYMBOL}{YY}{MON}{STRIKE}{CE/PE}     e.g. SENSEX26JUN74300PE
 
     Args:
-        symbol: "NIFTY" or "BANKNIFTY"
-        expiry_date: "2025-03-06" format
-        strike: 22500
+        symbol: "NIFTY", "BANKNIFTY", "SENSEX", etc.
+        expiry_date: "2026-06-18" format
+        strike: 74300
         option_type: "CE" or "PE"
     """
-    from datetime import datetime as dt
+    from datetime import datetime as dt, timedelta
+
     d = dt.strptime(expiry_date, "%Y-%m-%d")
-
-    # Month encoding: Jan=1..Dec=O (Kite uses 1-9, O, N, D)
-    month_map = {
-        1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
-        7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"
-    }
-
-    yy = d.strftime("%y")
-    m = month_map[d.month]
-    dd = d.strftime("%d")
 
     # Strike formatting — remove .0 for whole numbers
     strike_str = str(int(strike)) if strike == int(strike) else str(strike)
 
-    return f"{symbol}{yy}{m}{dd}{strike_str}{option_type}"
+    # Check if this is a monthly expiry (last occurrence of this weekday in the month)
+    is_monthly = _is_monthly_expiry(d)
+
+    if is_monthly:
+        # Monthly format: SENSEX26JUN74300PE
+        mon = d.strftime("%b").upper()  # JAN, FEB, ..., DEC
+        yy = d.strftime("%y")
+        return f"{symbol}{yy}{mon}{strike_str}{option_type}"
+    else:
+        # Weekly format: SENSEX2661874300PE
+        month_map = {
+            1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+            7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"
+        }
+        yy = d.strftime("%y")
+        m = month_map[d.month]
+        dd = d.strftime("%d")
+        return f"{symbol}{yy}{m}{dd}{strike_str}{option_type}"
+
+
+def _is_monthly_expiry(d) -> bool:
+    """Check if date is the last occurrence of its weekday in its month."""
+    from datetime import timedelta
+    # If adding 7 days pushes us into the next month, this is the last one
+    next_week = d + timedelta(days=7)
+    return next_week.month != d.month
+

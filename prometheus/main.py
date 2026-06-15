@@ -1380,9 +1380,11 @@ class Prometheus:
         if not out.get("risk_reward"):
             out["risk_reward"] = round(reward / risk, 2) if risk > 0 else 0.0
 
-        score = float(out.get("bull_score", 0) or out.get("bear_score", 0) or 0)
+        score = float(out.get("bull_score", 0) or 0) if out.get("direction") == "bullish" else float(out.get("bear_score", 0) or 0)
         if not out.get("confidence"):
-            out["confidence"] = min(1.0, score / 6.0) if score > 0 else 0.0
+            # Max score = sum of all signal weights (loaded or default ~8.5)
+            _max_score = sum(_w.values()) if '_w' in dir() else 8.5
+            out["confidence"] = min(1.0, score / _max_score) if score > 0 else 0.0
 
         strike = float(out.get("strike", 0) or 0)
         expiry = str(out.get("option_expiry_date", "") or out.get("expiry", "") or "")

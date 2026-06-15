@@ -149,6 +149,16 @@ class LiveScanner:
                 results.append(result)
                 continue
             
+            # Step 3b: Confidence gate — reject weak signals
+            min_confidence = 0.35
+            if executable.confidence < min_confidence:
+                logger.info(
+                    f"LiveScanner: {symbol} rejected — confidence "
+                    f"{executable.confidence:.0%} < {min_confidence:.0%}"
+                )
+                results.append(result)
+                continue
+            
             # Step 4: Gate check
             gate_result = self._gate.check(executable)
             result.gate = gate_result

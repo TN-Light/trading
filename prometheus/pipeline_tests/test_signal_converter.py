@@ -66,14 +66,16 @@ class TestSignalConverterValid:
         assert executable.risk_reward == 2.0
     
     def test_confidence_from_score(self, sample_raw_signal):
-        """Confidence is calculated from bull_score/6.0."""
+        """Confidence is calculated from bull_score / max_score."""
+        from prometheus.pipeline.signal_converter import _MAX_SCORE
         converter = SignalConverter()
         signal_result = SignalResult(raw_signal=sample_raw_signal, symbol="NIFTY 50")
         
         executable = converter.convert(signal_result, "NIFTY 50")
         
-        # bull_score = 4.5, confidence = min(1.0, 4.5/6.0) = 0.75
-        assert executable.confidence == pytest.approx(0.75, abs=0.01)
+        # bull_score = 4.5, confidence = min(1.0, 4.5 / _MAX_SCORE)
+        expected = min(1.0, 4.5 / _MAX_SCORE)
+        assert executable.confidence == pytest.approx(expected, abs=0.01)
     
     def test_lot_size_preserved(self, sample_raw_signal):
         """Lot size from raw signal is preserved."""
@@ -175,12 +177,13 @@ class TestSignalConverterEdgeCases:
         assert executable.confidence == 0.0
     
     def test_high_score_caps_confidence_at_1(self):
-        """Score > 6 caps confidence at 1.0."""
+        """Score >= max_score caps confidence at 1.0."""
+        from prometheus.pipeline.signal_converter import _MAX_SCORE
         converter = SignalConverter()
         raw = {
             "direction": "bullish", "strategy": "trend",
             "entry_price": 100.0, "stop_loss": 80.0, "target": 150.0,
-            "bull_score": 8.0, "symbol": "NIFTY 50",
+            "bull_score": _MAX_SCORE + 1.0, "symbol": "NIFTY 50",
         }
         signal_result = SignalResult(raw_signal=raw, symbol="NIFTY 50")
         executable = converter.convert(signal_result, "NIFTY 50")

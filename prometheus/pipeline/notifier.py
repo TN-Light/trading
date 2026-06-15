@@ -90,10 +90,11 @@ class Notifier:
         
         if signal.instrument:
             lines.append(f'Contract: <code>{signal.instrument}</code>')
-        elif signal.strike > 0:
-            lines.append(
-                f'Strike: <code>{int(signal.strike)} {signal.option_type}</code>'
-            )
+        if signal.strike > 0:
+            strike_line = f'Strike: <code>{int(signal.strike)} {signal.option_type}</code>'
+            if signal.expiry:
+                strike_line += f' (exp: {signal.expiry})'
+            lines.append(strike_line)
         
         if signal.regime:
             lines.append(f'Regime: <code>{signal.regime}</code>')
