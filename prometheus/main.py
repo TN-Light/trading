@@ -7942,11 +7942,16 @@ class Prometheus:
                 s = stack.get_summary()
                 halted = "\U0001f6d1" if stack.risk._halted else "\u2705"
                 pnl_emoji = "\U0001f7e2" if s["pnl"] >= 0 else "\U0001f534"
+                # Include pipeline-opened positions from position_monitor
+                pm_count = 0
+                if hasattr(self, 'position_monitor') and self.position_monitor:
+                    pm_count = self.position_monitor.active_count
+                open_count = max(s['open_positions'], pm_count)
                 text += (
                     f"{halted} <b>{s['label']}</b>  (Rs {s['initial']:,.0f})\n"
                     f"    Equity <code>Rs {s['equity']:,.0f}</code>\n"
                     f"    {pnl_emoji} P&amp;L <code>Rs {s['pnl']:+,.0f}</code>  ({s['return_pct']:+.1f}%)\n"
-                    f"    Trades <code>{s['trades']}</code>  \u2502  Open <code>{s['open_positions']}</code>  \u2502  WR <code>{s['win_rate']:.0f}%</code>\n\n"
+                    f"    Trades <code>{s['trades']}</code>  \u2502  Open <code>{open_count}</code>  \u2502  WR <code>{s['win_rate']:.0f}%</code>\n\n"
                 )
             return text
 
@@ -8199,8 +8204,11 @@ class Prometheus:
             "",
         ]
         for pid, state in self.position_monitor.get_positions().items():
-            pnl_pct = ((self.broker.get_ltp(state.tradingsymbol) - state.entry_premium)
-                       / state.entry_premium * 100) if state.entry_premium > 0 else 0
+            ltp = self.broker.get_ltp(state.tradingsymbol)
+            if ltp and ltp > 0 and state.entry_premium > 0:
+                pnl_pct = (ltp - state.entry_premium) / state.entry_premium * 100
+            else:
+                pnl_pct = 0.0  # no market data available
             pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
             acct_label = getattr(state, "_multi_account_label", "primary")
             lines.append(

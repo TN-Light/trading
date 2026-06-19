@@ -332,7 +332,6 @@ market:
   holidays_calendar: india_nse
   indices:
   - SENSEX
-  - NIFTY IT
   - NIFTY FIN SERVICE
   - NIFTY BANK
   - NIFTY 50

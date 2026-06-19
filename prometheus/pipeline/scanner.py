@@ -73,6 +73,10 @@ class LiveScanner:
         self._running = False
         self._last_scan_time: Optional[datetime] = None
         self._today: Optional[date] = None
+        
+        # Lock to prevent /scan command and auto-scan from running simultaneously
+        import threading
+        self.scan_lock = threading.Lock()
     
     def _ensure_evaluators(self):
         """Create evaluators for any new symbols."""
@@ -104,7 +108,18 @@ class LiveScanner:
         6. Notifies via Telegram
         
         Returns a ScanCycle with full diagnostic trail.
+        Thread-safe: uses scan_lock to prevent concurrent scans.
         """
+        if not self.scan_lock.acquire(blocking=False):
+            logger.info("LiveScanner: scan skipped — another scan in progress")
+            return ScanCycle(results=[])
+        try:
+            return self._run_scan_cycle_locked()
+        finally:
+            self.scan_lock.release()
+    
+    def _run_scan_cycle_locked(self) -> ScanCycle:
+        """Internal scan cycle (must be called with scan_lock held)."""
         self._ensure_evaluators()
         self._refresh_evaluators_daily()
         
