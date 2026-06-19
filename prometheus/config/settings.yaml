@@ -342,7 +342,13 @@ market:
     NIFTY FIN SERVICE: 25
     SENSEX: 10
     NIFTY MIDCAP SELECT: 50
-  stocks: []
+  stocks:
+  - HDFCBANK
+  - RELIANCE
+  - SBIN
+  - TATAMOTORS
+  - INFY
+  - ICICIBANK
   trading_hours:
     end: '15:30'
     pre_open_end: 09:08

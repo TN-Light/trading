@@ -1396,18 +1396,28 @@ class Prometheus:
         if lot_size > 0 and quantity > 0:
             out["lots"] = max(1, int(quantity / lot_size))
 
-        if strike > 0 and expiry:
-            sym_upper = symbol.upper()
-            if "SENSEX" in sym_upper:
+            # Index name → Kite underlying mapping
+            INDEX_MAP = {
+                "SENSEX": "SENSEX",
+                "NIFTY 50": "NIFTY",
+                "NIFTY BANK": "BANKNIFTY",
+                "NIFTY FIN SERVICE": "FINNIFTY",
+                "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+            }
+            if symbol in INDEX_MAP:
+                underlying = INDEX_MAP[symbol]
+            elif "SENSEX" in sym_upper:
                 underlying = "SENSEX"
             elif "MIDCAP" in sym_upper:
                 underlying = "MIDCPNIFTY"
-            elif "BANK" in sym_upper:
+            elif "BANK" in sym_upper and "NIFTY" in sym_upper:
                 underlying = "BANKNIFTY"
-            elif "FIN" in sym_upper:
+            elif "FIN" in sym_upper and "NIFTY" in sym_upper:
                 underlying = "FINNIFTY"
-            else:
+            elif "NIFTY" in sym_upper:
                 underlying = "NIFTY"
+            else:
+                underlying = sym_upper  # Stock F&O
             out["instrument"] = generate_tradingsymbol(underlying, expiry, strike, out["option_type"])
 
         return out
@@ -2022,7 +2032,7 @@ class Prometheus:
 
         scanner = LiveScanner(
             prometheus_instance=self,
-            symbols=self.symbols,
+            symbols=self.all_symbols,
             scan_interval_seconds=max(900, int(interval_seconds)),
             skip_first_minutes=skip_minutes,
             max_positions=3,

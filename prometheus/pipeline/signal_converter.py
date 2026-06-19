@@ -103,16 +103,29 @@ class SignalConverter:
         instrument = ''
         if strike > 0 and expiry:
             sym_upper = symbol.upper()
-            if 'SENSEX' in sym_upper:
+            # Index name → Kite underlying mapping
+            INDEX_MAP = {
+                'SENSEX': 'SENSEX',
+                'NIFTY 50': 'NIFTY',
+                'NIFTY BANK': 'BANKNIFTY',
+                'NIFTY FIN SERVICE': 'FINNIFTY',
+                'NIFTY MIDCAP SELECT': 'MIDCPNIFTY',
+            }
+            if symbol in INDEX_MAP:
+                underlying = INDEX_MAP[symbol]
+            elif 'SENSEX' in sym_upper:
                 underlying = 'SENSEX'
             elif 'MIDCAP' in sym_upper:
                 underlying = 'MIDCPNIFTY'
-            elif 'BANK' in sym_upper:
+            elif 'BANK' in sym_upper and 'NIFTY' in sym_upper:
                 underlying = 'BANKNIFTY'
-            elif 'FIN' in sym_upper:
+            elif 'FIN' in sym_upper and 'NIFTY' in sym_upper:
                 underlying = 'FINNIFTY'
-            else:
+            elif 'NIFTY' in sym_upper:
                 underlying = 'NIFTY'
+            else:
+                # Stock F&O — underlying IS the stock symbol
+                underlying = sym_upper
             instrument = _generate_tradingsymbol(underlying, expiry, strike, option_type)
         
         executable = ExecutableSignal(
