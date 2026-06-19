@@ -24,9 +24,18 @@ class AngelOneFetcher:
         "NIFTY BANK": "99926009",
         "SENSEX": "99919000",       # BSE
         "NIFTY FIN SERVICE": "99926037",
-        "NIFTY IT": "99926013",
         "NIFTY MIDCAP SELECT": "99926074",
         "INDIA VIX": "99926004",
+    }
+
+    # Angel One symbol tokens for NSE equities (F&O stocks)
+    STOCK_TOKENS = {
+        "HDFCBANK": "1333",
+        "RELIANCE": "2885",
+        "SBIN": "3045",
+        "TATAMOTORS": "3456",
+        "INFY": "1594",
+        "ICICIBANK": "4963",
     }
 
     # Exchange mapping
@@ -35,7 +44,6 @@ class AngelOneFetcher:
         "NIFTY BANK": "NSE",
         "SENSEX": "BSE",
         "NIFTY FIN SERVICE": "NSE",
-        "NIFTY IT": "NSE",
         "NIFTY MIDCAP SELECT": "NSE",
         "INDIA VIX": "NSE",
     }
@@ -117,12 +125,12 @@ class AngelOneFetcher:
         if not self._ensure_connected():
             return pd.DataFrame()
 
-        token = self.INDEX_TOKENS.get(symbol)
+        token = self.INDEX_TOKENS.get(symbol) or self.STOCK_TOKENS.get(symbol)
         exchange = self.INDEX_EXCHANGES.get(symbol, "NSE")
         ao_interval = self.INTERVAL_MAP.get(interval)
 
         if not token:
-            logger.error(f"Angel One: unknown symbol '{symbol}'. Known: {list(self.INDEX_TOKENS.keys())}")
+            logger.error(f"Angel One: unknown symbol '{symbol}'. Known: {list(self.INDEX_TOKENS.keys()) + list(self.STOCK_TOKENS.keys())}")
             return pd.DataFrame()
         if not ao_interval:
             logger.error(f"Angel One: unknown interval '{interval}'. Known: {list(self.INTERVAL_MAP.keys())}")

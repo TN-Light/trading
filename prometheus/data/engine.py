@@ -145,8 +145,7 @@ class YFinanceFallback:
         "NIFTY BANK": "^NSEBANK",
         "SENSEX": "^BSESN",
         "NIFTY FIN SERVICE": "NIFTY_FIN_SERVICE.NS",
-        "NIFTY IT": "^CNXIT",
-        "NIFTY MIDCAP SELECT": "NIFTY_MIDCAP_SELECT.NS",
+        "NIFTY MIDCAP SELECT": "NIFTY_MIDCAP_SELECT.NS",  # May not be available on yfinance
         "NIFTY NEXT 50": "^NSMIDCP",
         "INDIA VIX": "^INDIAVIX",
         # --- F&O Stocks (40+) ---
