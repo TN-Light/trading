@@ -223,3 +223,61 @@ class TestNotifierTelegramFailure:
         
         # Should not raise
         notifier.notify_scan_result(cycle)
+
+
+class TestKiteSearchName:
+    """Test Kite-searchable contract name generation."""
+    
+    def test_nifty_bank_ce(self, mock_telegram):
+        """NIFTY BANK maps to BANKNIFTY in Kite."""
+        notifier = Notifier(mock_telegram)
+        signal = ExecutableSignal(
+            symbol="NIFTY BANK", action="BUY_CE", direction="bullish",
+            option_type="CE", strike=45000.0, expiry="2026-06-26",
+        )
+        name = notifier._make_kite_search_name(signal)
+        assert name == "BANKNIFTY JUN 45000 CE"
+    
+    def test_finnifty_pe(self, mock_telegram):
+        """NIFTY FIN SERVICE maps to FINNIFTY."""
+        notifier = Notifier(mock_telegram)
+        signal = ExecutableSignal(
+            symbol="NIFTY FIN SERVICE", action="BUY_PE", direction="bearish",
+            option_type="PE", strike=26350.0, expiry="2026-06-24",
+        )
+        name = notifier._make_kite_search_name(signal)
+        assert name == "FINNIFTY JUN 26350 PE"
+    
+    def test_stock_uses_symbol_directly(self, mock_telegram):
+        """Stock symbols pass through as-is (e.g., HDFCBANK)."""
+        notifier = Notifier(mock_telegram)
+        signal = ExecutableSignal(
+            symbol="HDFCBANK", action="BUY_CE", direction="bullish",
+            option_type="CE", strike=1900.0, expiry="2026-06-26",
+        )
+        name = notifier._make_kite_search_name(signal)
+        assert name == "HDFCBANK JUN 1900 CE"
+    
+    def test_no_strike_returns_empty(self, mock_telegram):
+        """No strike means no Kite name."""
+        notifier = Notifier(mock_telegram)
+        signal = ExecutableSignal(
+            symbol="NIFTY 50", action="BUY_CE", direction="bullish",
+            option_type="CE",
+        )
+        name = notifier._make_kite_search_name(signal)
+        assert name == ''
+    
+    def test_signal_alert_includes_kite_name(self, mock_telegram):
+        """Signal alert message contains the Kite-searchable name."""
+        notifier = Notifier(mock_telegram)
+        signal = ExecutableSignal(
+            symbol="NIFTY 50", action="BUY_CE", direction="bullish",
+            option_type="CE", entry_price=200.0, stop_loss=170.0,
+            target=260.0, risk_reward=2.0, confidence=0.70,
+            strike=24500.0, expiry="2026-06-26",
+        )
+        notifier.notify_signal_alert(signal)
+        msg = mock_telegram.send_message.call_args[0][0]
+        assert "NIFTY JUN 24500 CE" in msg
+        assert "Kite" in msg

@@ -72,29 +72,82 @@ class Notifier:
             
             self._send('\n'.join(lines))
     
+    def _make_kite_search_name(self, signal: ExecutableSignal) -> str:
+        """Generate Kite-searchable contract name.
+        
+        Kite search format: BANKNIFTY JUN 45000 CE
+        This is what users paste into Kite's search bar.
+        """
+        if not signal.strike or signal.strike <= 0:
+            return ''
+        
+        # Determine underlying name for Kite
+        sym = signal.symbol.upper()
+        INDEX_MAP = {
+            'SENSEX': 'SENSEX',
+            'NIFTY 50': 'NIFTY',
+            'NIFTY BANK': 'BANKNIFTY',
+            'NIFTY FIN SERVICE': 'FINNIFTY',
+            'NIFTY MIDCAP SELECT': 'MIDCPNIFTY',
+        }
+        underlying = INDEX_MAP.get(signal.symbol, sym)
+        
+        # Month from expiry date
+        month_str = ''
+        if signal.expiry:
+            try:
+                from datetime import datetime as dt
+                d = dt.strptime(signal.expiry, '%Y-%m-%d')
+                month_str = d.strftime('%b').upper()  # JUN, JUL etc.
+            except Exception:
+                month_str = ''
+        
+        strike_str = str(int(signal.strike)) if signal.strike == int(signal.strike) else str(signal.strike)
+        otype = signal.option_type or 'CE'
+        
+        if month_str:
+            return f"{underlying} {month_str} {strike_str} {otype}"
+        else:
+            return f"{underlying} {strike_str} {otype}"
+    
     def notify_signal_alert(self, signal: ExecutableSignal):
-        """Send a detailed signal alert (for primary account)."""
+        """Send a detailed signal alert with Kite-searchable contract name."""
         direction = 'BULLISH' if signal.direction == 'bullish' else 'BEARISH'
         emoji = '\U0001f7e2' if signal.direction == 'bullish' else '\U0001f534'
+        
+        # Generate Kite-searchable name
+        kite_name = self._make_kite_search_name(signal)
         
         lines = [
             f'{emoji} <b>SIGNAL: {signal.symbol}</b>',
             f'Direction: {direction}',
             f'Action: <code>{signal.action}</code>',
-            f'',
-            f'Entry: <code>Rs {signal.entry_price:,.2f}</code>',
-            f'SL: <code>Rs {signal.stop_loss:,.2f}</code>',
-            f'Target: <code>Rs {signal.target:,.2f}</code>',
-            f'RR: <code>1:{signal.risk_reward:.1f}</code>',
         ]
         
-        if signal.instrument:
-            lines.append(f'Contract: <code>{signal.instrument}</code>')
+        # Kite copy-paste contract name (prominent)
+        if kite_name:
+            lines.append(f'')
+            lines.append(f'\U0001f4cb <b>Kite Search:</b>')
+            lines.append(f'<code>{kite_name}</code>')
+        
+        lines.append(f'')
+        lines.append(f'Entry: <code>Rs {signal.entry_price:,.2f}</code>')
+        lines.append(f'SL: <code>Rs {signal.stop_loss:,.2f}</code>')
+        lines.append(f'Target: <code>Rs {signal.target:,.2f}</code>')
+        lines.append(f'RR: <code>1:{signal.risk_reward:.1f}</code>')
+        
+        # Try to get live premium from Angel One
+        premium_str = self._get_live_premium(signal)
+        if premium_str:
+            lines.append(f'')
+            lines.append(f'\U0001f4b0 Premium: <code>{premium_str}</code>')
+        
         if signal.strike > 0:
-            strike_line = f'Strike: <code>{int(signal.strike)} {signal.option_type}</code>'
-            if signal.expiry:
-                strike_line += f' (exp: {signal.expiry})'
-            lines.append(strike_line)
+            strike_str = str(int(signal.strike)) if signal.strike == int(signal.strike) else str(signal.strike)
+            lines.append(f'Strike: <code>{strike_str} {signal.option_type}</code>')
+        
+        if signal.lot_size:
+            lines.append(f'Lot: <code>{signal.lot_size}</code>')
         
         if signal.regime:
             lines.append(f'Regime: <code>{signal.regime}</code>')
@@ -105,14 +158,30 @@ class Notifier:
         
         self._send('\n'.join(lines))
     
+    def _get_live_premium(self, signal: ExecutableSignal) -> str:
+        """Try to fetch live option premium from Angel One option chain."""
+        try:
+            if not hasattr(self, '_prometheus') or not self._prometheus:
+                # Try to get prometheus instance from telegram
+                if hasattr(self._telegram, '_command_handlers'):
+                    return ''
+            return ''  # Premium fetching requires live market — return empty for now
+        except Exception:
+            return ''
+    
     def notify_execution_result(self, signal: ExecutableSignal, position, error: str = ''):
-        """Notify about trade execution or rejection."""
+        """Notify about trade execution or rejection with Kite-searchable name."""
+        kite_name = self._make_kite_search_name(signal)
+        
         if position:
-            self._send(
-                f'\u2705 <b>PAPER TRADE OPENED</b>\n'
-                f'{signal.symbol} {signal.action}\n'
-                f'Position: <code>{getattr(position, "position_id", "unknown")}</code>'
-            )
+            lines = [
+                f'\u2705 <b>PAPER TRADE OPENED</b>',
+                f'{signal.symbol} {signal.action}',
+            ]
+            if kite_name:
+                lines.append(f'\U0001f4cb Kite: <code>{kite_name}</code>')
+            lines.append(f'Position: <code>{getattr(position, "position_id", "unknown")}</code>')
+            self._send('\n'.join(lines))
         elif error:
             self._send(
                 f'\u26a0\ufe0f <b>TRADE NOT EXECUTED</b>\n'
