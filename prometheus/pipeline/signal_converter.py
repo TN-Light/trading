@@ -105,8 +105,8 @@ class SignalConverter:
             sym_upper = symbol.upper()
             if 'SENSEX' in sym_upper:
                 underlying = 'SENSEX'
-            elif 'NIFTY IT' in sym_upper or 'NIFTYIT' in sym_upper:
-                underlying = 'NIFTYIT'
+            elif 'MIDCAP' in sym_upper:
+                underlying = 'MIDCPNIFTY'
             elif 'BANK' in sym_upper:
                 underlying = 'BANKNIFTY'
             elif 'FIN' in sym_upper:

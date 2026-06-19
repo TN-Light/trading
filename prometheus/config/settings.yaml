@@ -335,11 +335,13 @@ market:
   - NIFTY FIN SERVICE
   - NIFTY BANK
   - NIFTY 50
+  - NIFTY MIDCAP SELECT
   lot_sizes:
-    NIFTY 50: 50
+    NIFTY 50: 65
     NIFTY BANK: 15
-    NIFTY FIN SERVICE: 40
+    NIFTY FIN SERVICE: 25
     SENSEX: 10
+    NIFTY MIDCAP SELECT: 50
   stocks: []
   trading_hours:
     end: '15:30'
