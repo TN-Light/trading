@@ -19,6 +19,7 @@ class SignalEvaluator:
         self._interval = primary_interval
         self._generator = None
         self._initialized = False
+        self._last_close = None  # Cache latest close for position pricing
     
     def initialize(self, scan_data: ScanData):
         """Create the signal generator using initial scan data.
@@ -81,6 +82,14 @@ class SignalEvaluator:
             )
         
         primary = scan_data.primary
+        
+        # Cache latest close for position price updates
+        try:
+            if not primary.empty:
+                self._last_close = float(primary['close'].iloc[-1])
+        except Exception:
+            pass
+        
         if len(primary) < 50:
             logger.info(f"SignalEvaluator: {symbol} — insufficient data ({len(primary)} bars < 50)")
             return SignalResult(

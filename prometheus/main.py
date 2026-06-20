@@ -2394,25 +2394,38 @@ class Prometheus:
         )
 
         reason_labels = {
-            "stop_loss": "SL Hit",
-            "target": "Target Hit",
-            "time_stop": "Time Stop",
-            "intraday_square_off": "Intraday Square-Off (3:15 PM)",
+            "stop_loss": "\U0001f534 SL Hit",
+            "target": "\U0001f7e2 Target Hit",
+            "time_stop": "\u23f0 Time Stop",
+            "intraday_square_off": "\U0001f3e2 Intraday Square-Off (3:15 PM)",
         }
         label = reason_labels.get(reason, reason)
         pnl_text = f"Rs {pnl:+,.0f}" if pnl is not None else "unknown"
+        pnl_emoji = "\U0001f4b0" if pnl and pnl > 0 else "\U0001f4b8"
+        
+        # Get entry price and Kite name from state
+        entry_text = ""
+        kite_text = ""
+        if state:
+            entry_text = f"\nEntry: <code>{state.entry_premium:.2f}</code>"
+            kite_name = self._make_kite_search_name(state.tradingsymbol, state.symbol)
+            if kite_name:
+                kite_text = f"\n\U0001f4cb <code>{kite_name}</code>"
+        
         self.telegram.send_message(
-            f"\U0001f6a8 <b>POSITION CLOSED — {label}</b>\n\n"
-            f"ID: <code>{position_id}</code>\n"
-            f"Exit price: {exit_price:.2f}\n"
-            f"P&L: {pnl_text}"
+            f"\U0001f6a8 <b>POSITION CLOSED — {label}</b>\n"
+            f"{kite_text}{entry_text}\n"
+            f"Exit: <code>{exit_price:.2f}</code>\n"
+            f"{pnl_emoji} P&L: <b>{pnl_text}</b>"
         )
 
     def _handle_trailing_update(self, state, old_sl: float):
         """Callback when trailing stop advances a stage."""
+        kite_name = self._make_kite_search_name(state.tradingsymbol, state.symbol)
+        display = kite_name if kite_name else state.tradingsymbol
         self.telegram.send_message(
             f"\U0001f4c8 <b>TRAILING STOP UPDATE</b>\n\n"
-            f"<code>{state.tradingsymbol}</code>\n"
+            f"<code>{display}</code>\n"
             f"Stage: <b>{state.current_stage()}</b>\n"
             f"SL: {old_sl:.2f} \u2192 {state.current_sl:.2f}"
         )
@@ -8217,19 +8230,120 @@ class Prometheus:
             ltp = self.broker.get_ltp(state.tradingsymbol)
             if ltp and ltp > 0 and state.entry_premium > 0:
                 pnl_pct = (ltp - state.entry_premium) / state.entry_premium * 100
+                pnl_rs = ltp - state.entry_premium
+                ltp_str = f"\nLTP <code>{ltp:.2f}</code>"
             else:
-                pnl_pct = 0.0  # no market data available
+                pnl_pct = 0.0
+                pnl_rs = 0.0
+                ltp_str = ""
             pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
             acct_label = getattr(state, "_multi_account_label", "primary")
+            
+            # Generate Kite-searchable name
+            kite_name = self._make_kite_search_name(state.tradingsymbol, state.symbol)
+            display_name = kite_name if kite_name else state.tradingsymbol
+            
             lines.append(
-                f"{pnl_emoji} <b>{state.tradingsymbol}</b>\n"
+                f"{pnl_emoji} <b>{display_name}</b>\n"
                 f"    <i>{acct_label}</i>\n"
-                f"    Entry <code>{state.entry_premium:.2f}</code>  \u2502  SL <code>{state.current_sl:.2f}</code>\n"
+                f"    Entry <code>{state.entry_premium:.2f}</code>  \u2502  SL <code>{state.current_sl:.2f}</code>{ltp_str}\n"
                 f"    Stage <code>{state.current_stage()}</code>  \u2502  "
                 f"Bars <code>{state.entry_bar_count}/{state.max_bars}</code>\n"
-                f"    P&amp;L <code>{pnl_pct:+.1f}%</code>\n"
+                f"    P&amp;L <code>{pnl_rs:+.2f} ({pnl_pct:+.1f}%)</code>\n"
             )
         return "\n".join(lines)
+    
+    def _make_kite_search_name(self, tradingsymbol: str, symbol: str) -> str:
+        """Convert tradingsymbol to Kite-searchable format.
+        
+        BANKNIFTY2662357600CE -> BANKNIFTY JUN 57600 CE
+        """
+        try:
+            if not tradingsymbol:
+                return ''
+            # Extract option type
+            if tradingsymbol.endswith('CE'):
+                otype = 'CE'
+                body = tradingsymbol[:-2]
+            elif tradingsymbol.endswith('PE'):
+                otype = 'PE'
+                body = tradingsymbol[:-2]
+            else:
+                return tradingsymbol
+            
+            # Extract strike (trailing digits)
+            digits = ''
+            for ch in reversed(body):
+                if ch.isdigit():
+                    digits = ch + digits
+                else:
+                    break
+            if not digits:
+                return tradingsymbol
+            
+            strike = digits
+            prefix = body[:-len(digits)]
+            
+            # Extract underlying name
+            INDEX_MAP = {
+                'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY',
+                'FINNIFTY': 'FINNIFTY', 'MIDCPNIFTY': 'MIDCPNIFTY',
+                'SENSEX': 'SENSEX',
+            }
+            underlying = ''
+            for name in INDEX_MAP:
+                if prefix.startswith(name):
+                    underlying = name
+                    break
+            
+            if not underlying:
+                # Stock — use symbol directly
+                underlying = symbol.upper() if symbol else prefix
+            
+            # Try to extract month from date portion
+            date_part = prefix[len(underlying):]
+            month_str = ''
+            if len(date_part) >= 4:
+                try:
+                    month_num = int(date_part[2:4])
+                    months = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+                              'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+                    month_str = months[month_num] if 1 <= month_num <= 12 else ''
+                except (ValueError, IndexError):
+                    pass
+            
+            # For SENSEX-style (SENSEX26JUN77000CE)
+            if not month_str and 'JAN' in date_part.upper():
+                month_str = 'JAN'
+            elif not month_str and 'FEB' in date_part.upper():
+                month_str = 'FEB'
+            elif not month_str and 'MAR' in date_part.upper():
+                month_str = 'MAR'
+            elif not month_str and 'APR' in date_part.upper():
+                month_str = 'APR'
+            elif not month_str and 'MAY' in date_part.upper():
+                month_str = 'MAY'
+            elif not month_str and 'JUN' in date_part.upper():
+                month_str = 'JUN'
+            elif not month_str and 'JUL' in date_part.upper():
+                month_str = 'JUL'
+            elif not month_str and 'AUG' in date_part.upper():
+                month_str = 'AUG'
+            elif not month_str and 'SEP' in date_part.upper():
+                month_str = 'SEP'
+            elif not month_str and 'OCT' in date_part.upper():
+                month_str = 'OCT'
+            elif not month_str and 'NOV' in date_part.upper():
+                month_str = 'NOV'
+            elif not month_str and 'DEC' in date_part.upper():
+                month_str = 'DEC'
+            
+            if month_str:
+                return f"{underlying} {month_str} {strike} {otype}"
+            else:
+                return f"{underlying} {strike} {otype}"
+        except Exception:
+            return tradingsymbol
 
     def _tg_cmd_set_price(self, args: str = "") -> str:
         """Handle /set_price — push synthetic LTP for dry-run testing.

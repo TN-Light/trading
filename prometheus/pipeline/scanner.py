@@ -240,8 +240,120 @@ class LiveScanner:
         self._notifier.notify_scan_result(cycle)
         self._last_scan_time = datetime.now()
         
+        # Update option prices for open positions using latest spot data
+        self._update_position_prices()
+        
         logger.info(f"LiveScanner: {cycle.summary()}")
         return cycle
+    
+    def _update_position_prices(self):
+        """Re-price open option positions using Black-Scholes.
+        
+        In paper mode, we can't get real option LTP from the broker.
+        Instead, we use the underlying spot price (which we CAN get from
+        yfinance/AngelOne) to estimate the option premium via Black-Scholes.
+        This feeds the position monitor's trailing stop system.
+        """
+        try:
+            pm = getattr(self._prometheus, 'position_monitor', None)
+            broker = getattr(self._prometheus, 'broker', None)
+            if not pm or not broker or pm.active_count == 0:
+                return
+            
+            from prometheus.signals.option_pricing import black_scholes_price
+            from prometheus.utils.indian_market import (
+                get_expiry_date, days_to_expiry
+            )
+            
+            positions = pm.get_positions()
+            price_updates = {}
+            
+            for pid, state in positions.items():
+                try:
+                    symbol = state.symbol  # e.g., "NIFTY BANK"
+                    tsym = state.tradingsymbol  # e.g., "BANKNIFTY2662357600CE"
+                    
+                    # Get latest spot price for the underlying
+                    spot = self._get_underlying_spot(symbol)
+                    if spot <= 0:
+                        continue
+                    
+                    # Parse strike and option type from tradingsymbol
+                    strike = self._parse_strike(tsym)
+                    opt_type = "CE" if tsym.endswith("CE") else "PE"
+                    
+                    if strike <= 0:
+                        continue
+                    
+                    # Calculate time to expiry
+                    dte = max(1, days_to_expiry(symbol))
+                    T = float(dte) / 365.0
+                    
+                    # Implied volatility estimate (rough but functional)
+                    sigma = 0.15  # conservative default
+                    r = 0.065
+                    
+                    # Calculate theoretical premium
+                    premium = black_scholes_price(spot, strike, T, r, sigma, opt_type)
+                    if premium and premium > 0 and not (premium != premium):  # NaN check
+                        price_updates[tsym] = float(premium)
+                        
+                except Exception as e:
+                    logger.debug(f"LiveScanner: price update error for {pid}: {e}")
+            
+            if price_updates and hasattr(broker, 'update_prices'):
+                broker.update_prices(price_updates)
+                logger.info(
+                    f"LiveScanner: updated {len(price_updates)} option prices "
+                    f"via Black-Scholes"
+                )
+                
+        except Exception as e:
+            logger.debug(f"LiveScanner: position price update failed: {e}")
+    
+    def _get_underlying_spot(self, symbol: str) -> float:
+        """Get latest spot price for a symbol from cached scan data."""
+        try:
+            if symbol in self._evaluators:
+                evaluator = self._evaluators[symbol]
+                # The evaluator's last scan data has the current price
+                if hasattr(evaluator, '_last_close') and evaluator._last_close:
+                    return float(evaluator._last_close)
+            
+            # Fallback: fetch fresh data
+            scan_data = self._bridge.fetch_scan_data(symbol)
+            if not scan_data.primary.empty:
+                return float(scan_data.primary['close'].iloc[-1])
+        except Exception:
+            pass
+        return 0.0
+    
+    def _parse_strike(self, tradingsymbol: str) -> float:
+        """Parse strike price from Kite-format tradingsymbol.
+        
+        Examples:
+            BANKNIFTY2662357600CE -> 57600
+            NIFTY2662323800CE -> 23800
+            SENSEX26JUN77000CE -> 77000
+        """
+        try:
+            # Remove CE/PE suffix
+            if tradingsymbol.endswith('CE') or tradingsymbol.endswith('PE'):
+                body = tradingsymbol[:-2]
+            else:
+                return 0.0
+            
+            # Extract trailing digits as strike
+            digits = ''
+            for ch in reversed(body):
+                if ch.isdigit():
+                    digits = ch + digits
+                else:
+                    break
+            
+            return float(digits) if digits else 0.0
+        except Exception:
+            return 0.0
     
     def run_loop(self):
         """Main loop: scan every 15 minutes during market hours.
