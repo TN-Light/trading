@@ -131,16 +131,33 @@ class Notifier:
             lines.append(f'<code>{kite_name}</code>')
         
         lines.append(f'')
-        lines.append(f'Entry: <code>Rs {signal.entry_price:,.2f}</code>')
-        lines.append(f'SL: <code>Rs {signal.stop_loss:,.2f}</code>')
-        lines.append(f'Target: <code>Rs {signal.target:,.2f}</code>')
+        
+        # Detect if we have live market prices vs BS estimates
+        has_live = signal.raw and signal.raw.get('live_premium', 0) > 0 if signal.raw else False
+        
+        if has_live:
+            # Real market prices from Angel One
+            lines.append(f'\U0001f4b0 Entry: <code>Rs {signal.entry_price:,.2f}</code> (LIVE)')
+            lines.append(f'SL: <code>Rs {signal.stop_loss:,.2f}</code>')
+            lines.append(f'Target: <code>Rs {signal.target:,.2f}</code>')
+            bid = signal.raw.get('bid', 0)
+            ask = signal.raw.get('ask', 0)
+            if bid > 0 and ask > 0:
+                lines.append(f'Bid/Ask: <code>{bid:.2f} / {ask:.2f}</code>')
+        else:
+            # Theoretical BS estimates
+            lines.append(f'Est. Entry: <code>~Rs {signal.entry_price:,.2f}</code>')
+            lines.append(f'Est. SL: <code>~Rs {signal.stop_loss:,.2f}</code>')
+            lines.append(f'Est. Target: <code>~Rs {signal.target:,.2f}</code>')
+            lines.append(f'')
+            lines.append(f'\u26a0\ufe0f <i>Prices are BS estimates. Check Kite for live premium.</i>')
+        
         lines.append(f'RR: <code>1:{signal.risk_reward:.1f}</code>')
         
-        # Try to get live premium from Angel One
-        premium_str = self._get_live_premium(signal)
-        if premium_str:
-            lines.append(f'')
-            lines.append(f'\U0001f4b0 Premium: <code>{premium_str}</code>')
+        # Show underlying spot for reference
+        spot = signal.raw.get('spot_at_signal', 0) if signal.raw else 0
+        if spot > 0:
+            lines.append(f'Spot: <code>{spot:,.2f}</code>')
         
         if signal.strike > 0:
             strike_str = str(int(signal.strike)) if signal.strike == int(signal.strike) else str(signal.strike)

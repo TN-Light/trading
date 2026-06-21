@@ -2035,7 +2035,7 @@ class Prometheus:
             symbols=self.all_symbols,
             scan_interval_seconds=max(900, int(interval_seconds)),
             skip_first_minutes=skip_minutes,
-            max_positions=3,
+            max_positions=6,
             daily_loss_limit=450.0,
         )
 

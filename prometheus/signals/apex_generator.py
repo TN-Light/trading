@@ -286,9 +286,10 @@ class ApexSignalGenerator:
             opt_type = "PE"
 
         pricing_dte = max(1, int(dte))
-        T = float(pricing_dte) / 365.0
+        T = float(pricing_dte) / 252.0  # trading-day basis to match sigma
         daily_vol = max(1e-6, float(atr) / close)
-        sigma = daily_vol * np.sqrt(78 * 252) # intraday 5min approx
+        # Annualize: 15-minute bars → 25 bars/day × 252 trading days
+        sigma = daily_vol * np.sqrt(25 * 252)
         if pd.isna(sigma) or sigma == 0:
             sigma = 0.15
         r = 0.065

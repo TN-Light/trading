@@ -396,7 +396,7 @@ risk:
   max_daily_loss: 15000
   max_daily_loss_pct: 30.0
   max_daily_trades: 10
-  max_open_positions: 3
+  max_open_positions: 6
   max_single_position_pct: 30.0
   max_stop_loss_pct: 50.0
   max_weekly_loss: 30000

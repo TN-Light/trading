@@ -182,7 +182,31 @@ class LiveScanner:
                 results.append(result)
                 continue
             
-            # Step 5: Execute
+            # Step 5: Fetch live premium from Angel One (BEFORE notify/execute)
+            live_premium = self._fetch_live_premium(executable)
+            if live_premium and live_premium.get('ltp', 0) > 0:
+                real_ltp = live_premium['ltp']
+                # Override BS-estimated prices with real market prices
+                old_entry = executable.entry_price
+                executable.entry_price = real_ltp
+                # Scale SL and target proportionally to maintain RR ratio
+                if old_entry > 0:
+                    ratio = real_ltp / old_entry
+                    executable.stop_loss = round(executable.stop_loss * ratio, 2)
+                    executable.target = round(executable.target * ratio, 2)
+                # Update raw dict too
+                if executable.raw:
+                    executable.raw['entry_price'] = real_ltp
+                    executable.raw['live_premium'] = real_ltp
+                    executable.raw['bs_estimate'] = old_entry
+                    executable.raw['bid'] = live_premium.get('bid', 0)
+                    executable.raw['ask'] = live_premium.get('ask', 0)
+                logger.info(
+                    f"LiveScanner: {symbol} live premium Rs {real_ltp:.2f} "
+                    f"(BS estimate was {old_entry:.2f}, diff {((real_ltp/old_entry)-1)*100:+.1f}%)"
+                )
+            
+            # Step 6: Execute
             try:
                 self._notifier.notify_signal_alert(executable)
                 # Merge ExecutableSignal fields into raw dict for order_manager
@@ -199,6 +223,10 @@ class LiveScanner:
                     exec_dict['lot_size'] = executable.lot_size
                 if executable.quantity:
                     exec_dict['quantity'] = executable.quantity
+                
+                # Feed real premium to PaperTrader before execution
+                self._feed_real_premium_to_broker(executable, live_premium)
+                
                 position = self._prometheus.order_manager.execute_signal(
                     exec_dict, confirm=False
                 )
@@ -240,20 +268,145 @@ class LiveScanner:
         self._notifier.notify_scan_result(cycle)
         self._last_scan_time = datetime.now()
         
-        # Update option prices for open positions using latest spot data
+        # Update option prices for open positions using Angel One live LTP
         self._update_position_prices()
         
         logger.info(f"LiveScanner: {cycle.summary()}")
         return cycle
     
-    def _update_position_prices(self):
-        """Re-price open option positions using Black-Scholes.
+    # ------------------------------------------------------------------
+    # Live premium from Angel One
+    # ------------------------------------------------------------------
+    
+    def _get_option_chain_client(self):
+        """Get AngelOneOptionChain if available (returns None for mocks)."""
+        try:
+            from prometheus.data.angelone_options import AngelOneOptionChain
+            data = getattr(self._prometheus, 'data', None)
+            if data:
+                client = getattr(data, 'angelone_options', None)
+                if isinstance(client, AngelOneOptionChain):
+                    return client
+        except ImportError:
+            pass
+        return None
+    
+    def _fetch_live_premium(self, executable) -> dict:
+        """Fetch live option premium from Angel One for a signal.
         
-        In paper mode, we can't get real option LTP from the broker.
-        Instead, we use the underlying spot price (which we CAN get from
-        yfinance/AngelOne) to estimate the option premium via Black-Scholes.
-        This feeds the position monitor's trailing stop system.
+        Returns dict with {ltp, bid, ask, ...} or None if unavailable.
+        This is called BEFORE notification so the entry price shown
+        to the user is the REAL market price, not a BS estimate.
         """
+        client = self._get_option_chain_client()
+        if not client:
+            return None
+        
+        try:
+            symbol = executable.symbol  # e.g., "NIFTY 50"
+            strike = executable.strike
+            opt_type = executable.option_type or "CE"
+            expiry = executable.expiry
+            spot = executable.raw.get('spot_at_signal', 0) if executable.raw else 0
+            
+            if not strike or strike <= 0:
+                return None
+            
+            # Pass None for expiry to get nearest
+            if not expiry or expiry.upper() == "WEEKLY":
+                expiry = None
+            
+            result = client.get_real_premium(
+                symbol, strike, opt_type, expiry, spot_price=spot
+            )
+            return result
+        except Exception as e:
+            logger.debug(f"LiveScanner: live premium fetch failed: {e}")
+            return None
+    
+    def _feed_real_premium_to_broker(self, executable, live_premium):
+        """Feed live premium to PaperTrader for realistic fill prices."""
+        if not live_premium or live_premium.get('ltp', 0) <= 0:
+            return
+        
+        try:
+            from prometheus.execution.paper_trader import PaperTrader
+            broker = getattr(self._prometheus, 'broker', None)
+            instrument = executable.instrument or ''
+            
+            if isinstance(broker, PaperTrader) and instrument:
+                broker.set_real_premium(
+                    instrument,
+                    ltp=live_premium['ltp'],
+                    bid=live_premium.get('bid', 0),
+                    ask=live_premium.get('ask', 0),
+                )
+            
+            # Also feed to multi-account traders
+            multi = getattr(self._prometheus, 'multi_account', None)
+            if multi and instrument:
+                for stack in multi.stacks.values():
+                    if hasattr(stack, 'trader'):
+                        stack.trader.set_real_premium(
+                            instrument,
+                            ltp=live_premium['ltp'],
+                            bid=live_premium.get('bid', 0),
+                            ask=live_premium.get('ask', 0),
+                        )
+        except Exception as e:
+            logger.debug(f"LiveScanner: feed premium to broker failed: {e}")
+    
+    def _update_position_prices(self):
+        """Refresh option LTPs for open positions via Angel One.
+        
+        Falls back to the existing _refresh_open_paper_prices() on the
+        Prometheus instance, which already handles Angel One LTP fetch
+        for open paper positions. If that's unavailable, falls back to
+        Black-Scholes as a last resort.
+        """
+        try:
+            p = self._prometheus
+            
+            # Primary: use existing Angel One live refresh
+            if hasattr(p, '_refresh_open_paper_prices'):
+                p._refresh_open_paper_prices()
+                return
+            
+            # Fallback: direct Angel One LTP fetch
+            pm = getattr(p, 'position_monitor', None)
+            broker = getattr(p, 'broker', None)
+            client = self._get_option_chain_client()
+            
+            if not pm or not broker or pm.active_count == 0:
+                return
+            
+            if not client:
+                # Last resort: BS pricing (known to be ~27% off)
+                self._update_position_prices_bs()
+                return
+            
+            positions = pm.get_positions()
+            price_updates = {}
+            
+            for pid, state in positions.items():
+                try:
+                    ltp = client.get_ltp_by_token(state.tradingsymbol)
+                    if ltp and ltp > 0:
+                        price_updates[state.tradingsymbol] = ltp
+                except Exception as e:
+                    logger.debug(f"LiveScanner: LTP fetch error for {pid}: {e}")
+            
+            if price_updates and hasattr(broker, 'update_prices'):
+                broker.update_prices(price_updates)
+                logger.info(
+                    f"LiveScanner: updated {len(price_updates)} option prices "
+                    f"via Angel One live LTP"
+                )
+        except Exception as e:
+            logger.debug(f"LiveScanner: position price update failed: {e}")
+    
+    def _update_position_prices_bs(self):
+        """Last-resort BS pricing when Angel One is unavailable."""
         try:
             pm = getattr(self._prometheus, 'position_monitor', None)
             broker = getattr(self._prometheus, 'broker', None)
@@ -261,66 +414,42 @@ class LiveScanner:
                 return
             
             from prometheus.signals.option_pricing import black_scholes_price
-            from prometheus.utils.indian_market import (
-                get_expiry_date, days_to_expiry
-            )
+            from prometheus.utils.indian_market import days_to_expiry
             
             positions = pm.get_positions()
             price_updates = {}
             
             for pid, state in positions.items():
                 try:
-                    symbol = state.symbol  # e.g., "NIFTY BANK"
-                    tsym = state.tradingsymbol  # e.g., "BANKNIFTY2662357600CE"
-                    
-                    # Get latest spot price for the underlying
-                    spot = self._get_underlying_spot(symbol)
-                    if spot <= 0:
+                    spot = self._get_underlying_spot(state.symbol)
+                    strike = self._parse_strike(state.tradingsymbol)
+                    opt_type = "CE" if state.tradingsymbol.endswith("CE") else "PE"
+                    if spot <= 0 or strike <= 0:
                         continue
-                    
-                    # Parse strike and option type from tradingsymbol
-                    strike = self._parse_strike(tsym)
-                    opt_type = "CE" if tsym.endswith("CE") else "PE"
-                    
-                    if strike <= 0:
-                        continue
-                    
-                    # Calculate time to expiry
-                    dte = max(1, days_to_expiry(symbol))
-                    T = float(dte) / 365.0
-                    
-                    # Implied volatility estimate (rough but functional)
-                    sigma = 0.15  # conservative default
-                    r = 0.065
-                    
-                    # Calculate theoretical premium
-                    premium = black_scholes_price(spot, strike, T, r, sigma, opt_type)
-                    if premium and premium > 0 and not (premium != premium):  # NaN check
-                        price_updates[tsym] = float(premium)
-                        
-                except Exception as e:
-                    logger.debug(f"LiveScanner: price update error for {pid}: {e}")
+                    dte = max(1, days_to_expiry(state.symbol))
+                    T = float(dte) / 252.0
+                    premium = black_scholes_price(spot, strike, T, 0.065, 0.15, opt_type)
+                    if premium and premium > 0 and premium == premium:
+                        price_updates[state.tradingsymbol] = float(premium)
+                except Exception:
+                    pass
             
             if price_updates and hasattr(broker, 'update_prices'):
                 broker.update_prices(price_updates)
                 logger.info(
-                    f"LiveScanner: updated {len(price_updates)} option prices "
-                    f"via Black-Scholes"
+                    f"LiveScanner: updated {len(price_updates)} prices "
+                    f"via BS fallback (Angel One unavailable)"
                 )
-                
-        except Exception as e:
-            logger.debug(f"LiveScanner: position price update failed: {e}")
+        except Exception:
+            pass
     
     def _get_underlying_spot(self, symbol: str) -> float:
         """Get latest spot price for a symbol from cached scan data."""
         try:
             if symbol in self._evaluators:
                 evaluator = self._evaluators[symbol]
-                # The evaluator's last scan data has the current price
                 if hasattr(evaluator, '_last_close') and evaluator._last_close:
                     return float(evaluator._last_close)
-            
-            # Fallback: fetch fresh data
             scan_data = self._bridge.fetch_scan_data(symbol)
             if not scan_data.primary.empty:
                 return float(scan_data.primary['close'].iloc[-1])
@@ -329,28 +458,18 @@ class LiveScanner:
         return 0.0
     
     def _parse_strike(self, tradingsymbol: str) -> float:
-        """Parse strike price from Kite-format tradingsymbol.
-        
-        Examples:
-            BANKNIFTY2662357600CE -> 57600
-            NIFTY2662323800CE -> 23800
-            SENSEX26JUN77000CE -> 77000
-        """
+        """Parse strike price from tradingsymbol (e.g. BANKNIFTY2662357600CE -> 57600)."""
         try:
-            # Remove CE/PE suffix
             if tradingsymbol.endswith('CE') or tradingsymbol.endswith('PE'):
                 body = tradingsymbol[:-2]
             else:
                 return 0.0
-            
-            # Extract trailing digits as strike
             digits = ''
             for ch in reversed(body):
                 if ch.isdigit():
                     digits = ch + digits
                 else:
                     break
-            
             return float(digits) if digits else 0.0
         except Exception:
             return 0.0
