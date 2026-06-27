@@ -111,8 +111,9 @@ class RiskManager:
         self.max_stop_loss_pct = config.get("max_stop_loss_pct", 50.0)
         self.atr_multiplier = config.get("atr_multiplier", 2.0)
 
-        # Margin
+        # Margin & Lot Limits
         self.margin_utilization_max = config.get("margin_utilization_max", 70.0)
+        self.max_lots_per_trade = config.get("max_lots_per_trade", 50)  # Hard cap on physical liquidity
 
         # Circuit breakers
         self.consecutive_losses_pause = config.get("consecutive_losses_pause", 3)
@@ -327,6 +328,10 @@ class RiskManager:
                 "risk_amount": 0,
                 "error": "Risk budget insufficient for 1 lot"
             }
+            
+        # Enforce absolute physical liquidity ceiling (e.g. max 50 lots)
+        if lots > self.max_lots_per_trade:
+            lots = self.max_lots_per_trade
 
         # Cap by max position size
         max_cost = self.current_capital * self.max_single_position_pct / 100

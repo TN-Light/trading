@@ -5238,7 +5238,10 @@ class Prometheus:
                     pass
 
                 _runtime_state["gap_pct"] = _compute_session_gap_pct(data_so_far)
-                _runtime_state["vix"] = float(self.data.get_vix() or 15.0)
+                if "vix" in current_bar.index:
+                    _runtime_state["vix"] = float(current_bar.get("vix", 15.0))
+                else:
+                    _runtime_state["vix"] = float(self.data.get_vix() or 15.0)
                 _refresh_oi_context(bar_ts, float(current))
 
             current_date = str(current_bar.get("timestamp", ""))[:10]

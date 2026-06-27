@@ -755,7 +755,7 @@ class BacktestEngine:
                                 else:
                                     exit_p = current_bar["close"]
                                 capital, trade = self._close_position(
-                                    pos, exit_p, current_time, capital, "intraday_square_off", current_bar["close"]
+                                    pos, exit_p, current_time, capital, "intraday_square_off", current_bar["close"], bar=current_bar
                                 )
                                 self.trades.append(trade)
                                 daily_pnl += trade.net_pnl
@@ -814,7 +814,7 @@ class BacktestEngine:
                     else:
                         force_exit_price = current_bar["close"]
                     capital, trade = self._close_position(
-                        pos, force_exit_price, current_time, capital, "daily_loss_limit", current_bar["close"]
+                        pos, force_exit_price, current_time, capital, "daily_loss_limit", current_bar["close"], bar=current_bar
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
@@ -834,7 +834,7 @@ class BacktestEngine:
                 )
                 if exit_triggered:
                     capital, trade = self._close_position(
-                        pos, exit_price, current_time, capital, exit_reason, current_bar["close"]
+                        pos, exit_price, current_time, capital, exit_reason, current_bar["close"], bar=current_bar
                     )
                     self.trades.append(trade)
                     daily_pnl += trade.net_pnl
@@ -954,7 +954,8 @@ class BacktestEngine:
                 pos, exit_price,
                 str(data.iloc[-1].get("timestamp", len(data))),
                 capital, "end_of_data",
-                data.iloc[-1]["close"]
+                data.iloc[-1]["close"],
+                bar=data.iloc[-1]
             )
             self.trades.append(trade)
             self._sync_capital(capital)
@@ -1018,7 +1019,37 @@ class BacktestEngine:
         if is_options:
             # For options: entry_price is the premium, track it separately
             premium_entry = signal.get("entry_price", bar["close"] * 0.012)
-            slippage = premium_entry * self.cost_model.slippage_pct
+            
+            # --- Finding 1: Sizing & Compounding Fix ---
+            current_cap = self._capital_tracker.get("capital", self.initial_capital) if self._capital_tracker else self.initial_capital
+            if current_cap < 30000:
+                risk_pct = 0.04
+            elif current_cap < 75000:
+                risk_pct = 0.03
+            else:
+                risk_pct = 0.02
+            
+            risk_per_trade = current_cap * risk_pct
+            lot_size = signal.get("lot_size", 25)
+            
+            premium_sl = signal.get("stop_loss", premium_entry * 0.8)
+            loss_per_lot = (premium_entry - premium_sl) * lot_size
+            if loss_per_lot <= 0:
+                loss_per_lot = premium_entry * 0.1 * lot_size
+                
+            lots = max(1, int(risk_per_trade / loss_per_lot))
+            premium_per_lot = premium_entry * lot_size
+            max_deploy = 0.45 if current_cap < 50000 else (0.35 if current_cap < 100000 else 0.25)
+            max_lots = max(1, int((current_cap * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
+            lots = min(lots, max_lots)
+            quantity = lots * lot_size
+            
+            # --- Finding 2: Dynamic VIX-scaled Slippage ---
+            vix_val = bar.get("vix", 14.0)
+            base_slippage = 0.0025 # 25bps
+            dynamic_slippage_pct = base_slippage * max(1.0, vix_val / 14.0)
+            
+            slippage = premium_entry * dynamic_slippage_pct
             if signal.get("direction") == "bullish":
                 premium_entry += slippage  # Buying call — pay more
             else:
@@ -1035,7 +1066,7 @@ class BacktestEngine:
                 "entry_price": premium_entry,
                 "stop_loss": signal.get("stop_loss", 0),
                 "target": signal.get("target", 0),
-                "quantity": signal.get("quantity", 1),
+                "quantity": quantity,
                 "strategy": signal.get("strategy", "default"),
                 "instrument_type": "options",
                 "delta": delta_signed,
@@ -1151,7 +1182,8 @@ class BacktestEngine:
         timestamp: str,
         capital: float,
         reason: str,
-        current_underlying_price: float = None
+        current_underlying_price: float = None,
+        bar: pd.Series = None
     ) -> Tuple[float, BacktestTrade]:
         """Simulate closing a position with costs."""
         quantity = position["quantity"]
@@ -1163,8 +1195,12 @@ class BacktestEngine:
             premium_entry = entry
             premium_exit = exit_price
 
-            # Apply slippage on the premium
-            slippage = premium_exit * self.cost_model.slippage_pct
+            # --- Finding 2: Dynamic VIX-scaled Slippage ---
+            vix_val = bar.get("vix", 14.0) if bar is not None else 14.0
+            base_slippage = 0.0025 # 25bps
+            dynamic_slippage_pct = base_slippage * max(1.0, vix_val / 14.0)
+            
+            slippage = premium_exit * dynamic_slippage_pct
             if position["direction"] == "bullish":
                 premium_exit -= slippage  # Sell lower
             else:
