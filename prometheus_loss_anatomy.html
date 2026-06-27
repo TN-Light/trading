@@ -1,0 +1,241 @@
+
+<h2 class="sr-only">Loss anatomy breakdown for Prometheus trading system — shows where and why trades fail</h2>
+<style>
+.g{display:grid;gap:12px}
+.g2{grid-template-columns:1fr 1fr}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+.card{background:var(--surface-1);border:0.5px solid var(--border);border-radius:12px;padding:1rem 1.25rem}
+.card-l{border-left:3px solid}
+.mcard{background:var(--surface-1);border-radius:var(--radius);padding:.85rem 1rem}
+.ml{font-size:11px;color:var(--text-muted);letter-spacing:.8px;text-transform:uppercase;margin-bottom:4px;font-family:var(--font-mono)}
+.mv{font-size:22px;font-weight:500}
+.mn{font-size:12px;color:var(--text-secondary);margin-top:2px}
+.vg{color:#1baf7a}.vr{color:#e24b4a}.va{color:#eda100}
+.badge{font-size:10px;font-weight:500;padding:2px 7px;border-radius:4px;display:inline-block;letter-spacing:.5px;font-family:var(--font-mono)}
+.bg{background:#eaf3de;color:#3b6d11}.br{background:#fcebeb;color:#a32d2d}.ba{background:#faeeda;color:#854f0b}.bb{background:#e6f1fb;color:#185fa5}
+.row{display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:0.5px solid var(--border);font-size:13px}
+.row:last-child{border-bottom:none}
+.rk{color:var(--text-secondary)}
+.section-lbl{font-size:11px;font-weight:500;letter-spacing:.8px;text-transform:uppercase;color:var(--text-muted);margin:1.5rem 0 .75rem;font-family:var(--font-mono)}
+.chart-wrap{position:relative;width:100%}
+h3{font-size:14px;font-weight:500;color:var(--text-primary);margin-bottom:.5rem}
+p.note{font-size:12px;color:var(--text-secondary);line-height:1.6;margin-top:.5rem}
+.flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:.75rem 0}
+.flow-box{background:var(--surface-1);border:0.5px solid var(--border);border-radius:var(--radius);padding:5px 10px;font-size:12px;text-align:center;min-width:80px}
+.flow-box.hi{border-color:#1baf7a;background:#eaf3de}
+.flow-box.lo{border-color:#e24b4a;background:#fcebeb}
+.flow-box .n{font-size:16px;font-weight:500}
+.flow-box .l{font-size:11px;color:var(--text-muted)}
+.arr{color:var(--text-muted);font-size:16px}
+.stage{display:flex;align-items:flex-start;gap:10px;padding:.6rem 0;border-bottom:0.5px solid var(--border)}
+.stage:last-child{border-bottom:none}
+.stage-num{font-family:var(--font-mono);font-size:10px;font-weight:500;background:var(--bg-accent);color:var(--text-accent);border-radius:3px;padding:2px 6px;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.stage-body{flex:1}
+.stage-title{font-size:13px;font-weight:500;margin-bottom:1px}
+.stage-desc{font-size:12px;color:var(--text-secondary)}
+</style>
+
+<div class="section-lbl">key metrics after removing 15 backtest artifacts</div>
+<div class="g g4" style="margin-bottom:1.5rem">
+  <div class="mcard">
+    <div class="ml">Real win rate</div>
+    <div class="mv vg">62.2%</div>
+    <div class="mn">+0.9pp vs reported 61.3%</div>
+  </div>
+  <div class="mcard">
+    <div class="ml">True total PnL</div>
+    <div class="mv vg">₹10.4L</div>
+    <div class="mn">₹29K lost to bug artifacts</div>
+  </div>
+  <div class="mcard">
+    <div class="ml">Near-BE exits</div>
+    <div class="mv va">346</div>
+    <div class="mn">30% of all trades — key pattern</div>
+  </div>
+  <div class="mcard">
+    <div class="ml">True large losses</div>
+    <div class="mv vr">76</div>
+    <div class="mn">&gt;₹200 loss, excl. bug trades</div>
+  </div>
+</div>
+
+<div class="g g2" style="margin-bottom:1.5rem">
+  <div>
+    <div class="section-lbl">Loss distribution — where losses come from</div>
+    <div class="chart-wrap" style="height:220px">
+      <canvas id="lossDist" role="img" aria-label="Bar chart of loss distribution showing most losses are between minus 50 and minus 100 rupees">72.5% of losses are between -₹50 and -₹100. 15.8% are between -₹200 and -₹500.</canvas>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:12px;color:var(--text-secondary)">
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#1baf7a"></span>Breakeven trap (tiny)</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#2a78d6"></span>Normal SL</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#e34948"></span>Gap/fast move</span>
+    </div>
+  </div>
+  <div>
+    <div class="section-lbl">Exit reason breakdown (all 1,159 trades)</div>
+    <div class="chart-wrap" style="height:220px">
+      <canvas id="exitPie" role="img" aria-label="Donut chart showing exit reasons: phase 3 SL 599 trades, target exits 349 trades, phase 2 SL 210 trades">Exit reasons: Phase 3 SL 599 (51.7%), target 349 (30.1%), phase 2 SL 210 (18.1%).</canvas>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:12px;color:var(--text-secondary)">
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#1baf7a"></span>Target (95.7% WR)</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#eda100"></span>Phase 3 SL (62.9% WR)</span>
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#e34948"></span>Phase 2 SL (0% WR)</span>
+    </div>
+  </div>
+</div>
+
+<div class="section-lbl">Finding 1 — First-bar backtest bug (15 trades)</div>
+<div class="card card-l" style="border-color:#e24b4a;margin-bottom:1.5rem">
+  <h3>15 "target exit" losses — all from the 09:15 opening bar — confirmed backtest artifact</h3>
+  <div class="flow">
+    <div class="flow-box lo"><div class="n">09:15</div><div class="l">entry (open)</div></div>
+    <div class="arr">→</div>
+    <div class="flow-box lo"><div class="n">-38%</div><div class="l">premium drop</div></div>
+    <div class="arr">→</div>
+    <div class="flow-box lo"><div class="n">09:30</div><div class="l">"target" exit (?)</div></div>
+    <div class="arr">→</div>
+    <div class="flow-box lo"><div class="n">-₹8,904</div><div class="l">worst case</div></div>
+  </div>
+  <p class="note">Every one of these 15 trades enters at exactly 09:15 and exits at exactly 09:30 with a "target" label but a loss. The Black-Scholes premium estimate at the opening bar is unreliable — no prior bar exists for volatility calculation. The backtest's "fallback target check" fires on a bad estimate. These are not real trades. The fix is to add a warmup bar skip: don't generate signals in bar 0 of the session (09:15 bar).</p>
+</div>
+
+<div class="section-lbl">Finding 2 — The "SL then target" pattern you described IS happening</div>
+<div class="card card-l" style="border-color:#eda100;margin-bottom:1.5rem">
+  <h3>The breakeven trap is creating near-entry exits — this is the "stopped then reversed" pattern</h3>
+  <p class="note" style="margin-top:0;margin-bottom:.75rem">346 trades (30% of all trades) exit between -₹100 and +₹50. These are all near-entry exits. Here is exactly what happens in each one:</p>
+  <div>
+    <div class="stage">
+      <span class="stage-num">ENTRY</span>
+      <div class="stage-body"><div class="stage-title">Trade enters. Original SL set at ~30% below entry premium.</div><div class="stage-desc">E.g. buy call at ₹200. Original SL = ₹140 (30% below).</div></div>
+    </div>
+    <div class="stage">
+      <span class="stage-num">STAGE 0</span>
+      <div class="stage-body"><div class="stage-title">Price moves 0.4R in your favour. Breakeven trap fires.</div><div class="stage-desc">At ₹200 + 0.4×₹60 = ₹224 → SL moved up to ₹200 + 0.1×₹60 = ₹206. Now SL is above your entry.</div></div>
+    </div>
+    <div class="stage">
+      <span class="stage-num">REVERSE</span>
+      <div class="stage-body"><div class="stage-title">Market noise or real reversal brings premium back below ₹206.</div><div class="stage-desc">You exit at ₹206 — barely above entry. Net PnL: ~₹40. This labels as a "win" but you captured almost nothing.</div></div>
+    </div>
+    <div class="stage">
+      <span class="stage-num">TARGET</span>
+      <div class="stage-body"><div class="stage-title">If the move had continued, target was ₹200 + 3×₹60 = ₹380.</div><div class="stage-desc">You missed ₹174 of potential gain per lot because normal market noise triggered the near-breakeven SL.</div></div>
+    </div>
+  </div>
+  <p class="note">This is NOT a "false breakout" in the traditional sense. The original entry signal was correct — the move started. The problem is the breakeven trap's SL gets moved too tight (entry + 10% of risk), making it vulnerable to 1-bar retracements that have nothing to do with trade invalidation.</p>
+</div>
+
+<div class="section-lbl">Finding 3 — Signal flags cannot predict individual trade outcomes</div>
+<div class="card card-l" style="border-color:#2a78d6;margin-bottom:1.5rem">
+  <h3>Win and loss trades carry almost identical signal fingerprints</h3>
+  <div class="chart-wrap" style="height:200px">
+    <canvas id="signalComp" role="img" aria-label="Grouped bar chart comparing signal flag presence in winning vs losing trades. Values are nearly identical across all signals.">Signal comparison: LiqSweep wins 59% losses 61%, FVG wins 41% losses 42%, VP wins 66% losses 65%, OTE wins 23% losses 21%.</canvas>
+  </div>
+  <div style="display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--text-secondary)">
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#2a78d6"></span>Wins</span>
+    <span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#e34948"></span>Losses</span>
+  </div>
+  <p class="note">The signals in winning trades and losing trades are nearly identical. LiqSweep appears in 59% of wins and 61% of losses. This means: you cannot filter out "bad" trades by looking at which signals fired. The signal selects the <em>type</em> of entry (confluence quality), not the individual outcome. Outcome is determined by what happens after entry — regime, timing, and the SL mechanics.</p>
+</div>
+
+<div class="section-lbl">Finding 4 — Actionable fixes for the "SL then target" problem</div>
+<div class="g g2">
+  <div class="card card-l" style="border-color:#1baf7a">
+    <h3>Fix A — Widen the breakeven trigger (highest impact)</h3>
+    <div class="row"><span class="rk">Current Stage 0 trigger</span><span>0.4R (price moves 40% of risk in your direction)</span></div>
+    <div class="row"><span class="rk">Suggested trigger</span><span style="color:#1baf7a;font-weight:500">0.6R or 0.75R</span></div>
+    <div class="row"><span class="rk">Effect</span><span>SL only moves to BE after a more confirmed move — fewer noise stops</span></div>
+    <div class="row"><span class="rk">Where to change</span><span><code>breakeven_ratio</code> in engine.py (default 0.4)</span></div>
+    <p class="note">Raising from 0.4R to 0.6R means the trade needs to confirm 60% of the risk distance before SL moves. Backtest both values to measure WR and PF delta.</p>
+  </div>
+  <div class="card card-l" style="border-color:#1baf7a">
+    <h3>Fix B — Widen the BE level itself</h3>
+    <div class="row"><span class="rk">Current BE SL</span><span>entry + 0.10R (just above entry)</span></div>
+    <div class="row"><span class="rk">Suggested BE SL</span><span style="color:#1baf7a;font-weight:500">entry + 0R (flat breakeven)</span></div>
+    <div class="row"><span class="rk">Effect</span><span>More room for the trade to breathe after Stage 0 triggers</span></div>
+    <div class="row"><span class="rk">Where to change</span><span><code>entry_premium + risk_distance * 0.10</code> → change 0.10 to 0</span></div>
+    <p class="note">Currently when Stage 0 fires, SL moves to entry + 10% of risk = slightly above entry. Moving it to exactly entry (0R) gives the trade a few more points of breathing room before being stopped.</p>
+  </div>
+  <div class="card card-l" style="border-color:#1baf7a">
+    <h3>Fix C — Skip 09:15 opening bar signals</h3>
+    <div class="row"><span class="rk">Bug</span><span>15 "target" losses all from first bar (09:15)</span></div>
+    <div class="row"><span class="rk">Fix</span><span style="color:#1baf7a;font-weight:500">Skip bar 0 — only signal from 09:30 onwards</span></div>
+    <div class="row"><span class="rk">Effect</span><span>Removes these artifacts entirely, recovers ₹29K in backtest</span></div>
+    <div class="row"><span class="rk">Matches live setting</span><span><code>skip_first_minutes: 15</code> already handles this in live mode</span></div>
+    <p class="note">The live system already skips the first 15 minutes. The backtest engine needs the same warmup skip applied when generating the first bar signal.</p>
+  </div>
+  <div class="card card-l" style="border-color:#1baf7a">
+    <h3>Fix D — Widen Phase 2 SL buffer</h3>
+    <div class="row"><span class="rk">Current Phase 2</span><span>SL at 80% of original level (4–5 bars)</span></div>
+    <div class="row"><span class="rk">Consider</span><span style="color:#1baf7a;font-weight:500">Phase 2 at 70% buffer (bars 4–5)</span></div>
+    <div class="row"><span class="rk">Effect</span><span>More room during the first 75 min for option price to settle</span></div>
+    <div class="row"><span class="rk">Where to change</span><span><code>sl * 0.8</code> → <code>sl * 0.7</code> in engine.py line ~1435</span></div>
+    <p class="note">The 89 trades that hit Phase 2 SL within 60 min of market time may be dying to option spread noise before the underlying has confirmed direction. Lowering the buffer from 80% to 70% of original SL gives more room.</p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const isDark = matchMedia('(prefers-color-scheme: dark)').matches;
+const gridC = isDark ? '#2c2c2a' : '#e1e0d9';
+const textM = isDark ? '#898781' : '#898781';
+const textS = isDark ? '#c3c2b7' : '#52514e';
+
+new Chart(document.getElementById('lossDist'), {
+  type: 'bar',
+  data: {
+    labels: ['-₹50 to 0\n(BE trap)', '-₹50 to\n-₹100', '-₹100 to\n-₹200', '-₹200 to\n-₹500', '-₹500 to\n-₹1K', '>-₹1K\n(incl. bug)'],
+    datasets: [{
+      label: 'Trades',
+      data: [15, 325, 17, 71, 5, 15],
+      backgroundColor: ['#1baf7a','#2a78d6','#2a78d6','#e34948','#e34948','#e34948'],
+      borderRadius: 4,
+      borderSkipped: 'bottom'
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${c.raw} trades` } } },
+    scales: {
+      x: { ticks: { color: textM, font: { size: 11 } }, grid: { display: false } },
+      y: { ticks: { color: textM, font: { size: 11 } }, grid: { color: gridC }, beginAtZero: true }
+    }
+  }
+});
+
+new Chart(document.getElementById('exitPie'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Phase 3 SL (trailing)', 'Target hit', 'Phase 2 SL (hard cut)', 'Other'],
+    datasets: [{
+      data: [599, 349, 210, 1],
+      backgroundColor: ['#eda100','#1baf7a','#e34948','#888780'],
+      borderWidth: 2,
+      borderColor: isDark ? '#1a1a19' : '#fcfcfb'
+    }]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false, cutout: '62%',
+    plugins: { legend: { display: false } }
+  }
+});
+
+new Chart(document.getElementById('signalComp'), {
+  type: 'bar',
+  data: {
+    labels: ['LiqSweep', 'FVG', 'VP', 'OTE', 'RSI Div', 'VWAP'],
+    datasets: [
+      { label: 'Wins', data: [59,41,66,23,35,27], backgroundColor: '#2a78d6', borderRadius: 3, borderSkipped: 'bottom' },
+      { label: 'Losses', data: [61,42,65,21,38,29], backgroundColor: '#e34948', borderRadius: 3, borderSkipped: 'bottom' }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${c.raw}%` } } },
+    scales: {
+      x: { ticks: { color: textM, font: { size: 11 } }, grid: { display: false } },
+      y: { ticks: { color: textM, font: { size: 11 }, callback: v => v+'%' }, grid: { color: gridC }, min: 0, max: 80 }
+    }
+  }
+});
+</script>

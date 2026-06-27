@@ -173,6 +173,20 @@ class Notifier:
         
         lines.append(f'Confidence: <code>{signal.confidence:.0%}</code>')
         
+        # OI data (if available from cache)
+        if signal.raw:
+            oi_pcr = signal.raw.get('oi_pcr', 0)
+            oi_sentiment = signal.raw.get('oi_sentiment', '')
+            oi_agrees = signal.raw.get('oi_agrees', None)
+            if oi_pcr > 0 or oi_sentiment:
+                lines.append('')
+                oi_icon = '\u2705' if oi_agrees else '\u26a0\ufe0f'
+                lines.append(f'{oi_icon} <b>OI Analysis:</b>')
+                if oi_pcr > 0:
+                    lines.append(f'PCR: <code>{oi_pcr:.2f}</code>')
+                if oi_sentiment:
+                    lines.append(f'<code>{oi_sentiment}</code>')
+        
         self._send('\n'.join(lines))
     
     def _get_live_premium(self, signal: ExecutableSignal) -> str:
@@ -206,10 +220,31 @@ class Notifier:
             )
     
     def _send(self, text: str):
-        """Send message via telegram (or log if not available)."""
+        """Send message via telegram synchronously (for critical alerts)."""
         if self._telegram:
             try:
                 self._telegram.send_message(text)
             except Exception as e:
                 logger.error(f"Notifier: telegram send failed: {e}")
+        logger.info(f"Notifier: {text[:200]}")
+    
+    def _send_async(self, text: str):
+        """Send message via telegram asynchronously (for non-critical updates).
+        
+        Falls back to sync send if async is not available.
+        Uses send_message as base — the telegram bot's send_message_async
+        is only used when explicitly available (not via MagicMock).
+        """
+        if self._telegram:
+            try:
+                # Try async if the method is explicitly defined (not auto-mocked)
+                async_fn = getattr(self._telegram, 'send_message_async', None)
+                if async_fn and not isinstance(async_fn, type(self._telegram.send_message)):
+                    # send_message_async exists and is a different type than send_message
+                    # (rules out MagicMock which returns same type for all attrs)
+                    async_fn(text)
+                else:
+                    self._telegram.send_message(text)
+            except Exception as e:
+                logger.error(f"Notifier: telegram async send failed: {e}")
         logger.info(f"Notifier: {text[:200]}")

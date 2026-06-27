@@ -158,7 +158,7 @@ class ZerodhaCostModel:
         self.gst_pct = cfg.get("gst", 18.0) / 100
         self.sebi_charges_pct = cfg.get("sebi_charges", 0.0001) / 100
         self.stamp_duty_pct = cfg.get("stamp_duty", 0.003) / 100
-        self.slippage_pct = cfg.get("slippage_pct", 0.15) / 100  # realistic options slippage
+        self.slippage_pct = cfg.get("slippage_pct", 0.50) / 100  # 0.5% premium slippage on options
 
     def calculate_costs(
         self,
@@ -544,7 +544,34 @@ class BacktestEngine:
             self.risk_overlay_stats["equity_filtered"] += 1
             return None
 
-        qty = signal.get("quantity", 1)
+        # ── 1.2 Dynamic Position Sizing ──
+        # Recalculate quantity based on the simulated current capital, rather than initial static capital.
+        lot_size = signal.get("lot_size", 1)
+        premium = signal.get("entry_price", 1)
+        premium_sl = signal.get("stop_loss", 0.5)
+        
+        if lot_size > 0 and premium > premium_sl:
+            if capital < 30000:
+                risk_pct = 0.04
+            elif capital < 75000:
+                risk_pct = 0.03
+            else:
+                risk_pct = 0.02
+            
+            risk_per_trade = capital * risk_pct
+            loss_per_lot = (premium - premium_sl) * lot_size
+            if loss_per_lot > 0:
+                lots = max(1, int(risk_per_trade / loss_per_lot))
+                premium_per_lot = premium * lot_size
+                max_deploy = 0.45 if capital < 50000 else (0.35 if capital < 100000 else 0.25)
+                max_lots = max(1, int((capital * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
+                lots = min(lots, max_lots)
+                qty = lots * lot_size
+            else:
+                qty = signal.get("quantity", 1)
+        else:
+            qty = signal.get("quantity", 1)
+            
         original_qty = qty
 
         # ── 1.5 Equity MA Sizing Modulation ──
@@ -1428,7 +1455,7 @@ class BacktestEngine:
                      is_premium_stop = False
                 elif bars_held <= 5:
                      # Phase 2: Moderate buffer (allow spread to settle)
-                     buffered_sl = sl * 0.8
+                     buffered_sl = sl * 0.7
                      if premium_low <= buffered_sl:
                          is_premium_stop = True
                          phase = "phase2"
@@ -1466,10 +1493,10 @@ class BacktestEngine:
             if not position.get("breakeven_set", False):
                 # STAGE 0 — BREAKEVEN TRAP: at configurable R:R, move SL to entry + costs
                 # Converts full SL losses into near-zero losses (the KEY mechanism)
-                be_ratio = position.get("breakeven_ratio", 0.4)
+                be_ratio = position.get("breakeven_ratio", 0.6)
                 breakeven_trigger = entry_premium + risk_distance * be_ratio
                 if premium_high >= breakeven_trigger:
-                    new_sl = entry_premium + risk_distance * 0.10
+                    new_sl = entry_premium
                     position["stop_loss"] = new_sl
                     position["breakeven_set"] = True
             elif not position.get("trailing_activated", False):

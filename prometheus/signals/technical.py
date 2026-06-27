@@ -144,10 +144,13 @@ def calculate_volume_profile(
         if low_bin == high_bin:
             volume_at_price[low_bin] += volume_value
         else:
+            if low_bin > high_bin:
+                low_bin, high_bin = high_bin, low_bin
             bins_in_range = high_bin - low_bin + 1
-            vol_per_bin = volume_value / bins_in_range
-            for b in range(low_bin, high_bin + 1):
-                volume_at_price[b] += vol_per_bin
+            if bins_in_range > 0:
+                vol_per_bin = volume_value / bins_in_range
+                for b in range(low_bin, high_bin + 1):
+                    volume_at_price[b] += vol_per_bin
 
     # Point of Control
     poc_idx = np.argmax(volume_at_price)

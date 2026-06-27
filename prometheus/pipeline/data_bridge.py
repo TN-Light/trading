@@ -9,6 +9,45 @@ from prometheus.utils.logger import logger
 REQUIRED_COLUMNS = {'timestamp', 'open', 'high', 'low', 'close'}
 MAX_STALENESS_SECONDS = 1800  # 30 minutes
 
+
+def _resample_to_hourly(df_15min: pd.DataFrame) -> pd.DataFrame:
+    """Resample 15-minute OHLCV data to 60-minute bars.
+    
+    This eliminates a separate API call for hourly data, saving ~1.7s per symbol.
+    """
+    if df_15min is None or df_15min.empty:
+        return pd.DataFrame()
+    
+    try:
+        df = df_15min.copy()
+        
+        # Ensure timestamp is datetime
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('timestamp')
+        elif not isinstance(df.index, pd.DatetimeIndex):
+            return df  # Can't resample without datetime index
+        
+        # OHLCV resampling
+        agg = {
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+        }
+        if 'volume' in df.columns:
+            agg['volume'] = 'sum'
+        
+        hourly = df.resample('1h').agg(agg).dropna(subset=['open'])
+        hourly = hourly.reset_index()
+        hourly.rename(columns={'index': 'timestamp'}, inplace=True)
+        
+        return hourly
+    except Exception as e:
+        logger.debug(f"DataBridge: resample failed: {e}")
+        return df_15min
+
+
 class DataBridge:
     """Fetches market data for live scanning with validation."""
     
@@ -21,13 +60,18 @@ class DataBridge:
         
         Returns ScanData with status indicating success/failure.
         Never raises - all errors are captured in the status field.
+        
+        Optimization: resamples 15min → 60min instead of separate API call.
         """
         fetch_time = datetime.now()
         
         try:
-            # Primary and hourly MUST be fresh for live scanning — bypass cache
-            primary = self._data.fetch_historical(symbol, days=60, interval=interval, force_refresh=True)
-            hourly = self._data.fetch_historical(symbol, days=60, interval='60minute', force_refresh=True)
+            # Primary MUST be fresh for live scanning — bypass cache
+            primary = self._data.fetch_historical(
+                symbol, days=60, interval=interval, force_refresh=True
+            )
+            # Resample 15min → 60min (saves one API call ~1.7s per symbol)
+            hourly = _resample_to_hourly(primary)
             # Daily can use cache — doesn't change intraday
             daily = self._data.fetch_historical(symbol, days=365, interval='day')
         except Exception as e:
@@ -84,8 +128,13 @@ class DataBridge:
             fetch_time=fetch_time,
         )
         
+        # Check if data is from a previous day (market closed/ad-hoc holiday)
+        if scan_data.last_bar_time and scan_data.last_bar_time.date() < fetch_time.date():
+            scan_data.status = DataStatus.MARKET_CLOSED
+            scan_data.error_message = f"Data is from previous day {scan_data.last_bar_time.date()}"
+            logger.info(f"DataBridge: {symbol} market appears closed (last bar: {scan_data.last_bar_time.date()})")
         # Check staleness
-        if scan_data.staleness_seconds > self._max_staleness:
+        elif scan_data.staleness_seconds > self._max_staleness:
             scan_data.status = DataStatus.STALE
             scan_data.error_message = (
                 f"Data is {scan_data.staleness_seconds:.0f}s old "

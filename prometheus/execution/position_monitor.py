@@ -252,17 +252,38 @@ class PositionMonitor:
         if rd <= 0:
             return
 
-        # ── Safety net: SL breach (broker SL-M should catch, but double-check) ──
-        # Both CE and PE are BOUGHT options — current_price is premium LTP.
-        # Premium dropping below SL = loss, regardless of direction.
-        if current_price <= state.current_sl:
-            logger.warning(
-                f"[MONITOR] SL breach: {state.position_id} "
-                f"LTP={current_price:.2f} <= SL={state.current_sl:.2f}"
-            )
-            if self._on_exit:
-                self._on_exit(state.position_id, current_price, "stop_loss")
-            return
+        # ── 3-Phase Premium Floor (ported from engine.py L1422-1444) ──
+        # Prevents premature exits from IV crush, spread widening, and
+        # stop-loss hunts in the first few bars after entry.
+        #   Phase 1 (≤3 bars): Total immunity — ignore premium noise
+        #   Phase 2 (4-5 bars): Moderate buffer — SL at 80% of original
+        #   Phase 3 (>5 bars): Full enforcement — trust options pricing
+        bars_held = state.entry_bar_count
+        if bars_held <= 3:
+            # Phase 1: Total immunity to stop hunts / IV crush
+            # Premium can drop temporarily but we don't exit
+            pass  # Skip SL check entirely
+        elif bars_held <= 5:
+            # Phase 2: Allow spread to settle, use buffered SL
+            buffered_sl = state.initial_sl * 0.7
+            if current_price <= buffered_sl:
+                logger.warning(
+                    f"[MONITOR] Premium floor Phase 2 exit: {state.position_id} "
+                    f"LTP={current_price:.2f} <= buffered SL={buffered_sl:.2f}"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "stop_loss_premium_phase2")
+                return
+        else:
+            # Phase 3: Full enforcement — normal SL check
+            if current_price <= state.current_sl:
+                logger.warning(
+                    f"[MONITOR] SL breach: {state.position_id} "
+                    f"LTP={current_price:.2f} <= SL={state.current_sl:.2f}"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "stop_loss_premium_phase3")
+                return
 
         # ── Target hit ──
         # Premium rising above target = profit, regardless of direction.
@@ -291,7 +312,7 @@ class PositionMonitor:
             # Stage 0: BREAKEVEN TRAP
             be_trigger = entry + rd * state.breakeven_ratio
             if price_for_trail >= be_trigger:
-                new_sl = entry + rd * 0.10
+                new_sl = entry
                 state.current_sl = new_sl
                 state.breakeven_set = True
                 stage_changed = True

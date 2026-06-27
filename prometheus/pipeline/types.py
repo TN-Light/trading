@@ -20,6 +20,7 @@ class DataStatus(Enum):
     STALE = "stale"
     MISSING_COLUMNS = "missing_columns"
     FETCH_ERROR = "fetch_error"
+    MARKET_CLOSED = "market_closed"
 
 
 class GateVerdict(Enum):
@@ -32,6 +33,7 @@ class GateVerdict(Enum):
     REJECT_STALE_SIGNAL = "reject_stale_signal"
     REJECT_MARKET_CLOSED = "reject_market_closed"
     REJECT_RISK_CHECK = "reject_risk_check"
+    REJECT_VIX = "reject_vix"
 
 
 @dataclass

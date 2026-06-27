@@ -5215,6 +5215,10 @@ class Prometheus:
                 if pd.isna(bar_ts):
                     return None
                 bar_t = bar_ts.time()
+                
+                # FIX C: Skip 09:15 opening bar to prevent bad option premium estimates
+                if bar_t.hour == 9 and bar_t.minute == 15:
+                    return None
                 dead_start = str(overrides.get("dead_zone_start", "11:30") or "11:30")
                 dead_end = str(overrides.get("dead_zone_end", "13:30") or "13:30")
                 aft_start = str(overrides.get("afternoon_window_start", "14:00") or "14:00")

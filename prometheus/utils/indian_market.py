@@ -24,15 +24,15 @@ PRE_OPEN_END = time(9, 8)
 # Lot Sizes (updated periodically by NSE — keep current)
 # ---------------------------------------------------------------------------
 LOT_SIZES = {
-    "NIFTY 50": 65,  # 2026 revision
-    "NIFTY BANK": 15,
-    "NIFTY FIN SERVICE": 25,
-    "NIFTY": 65,     # 2026 revision
-    "BANKNIFTY": 15,
-    "FINNIFTY": 25,
-    "SENSEX": 10,
+    "NIFTY 50": 65,
+    "NIFTY BANK": 30,
+    "NIFTY FIN SERVICE": 60,
+    "NIFTY": 65,
+    "BANKNIFTY": 30,
+    "FINNIFTY": 60,
+    "SENSEX": 20,
 
-    "NIFTY MIDCAP SELECT": 50,
+    "NIFTY MIDCAP SELECT": 120,
     "NIFTY NEXT 50": 25,
     # Stock F&O lot sizes — add as needed
     "RELIANCE": 250,
@@ -108,22 +108,28 @@ NSE_HOLIDAYS_2025 = [
 
 NSE_HOLIDAYS_2026 = [
     date(2026, 1, 26),   # Republic Day
-    date(2026, 2, 17),   # Mahashivratri
-    date(2026, 3, 3),    # Holi
-    date(2026, 3, 20),   # Id-Ul-Fitr
-    date(2026, 3, 26),   # Added manually: Today's Holiday
+    date(2026, 3, 4),    # Holi
+    date(2026, 3, 20),   # Eid-Ul-Fitr
+    date(2026, 3, 27),   # Shri Ram Navami
+    date(2026, 3, 31),   # Shri Mahavir Jayanti
     date(2026, 4, 3),    # Good Friday
     date(2026, 4, 14),   # Dr. Ambedkar Jayanti
     date(2026, 5, 1),    # Maharashtra Day
     date(2026, 5, 27),   # Bakri Id
-    date(2026, 8, 15),   # Independence Day
-    date(2026, 8, 25),   # Muharram
+    date(2026, 6, 26),   # Muharram
+    date(2026, 9, 14),   # Ganesh Chaturthi
     date(2026, 10, 2),   # Mahatma Gandhi Jayanti
-    date(2026, 10, 19),  # Dussehra
-    date(2026, 11, 8),   # Diwali
+    date(2026, 10, 20),  # Dussehra
     date(2026, 11, 9),   # Diwali Balipratipada
+    date(2026, 11, 10),  # Diwali Balipratipada (if Tue)
+    date(2026, 11, 24),  # Guru Nanak Jayanti
     date(2026, 12, 25),  # Christmas
 ]
+
+SPECIAL_TRADING_DAYS = {
+    date(2026, 2, 1),    # Union Budget Day
+    date(2026, 11, 8),   # Diwali Muhurat Trading
+}
 
 NSE_HOLIDAYS_2027 = [
     date(2027, 1, 26),   # Republic Day
@@ -155,6 +161,11 @@ def is_market_open(dt: Optional[datetime] = None) -> bool:
     elif dt.tzinfo is None:
         dt = IST.localize(dt)
 
+    if dt.date() in SPECIAL_TRADING_DAYS:
+        if dt.date() == date(2026, 11, 8):
+            return time(18, 15) <= dt.time() <= time(19, 15)
+        return MARKET_OPEN <= dt.time() <= MARKET_CLOSE
+
     # Weekend check
     if dt.weekday() >= 5:
         return False
@@ -172,6 +183,8 @@ def is_trading_day(d: Optional[date] = None) -> bool:
     """Check if a given date is a trading day."""
     if d is None:
         d = datetime.now(IST).date()
+    if d in SPECIAL_TRADING_DAYS:
+        return True
     if d.weekday() >= 5:
         return False
     return d not in ALL_HOLIDAYS
@@ -188,11 +201,24 @@ def next_trading_day(d: Optional[date] = None) -> date:
 
 
 def get_expiry_date(symbol: str, from_date: Optional[date] = None) -> date:
-    """Get the next weekly expiry date for an index."""
+    """Get the next expiry date for an index (handles weekly/monthly transitions)."""
     if from_date is None:
         from_date = datetime.now(IST).date()
 
-    expiry_day_name = _resolve_weekly_expiry_day_name(symbol, from_date)
+    normalized = _normalize_symbol_alias(symbol)
+    expiry_day_name = _resolve_weekly_expiry_day_name(normalized, from_date)
+
+    # 2026 Regulatory constraint: Only NIFTY and SENSEX have weekly expiries. 
+    # All others are monthly.
+    if from_date.year >= 2026 and normalized not in ["NIFTY 50", "NIFTY", "SENSEX", "BSX"]:
+        monthly_exp = get_monthly_expiry(from_date.year, from_date.month, weekday_name=expiry_day_name)
+        if from_date > monthly_exp:
+            if from_date.month == 12:
+                monthly_exp = get_monthly_expiry(from_date.year + 1, 1, weekday_name=expiry_day_name)
+            else:
+                monthly_exp = get_monthly_expiry(from_date.year, from_date.month + 1, weekday_name=expiry_day_name)
+        return monthly_exp
+
     day_map = {
         "Monday": 0, "Tuesday": 1, "Wednesday": 2,
         "Thursday": 3, "Friday": 4
@@ -206,7 +232,7 @@ def get_expiry_date(symbol: str, from_date: Optional[date] = None) -> date:
     expiry = from_date + timedelta(days=days_ahead)
 
     # If expiry falls on holiday, move to previous trading day
-    while expiry in ALL_HOLIDAYS or expiry.weekday() >= 5:
+    while expiry in ALL_HOLIDAYS or (expiry.weekday() >= 5 and expiry not in SPECIAL_TRADING_DAYS):
         expiry = expiry - timedelta(days=1)
 
     return expiry

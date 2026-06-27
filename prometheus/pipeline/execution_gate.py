@@ -47,8 +47,9 @@ class ExecutionGate:
         symbol = signal.symbol
         
         # 1. Symbol daily dedup
-        if symbol in self._today_traded:
-            reason = f"{symbol} already traded today"
+        dedup_key = f"{symbol}_{signal.direction}"
+        if dedup_key in self._today_traded:
+            reason = f"{symbol} already traded today in {signal.direction} direction"
             logger.info(f"ExecutionGate: REJECT — {reason}")
             return GateResult(
                 verdict=GateVerdict.REJECT_DUPLICATE_SYMBOL,
@@ -64,6 +65,21 @@ class ExecutionGate:
                 verdict=GateVerdict.REJECT_DUPLICATE_BAR,
                 reason=reason,
             )
+            
+        # 2.5 Stale Bar (Previous day's data) - protects against ad-hoc holidays
+        if bar_ts:
+            try:
+                import pandas as pd
+                bar_date = pd.to_datetime(bar_ts).date()
+                if bar_date < today:
+                    reason = f"{symbol} stale bar timestamp {bar_ts} (market holiday or data down?)"
+                    logger.info(f"ExecutionGate: REJECT — {reason}")
+                    return GateResult(
+                        verdict=GateVerdict.REJECT_STALE_SIGNAL,
+                        reason=reason,
+                    )
+            except Exception:
+                pass
         
         # 3. Max positions
         if self._open_position_count >= self._max_positions:
@@ -86,11 +102,11 @@ class ExecutionGate:
         # PASSED — record the bar timestamp
         if bar_ts:
             self._last_bar_ts[symbol] = bar_ts
-        self._today_traded.add(symbol)
+        self._today_traded.add(dedup_key)
         
         logger.info(f"ExecutionGate: PASS — {symbol} {signal.action}")
         return GateResult(verdict=GateVerdict.PASS)
     
-    def undo_pass(self, symbol: str):
+    def undo_pass(self, symbol: str, direction: str):
         """Undo a PASS (e.g., if execution fails after gate passed)."""
-        self._today_traded.discard(symbol)
+        self._today_traded.discard(f"{symbol}_{direction}")

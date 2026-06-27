@@ -15,10 +15,10 @@ for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "Get-Date -For
 set "LOGFILE=%LOGDIR%\prometheus_service_%TS%.log"
 
 echo [%date% %time%] PROMETHEUS service starting... >> "%LOGFILE%"
-echo [%date% %time%] Mode: SWING PAPER (15-minute scans, first valid scan ~09:30 IST) >> "%LOGFILE%"
+echo [%date% %time%] Mode: INTRADAY PAPER (15-minute scans, auto-closes at 15:15 IST) >> "%LOGFILE%"
 
-:: Run swing-only paper mode
+:: Run intraday paper mode (auto-closes positions at 3:15 PM)
 :: --data-source auto = Kite if available, else Angel One/yfinance fallbacks
-"%PYTHON%" prometheus/main.py paper --data-source auto --fetch-retries 2 >> "%LOGFILE%" 2>&1
+"%PYTHON%" prometheus/main.py paper --intraday --data-source auto --fetch-retries 2 >> "%LOGFILE%" 2>&1
 
 echo [%date% %time%] PROMETHEUS service stopped. >> "%LOGFILE%"
