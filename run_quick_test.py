@@ -156,14 +156,14 @@ def main():
     results = []
     for label, data, slip in scenarios:
         n_bars = len(data)
-        print(f"\n{'─' * 50}")
+        print(f"\n{'-' * 50}")
         print(f"  {label}  ({n_bars:,} bars, slip={slip}%)")
-        print(f"{'─' * 50}")
+        print(f"{'-' * 50}")
 
         result, elapsed = run_scenario(data, label, slip)
         if result and result.total_trades > 0:
             r = result
-            print(f"  ✓ {r.total_trades} trades | PF {r.profit_factor:.2f} | "
+            print(f"  [OK] {r.total_trades} trades | PF {r.profit_factor:.2f} | "
                   f"Sharpe {r.sharpe_ratio:.2f} | DD {r.max_drawdown_pct:.1f}% | "
                   f"Final Rs {r.final_capital:,.0f} | {elapsed:.0f}s")
             results.append({
@@ -179,14 +179,14 @@ def main():
                 "wr": r.win_rate,
             })
         else:
-            print(f"  ✗ No trades | {elapsed:.0f}s")
+            print(f"  [x] No trades | {elapsed:.0f}s")
 
     # Summary comparison
     print(f"\n{'=' * 80}")
     print(f"  COMPARISON vs MAY 4 BASELINE")
     print(f"{'=' * 80}")
     print(f"{'Metric':<12} | {'May4 Base/Full':>14} | {'New Base/Full':>14} | {'Delta':>10}")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
 
     if results:
         r = results[0]  # base_full
@@ -205,17 +205,17 @@ def main():
         for name, old, new in comparisons:
             if isinstance(new, float):
                 delta = new - old
-                arrow = "▲" if delta > 0 else "▼" if delta < 0 else "="
+                arrow = "+" if delta > 0 else "-" if delta < 0 else "="
                 # For DD, lower is better
                 if name == "Max DD%":
-                    arrow = "▲" if delta > 0 else "▼" if delta < 0 else "="
+                    arrow = "+" if delta > 0 else "-" if delta < 0 else "="
                     color = "WORSE" if delta > 0 else "BETTER"
                 else:
                     color = "BETTER" if delta > 0 else "WORSE"
                 print(f"{name:<12} | {old:>14.2f} | {new:>14.2f} | {arrow} {abs(delta):>7.2f} {color}")
             else:
                 delta = new - old
-                arrow = "▲" if delta > 0 else "▼" if delta < 0 else "="
+                arrow = "+" if delta > 0 else "-" if delta < 0 else "="
                 print(f"{name:<12} | {old:>14,} | {new:>14,} | {arrow} {abs(delta):>7,}")
 
     print(f"\n{'=' * 80}")

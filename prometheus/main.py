@@ -2911,7 +2911,7 @@ class Prometheus:
             f"Mode: {mode_label}\n"
             f"Equity: Rs {current_equity:,.0f} | Bracket: {tier_key} ({bracket.name})\n"
             f"Profile: conf(T/S) {conf_t:.1f}/{conf_s:.1f}, targetATR {target_atr:.1f}, timeStop {ts_bars}\n"
-            f"Guardrail: PF<{min_pf:.2f} over {rolling_n} trades OR DD>={max_dd:.1f}%\n"
+            f"Guardrail: PF&lt;{min_pf:.2f} over {rolling_n} trades OR DD&gt;={max_dd:.1f}%\n"
             f"Action on breach: block_new={block_new}, force_square_off={force_sq}"
         )
 
@@ -4253,8 +4253,7 @@ class Prometheus:
                     "orb_breakout": 0.0,
                 }
 
-            ts_col = data_so_far.get("timestamp")
-            if ts_col is None or len(data_so_far) < 20:
+            if len(data_so_far) < 20:
                 return {
                     "is_trend_day": False,
                     "direction": "neutral",
@@ -4262,7 +4261,11 @@ class Prometheus:
                     "orb_breakout": 0.0,
                 }
 
-            tser = pd.to_datetime(ts_col, errors="coerce")
+            # data_so_far["timestamp"] is already datetime64.
+            # Slice only the tail (last 100 bars) to find the current session,
+            # which is extremely fast and avoids processing the entire history.
+            tail_df = data_so_far.tail(100)
+            tser = pd.to_datetime(tail_df["timestamp"], errors="coerce")
             if tser.isna().all():
                 return {
                     "is_trend_day": False,
@@ -4272,7 +4275,7 @@ class Prometheus:
                 }
 
             d0 = tser.iloc[-1].date()
-            session = data_so_far.loc[tser.dt.date == d0].copy()
+            session = tail_df.loc[tser.dt.date == d0].copy()
             if session.empty:
                 return {
                     "is_trend_day": False,
@@ -4376,16 +4379,27 @@ class Prometheus:
 
         def _compute_session_gap_pct(data_so_far):
             """Compute current session opening gap %% vs prior session close."""
-            ts = pd.to_datetime(data_so_far["timestamp"], errors="coerce")
-            if ts.isna().all():
+            if len(data_so_far) < 2:
                 return 0.0
-            current_date = ts.iloc[-1].date()
-            session = data_so_far.loc[ts.dt.date == current_date]
-            prev = data_so_far.loc[ts.dt.date < current_date]
-            if session.empty or prev.empty:
+
+            # Find the last bar and first bar of current session (O(1) search)
+            last_bar = data_so_far.iloc[-1]
+            last_date = pd.to_datetime(last_bar["timestamp"]).date()
+
+            n = len(data_so_far)
+            session_start_idx = n - 1
+            while session_start_idx > 0:
+                prev_date = pd.to_datetime(data_so_far.iloc[session_start_idx - 1]["timestamp"]).date()
+                if prev_date != last_date:
+                    break
+                session_start_idx -= 1
+
+            if session_start_idx == 0:
                 return 0.0
-            prev_close = float(prev["close"].iloc[-1])
-            session_open = float(session["open"].iloc[0])
+
+            prev_close = float(data_so_far.iloc[session_start_idx - 1]["close"])
+            session_open = float(data_so_far.iloc[session_start_idx]["open"])
+
             if prev_close <= 0:
                 return 0.0
             return (session_open - prev_close) / prev_close * 100.0

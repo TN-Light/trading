@@ -805,7 +805,7 @@ class BacktestEngine:
                         self._dd_halt_active = False
 
             # Check daily loss limit (fixed 3% of initial capital)
-            daily_loss_limit = self.initial_capital * 0.03
+            daily_loss_limit = capital * 0.03
             if daily_pnl < -daily_loss_limit:
                 # Force close ALL positions on daily loss limit
                 for pos in positions:
@@ -1496,7 +1496,7 @@ class BacktestEngine:
                      is_premium_stop = False
                 elif bars_held <= 5:
                      # Phase 2: Moderate buffer (allow spread to settle)
-                     buffered_sl = sl * 0.7
+                     buffered_sl = sl * 0.8
                      if premium_low <= buffered_sl:
                          is_premium_stop = True
                          phase = "phase2"
@@ -1534,10 +1534,10 @@ class BacktestEngine:
             if not position.get("breakeven_set", False):
                 # STAGE 0 — BREAKEVEN TRAP: at configurable R:R, move SL to entry + costs
                 # Converts full SL losses into near-zero losses (the KEY mechanism)
-                be_ratio = position.get("breakeven_ratio", 0.6)
+                be_ratio = position.get("breakeven_ratio", 0.4)
                 breakeven_trigger = entry_premium + risk_distance * be_ratio
                 if premium_high >= breakeven_trigger:
-                    new_sl = entry_premium
+                    new_sl = entry_premium + risk_distance * 0.10
                     position["stop_loss"] = new_sl
                     position["breakeven_set"] = True
             elif not position.get("trailing_activated", False):

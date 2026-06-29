@@ -84,8 +84,13 @@ class TestDataBridgeFetch:
     
     def test_stale_data(self):
         """Data older than max_staleness returns STALE status."""
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        # Generate 100 15-minute bars ending 40 minutes ago (same day)
+        timestamps = [now - timedelta(minutes=40 + i*15) for i in range(100)]
+        timestamps.reverse()  # chronologically ascending
         old_data = pd.DataFrame({
-            "timestamp": pd.date_range("2025-01-01", periods=100, freq="15min"),
+            "timestamp": timestamps,
             "open": range(100),
             "high": range(100),
             "low": range(100),
