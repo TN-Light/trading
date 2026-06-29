@@ -144,7 +144,7 @@ intraday:
   - SENSEX
   bar_interval: auto
   use_backtest_generator: true
-  breakeven_ratio: 0.6
+  breakeven_ratio: 0.5
   enabled: true
   instruments:
   - NIFTY 50
@@ -383,7 +383,7 @@ multi_account:
       drawdown_halt_pct: 15.0
       max_open_positions: 3
 position_monitor:
-  breakeven_ratio: 0.6
+  breakeven_ratio: 0.5
   confirmation_timeout: 1800
   poll_interval_seconds: 15
   time_stop_bars_daily: 7
