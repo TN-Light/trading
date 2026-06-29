@@ -54,6 +54,7 @@ class SignalEvaluator:
             param_overrides = {
                 'mr_min_score': float(intraday_v2_cfg.get('mr_min_score', 2.5)),
                 'intraday_v2_disable_mr': bool(intraday_v2_cfg.get('disable_mean_reversion', True)),
+                'breakeven_ratio': float(intraday_cfg.get('breakeven_ratio', 0.5)),
             }
         
         p.regime_detector.reset_cache()
