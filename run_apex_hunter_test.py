@@ -41,7 +41,7 @@ from prometheus.backtest.engine import BacktestEngine, BacktestResult
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════
 
-SYMBOL = "NIFTY 50"
+SYMBOL = "NIFTY BANK"
 INITIAL_CAPITAL = 15_000
 CSV_15M_PATH = PROJECT_ROOT / "dataset" / f"{SYMBOL}_15minute.csv"
 
@@ -212,7 +212,7 @@ def run_single_backtest(
         return None
 
     # Save trades list to CSV
-    trades_path = REPORT_DIR / f"apex_hunter_trades_{scenario_label}_{period_label}.csv"
+    trades_path = REPORT_DIR / f"apex_hunter_trades_{SYMBOL.lower().replace(' ', '_')}_{scenario_label}_{period_label}.csv"
     trade_dicts = []
     for t in engine.trades:
         trade_dicts.append({
@@ -319,7 +319,7 @@ def main():
 
     print(f"\n{len(tasks)} test scenarios queued. Running...")
 
-    metrics_path = REPORT_DIR / f"apex_hunter_metrics_{today}.csv"
+    metrics_path = REPORT_DIR / f"apex_hunter_metrics_{SYMBOL.lower().replace(' ', '_')}_{today}.csv"
     completed_scenarios = set()
     if metrics_path.exists():
         try:
@@ -400,8 +400,8 @@ def main():
     # -- Generate yearly breakdown --
     for scenario_label, _ in SLIPPAGE_SCENARIOS:
         for period in FULL_RUN_PERIODS:
-            t_path = REPORT_DIR / f"apex_hunter_trades_{scenario_label}_{period}.csv"
-            md_path = REPORT_DIR / f"apex_hunter_yearly_breakdown_{scenario_label}_{period}_{today}.md"
+            t_path = REPORT_DIR / f"apex_hunter_trades_{SYMBOL.lower().replace(' ', '_')}_{scenario_label}_{period}.csv"
+            md_path = REPORT_DIR / f"apex_hunter_yearly_breakdown_{SYMBOL.lower().replace(' ', '_')}_{scenario_label}_{period}_{today}.md"
             if t_path.exists():
                 try:
                     generate_yearly_breakdown(t_path, md_path)
