@@ -7,7 +7,7 @@ stop for all open positions.  Direct port of the backtest engine's trailing
 logic (engine.py lines 939-989) to live/paper trading.
 
 5-stage trailing stop:
-  Stage 0 — Breakeven trap:  at 0.6R  → SL to entry + 0.10R
+  Stage 0 — Breakeven trap:  at 0.4R  → SL to entry + 0.10R
   Stage 1 — Lock 20%:        at 1.0R  → SL to entry + 0.20R
   Stage 2 — Lock 50%:        at 2.0R  → SL to entry + 0.50R
   Stage 3 — Lock 70% runner: at 3.0R  → SL to entry + 0.70R, init HWM
@@ -54,7 +54,7 @@ class TrailingState:
     max_bars: int = 7
 
     # Config
-    breakeven_ratio: float = 0.6
+    breakeven_ratio: float = 0.4
     risk_distance: float = 0.0
 
     # Intraday support
@@ -277,7 +277,7 @@ class PositionMonitor:
                 return
         elif bars_held <= 5:
             # Phase 2: Allow spread to settle, use buffered SL
-            buffered_sl = state.initial_sl * 0.7
+            buffered_sl = state.initial_sl * 0.8
             if current_price <= buffered_sl:
                 logger.warning(
                     f"[MONITOR] Premium floor Phase 2 exit: {state.position_id} "
@@ -334,7 +334,7 @@ class PositionMonitor:
             # Stage 0: BREAKEVEN TRAP
             be_trigger = entry + rd * state.breakeven_ratio
             if price_for_trail >= be_trigger:
-                new_sl = entry
+                new_sl = entry + rd * 0.10
                 state.current_sl = new_sl
                 state.breakeven_set = True
                 stage_changed = True

@@ -42,7 +42,7 @@ class ManagedPosition:
     entry_premium: float = 0.0
     sl_order_id: str = ""
     max_bars: int = 7
-    breakeven_ratio: float = 0.6
+    breakeven_ratio: float = 0.4
     strike: float = 0.0
     option_type: str = ""
     expiry_date: str = ""
@@ -271,6 +271,9 @@ class OrderManager:
         except Exception:
             managed.spot_at_signal = 0.0
         managed.bar_timestamp = str(signal.get("bar_timestamp", ""))
+        # Hydrate breakeven_ratio from signal if available
+        if "breakeven_ratio" in signal:
+            managed.breakeven_ratio = float(signal["breakeven_ratio"])
         if managed.exit_orders:
             managed.sl_order_id = managed.exit_orders[0].order_id
 

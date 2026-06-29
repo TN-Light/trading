@@ -144,7 +144,7 @@ intraday:
   - SENSEX
   bar_interval: auto
   use_backtest_generator: true
-  breakeven_ratio: 0.5
+  breakeven_ratio: 0.4
   enabled: true
   instruments:
   - NIFTY 50
@@ -153,7 +153,7 @@ intraday:
   - NIFTY IT
   - SENSEX
   last_entry_time: '14:30'
-  max_daily_trades: 4
+  max_daily_trades: 3
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
   skip_first_minutes: 15
