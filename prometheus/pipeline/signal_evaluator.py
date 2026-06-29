@@ -46,7 +46,15 @@ class SignalEvaluator:
         from prometheus.config import get as cfg_get
         swing_cfg = cfg_get('swing', {})
         use_parrondo = bool(swing_cfg.get('parrondo', False))
-        param_overrides = {'mr_min_score': 2.5} if self._interval != 'day' else None
+        
+        param_overrides = None
+        if self._interval != 'day':
+            intraday_cfg = cfg_get('intraday', {})
+            intraday_v2_cfg = intraday_cfg.get('v2', {})
+            param_overrides = {
+                'mr_min_score': float(intraday_v2_cfg.get('mr_min_score', 2.5)),
+                'intraday_v2_disable_mr': bool(intraday_v2_cfg.get('disable_mean_reversion', True)),
+            }
         
         p.regime_detector.reset_cache()
         self._generator = p._make_signal_generator(

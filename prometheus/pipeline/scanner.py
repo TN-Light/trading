@@ -93,6 +93,7 @@ class LiveScanner:
         # at signal_price - 0.3×ATR and wait for pullback fill.
         self._pending_signals: Dict[str, dict] = {}  # symbol -> pending signal
         self._pending_scans_waited: Dict[str, int] = {}  # symbol -> scan cycles waited
+        from prometheus.config import get as cfg_get
         self._pullback_atr_fraction = float(
             cfg_get('intraday.v2.pullback_atr_fraction', 0.3)
         )
@@ -104,7 +105,6 @@ class LiveScanner:
         self.scan_lock = threading.Lock()
         
         # Price refresh config
-        from prometheus.config import get as cfg_get
         self._price_refresh_seconds = int(
             cfg_get('paper.price_refresh_seconds', 30)
         )
@@ -439,11 +439,12 @@ class LiveScanner:
                 # ── Pullback Entry: Queue as pending instead of immediate ──
                 # If ATR data is available, wait for a pullback before entering.
                 # This avoids buying at the top of breakout candles.
-                atr_at_signal = executable.raw.get('atr_at_entry', 0) if executable.raw else 0
+                atr_at_signal = executable.raw.get('atr', 0) if executable.raw else 0
+                pullback_fraction = executable.raw.get('entry_pullback_atr', self._pullback_atr_fraction) if executable.raw else self._pullback_atr_fraction
                 spot_at_signal = executable.raw.get('spot_at_signal', 0) if executable.raw else 0
                 
-                if atr_at_signal > 0 and spot_at_signal > 0 and self._pullback_atr_fraction > 0:
-                    pullback_offset = atr_at_signal * self._pullback_atr_fraction
+                if atr_at_signal > 0 and spot_at_signal > 0 and pullback_fraction > 0:
+                    pullback_offset = atr_at_signal * pullback_fraction
                     if executable.direction == 'bullish':
                         limit_spot = spot_at_signal - pullback_offset
                     else:
@@ -465,7 +466,6 @@ class LiveScanner:
                         f"(signal_spot={spot_at_signal:.1f}, "
                         f"pullback={pullback_offset:.1f})"
                     )
-                    self._notifier.notify_signal_alert(executable)
                     results.append(result)
                     continue
                 

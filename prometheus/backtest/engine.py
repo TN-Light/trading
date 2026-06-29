@@ -1042,6 +1042,11 @@ class BacktestEngine:
             max_deploy = 0.45 if current_cap < 50000 else (0.35 if current_cap < 100000 else 0.25)
             max_lots = max(1, int((current_cap * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
             lots = min(lots, max_lots)
+            
+            # Enforce absolute physical liquidity ceiling
+            if lots > 50:
+                lots = 50
+                
             quantity = lots * lot_size
             
             # --- Finding 2: Dynamic VIX-scaled Slippage ---

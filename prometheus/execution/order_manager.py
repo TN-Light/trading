@@ -459,6 +459,10 @@ class OrderManager:
             breakeven_ratio=managed.breakeven_ratio,
         )
 
+    # -------------------------------------------------------------------------
+    # Helper: Place Stop Loss
+    # -------------------------------------------------------------------------
+
     def _place_stop_loss(
         self,
         tradingsymbol: str,
@@ -475,7 +479,13 @@ class OrderManager:
         if entry_premium > 0 and sl_premium > entry_premium * 5:
             logger.warning("Stop-loss looks like index level; falling back to 50% premium.")
             sl_premium = entry_premium * 0.50
-        premium_sl = sl_premium
+        # Initial catastrophic safety net (Phase 1 immunity)
+        # We place the real exchange order 50% lower than the algorithm's true SL
+        # so that normal IV crush doesn't trigger the exchange order during Phase 1.
+        # PositionMonitor will ratchet this up to the true SL after Phase 1 and 2.
+        broker_trigger = sl_premium * 0.5
+        if broker_trigger < 0.05:
+            broker_trigger = 0.05
 
         sl_order = Order(
             tradingsymbol=tradingsymbol,
@@ -484,7 +494,7 @@ class OrderManager:
             order_type=OrderType.SL_M,
             product=ProductType.MIS,
             quantity=quantity,
-            trigger_price=round(premium_sl, 2),
+            trigger_price=round(broker_trigger, 2),
             tag="P-SL",
         )
 

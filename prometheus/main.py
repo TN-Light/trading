@@ -960,8 +960,10 @@ class Prometheus:
         finally:
             self.fusion.min_confluence_score = old_conf
 
-        # Attach ATR to signal for risk management
+        # Attach ATR to signal for risk management and limit pullbacks
         if signal and atr_value > 0:
+            signal.atr = atr_value
+            signal.entry_pullback_atr = float(self.config.get("entry_pullback_atr", 0.3))
             if signal.stop_loss == 0 or signal.stop_loss == spot * 0.985:
                 sl = self.risk.calculate_dynamic_stop_loss(spot, atr_value, signal.direction)
                 signal.stop_loss = sl
@@ -1154,8 +1156,10 @@ class Prometheus:
             self.fusion.SIGNAL_WEIGHTS = saved_weights
             self.fusion.min_confluence_score = saved_conf
 
-        # Attach ATR-based SL
+        # Attach ATR-based SL and limit pullback params
         if signal and atr_value > 0:
+            signal.atr = atr_value
+            signal.entry_pullback_atr = float(self.config.get("entry_pullback_atr", 0.3))
             if signal.stop_loss == 0 or signal.stop_loss == spot * 0.985:
                 sl = self.risk.calculate_dynamic_stop_loss(spot, atr_value, signal.direction)
                 signal.stop_loss = sl
@@ -6785,6 +6789,7 @@ class Prometheus:
                     param_overrides={
                         "regime_overrides": regime_override,
                         "mr_min_score": mr_score,
+                        "intraday_v2_disable_mr": False,
                     },
                     verbose=False,
                 )

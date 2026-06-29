@@ -40,6 +40,8 @@ class FusedSignal:
     strategy: str = ""       # which strategy module should handle this
     reasoning: str = ""
     contributing_signals: list = field(default_factory=list)
+    atr: float = 0.0
+    entry_pullback_atr: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -56,6 +58,8 @@ class FusedSignal:
             "strategy": self.strategy,
             "reasoning": self.reasoning,
             "contributing_signals": self.contributing_signals,
+            "atr": self.atr,
+            "entry_pullback_atr": self.entry_pullback_atr,
         }
 
 

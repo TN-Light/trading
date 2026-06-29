@@ -61,6 +61,9 @@ class TrailingState:
     bar_interval: str = "day"        # "day", "15minute", "5minute"
     trade_mode: str = "swing"        # "swing" or "intraday"
 
+    # 3-phase premium floor tracking (1=immunity, 2=buffered, 3=full)
+    _current_phase: int = 1
+
     def __post_init__(self):
         if self.risk_distance == 0.0 and self.entry_premium > 0:
             self.risk_distance = (
@@ -260,9 +263,18 @@ class PositionMonitor:
         #   Phase 3 (>5 bars): Full enforcement — trust options pricing
         bars_held = state.entry_bar_count
         if bars_held <= 3:
-            # Phase 1: Total immunity to stop hunts / IV crush
-            # Premium can drop temporarily but we don't exit
-            pass  # Skip SL check entirely
+            # Phase 1: Immunity to IV crush / spread widening / stop hunts
+            # But add a catastrophic circuit breaker — if premium drops > 80%,
+            # something is genuinely wrong (not just noise).
+            catastrophic_floor = entry * 0.20
+            if current_price <= catastrophic_floor:
+                logger.warning(
+                    f"[MONITOR] Phase 1 CATASTROPHIC exit: {state.position_id} "
+                    f"LTP={current_price:.2f} <= 20% of entry={entry:.2f}"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "catastrophic_phase1")
+                return
         elif bars_held <= 5:
             # Phase 2: Allow spread to settle, use buffered SL
             buffered_sl = state.initial_sl * 0.7
@@ -274,6 +286,11 @@ class PositionMonitor:
                 if self._on_exit:
                     self._on_exit(state.position_id, current_price, "stop_loss_premium_phase2")
                 return
+            
+            # Sync broker SL to Phase 2 buffered limit if we just transitioned out of Phase 1
+            if getattr(state, "_current_phase", 1) < 2:
+                state._current_phase = 2
+                self._modify_broker_sl_manual(state, buffered_sl)
         else:
             # Phase 3: Full enforcement — normal SL check
             if current_price <= state.current_sl:
@@ -284,6 +301,11 @@ class PositionMonitor:
                 if self._on_exit:
                     self._on_exit(state.position_id, current_price, "stop_loss_premium_phase3")
                 return
+
+            # Sync broker SL to Phase 3 normal limit if we just transitioned out of Phase 2
+            if getattr(state, "_current_phase", 1) < 3:
+                state._current_phase = 3
+                self._modify_broker_sl_manual(state, state.current_sl)
 
         # ── Target hit ──
         # Premium rising above target = profit, regardless of direction.
@@ -389,6 +411,10 @@ class PositionMonitor:
 
     def _modify_broker_sl(self, state: TrailingState):
         """Modify the SL-M order on the broker to the new trigger price."""
+        self._modify_broker_sl_manual(state, state.current_sl)
+
+    def _modify_broker_sl_manual(self, state: TrailingState, manual_trigger: float):
+        """Internal helper to modify broker SL to a specific trigger price."""
         if not state.sl_order_id:
             logger.debug(f"No SL order ID for {state.position_id}, skip modify")
             return
@@ -405,11 +431,11 @@ class PositionMonitor:
 
             result = self.broker.modify_order(
                 state.sl_order_id,
-                trigger_price=round(state.current_sl, 2),
+                trigger_price=round(manual_trigger, 2),
             )
             logger.info(
                 f"Broker SL modified: {state.sl_order_id} -> "
-                f"trigger={state.current_sl:.2f}"
+                f"trigger={manual_trigger:.2f}"
             )
         except Exception as e:
             logger.error(f"Failed to modify broker SL for {state.position_id}: {e}")
