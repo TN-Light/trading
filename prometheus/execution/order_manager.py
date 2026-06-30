@@ -404,17 +404,18 @@ class OrderManager:
                     status=OrderStatus.COMPLETE,
                 )
                 
-                managed = ManagedPosition()
-                managed.position_id = position_id
-                managed.symbol = state.symbol
-                managed.strategy = state.strategy
-                managed.direction = state.direction
-                managed.entry_orders = [dummy_entry]
-                managed.exit_orders = []
-                managed.stop_loss = state.initial_sl
-                managed.target = state.target
-                managed.trailing_stop = state.current_sl
-                managed.entry_time = state.entry_time
+                managed = ManagedPosition(
+                    position_id=position_id,
+                    symbol=state.symbol,
+                    strategy=state.strategy,
+                    direction=state.direction,
+                    entry_orders=[dummy_entry],
+                    exit_orders=[],
+                    stop_loss=state.initial_sl,
+                    target=state.target,
+                    trailing_stop=state.current_sl,
+                    entry_time=state.entry_time,
+                )
                 managed.status = "open"
                 managed.tradingsymbol = state.tradingsymbol
                 managed.entry_premium = state.entry_premium
@@ -496,6 +497,18 @@ class OrderManager:
         managed = self.managed_positions.get(position_id)
         if not managed or managed.status == "closed":
             return None
+
+        import json
+        orders_json = ""
+        ma_label = getattr(managed, "_multi_account_label", None)
+        try:
+            orders_json = json.dumps({
+                "multi_account_label": ma_label,
+                "entry_orders": [o.to_dict() for o in managed.entry_orders]
+            })
+        except Exception as e:
+            logger.error(f"Error serializing entry orders: {e}")
+
         return TrailingState(
             position_id=position_id,
             tradingsymbol=managed.tradingsymbol,
@@ -510,6 +523,7 @@ class OrderManager:
             sl_order_id=managed.sl_order_id,
             max_bars=managed.max_bars,
             breakeven_ratio=managed.breakeven_ratio,
+            entry_orders_json=orders_json,
         )
 
     # -------------------------------------------------------------------------

@@ -41,6 +41,7 @@ class TrailingState:
     strategy: str = ""
     entry_time: str = ""
     sl_order_id: str = ""
+    entry_orders_json: str = ""
 
     # 5-stage flags (exactly match backtest engine.py:939-989)
     breakeven_set: bool = False

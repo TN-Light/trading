@@ -448,6 +448,7 @@ class Prometheus:
                         managed = list(stack.order_manager.managed_positions.values())
                         if managed:
                             last = managed[-1]
+                            last._multi_account_label = label
                             ts = stack.order_manager.create_trailing_state(last.position_id)
                             if ts:
                                 ts._multi_account_label = label
@@ -2538,9 +2539,64 @@ class Prometheus:
         if not saved or not self.position_monitor:
             return
         from prometheus.execution.position_monitor import TrailingState
+        from prometheus.execution.broker import Order, OrderSide, OrderType, OrderStatus, ProductType, Position
+        from prometheus.execution.order_manager import ManagedPosition
+        from prometheus.execution.paper_trader import PaperTrader
+        import json
+
         states = []
         for row in saved:
-            states.append(TrailingState(
+            orders_json = row.get("entry_orders_json", "")
+            ma_label = None
+            entry_orders = []
+
+            if orders_json:
+                try:
+                    data = json.loads(orders_json)
+                    if isinstance(data, dict):
+                        ma_label = data.get("multi_account_label")
+                        orders_data = data.get("entry_orders", [])
+                        for o in orders_data:
+                            entry_orders.append(Order(
+                                order_id=o.get("order_id", ""),
+                                symbol=o.get("symbol", ""),
+                                tradingsymbol=o.get("tradingsymbol", ""),
+                                side=OrderSide(o.get("side", "BUY")),
+                                order_type=OrderType(o.get("order_type", "MARKET")),
+                                product=ProductType(o.get("product", "MIS")),
+                                quantity=o.get("quantity", 0),
+                                price=o.get("price", 0.0),
+                                trigger_price=o.get("trigger_price", 0.0),
+                                status=OrderStatus(o.get("status", "COMPLETE")),
+                                filled_quantity=o.get("filled_quantity", 0),
+                                average_price=o.get("average_price", 0.0),
+                                timestamp=o.get("timestamp", ""),
+                                tag=o.get("tag", ""),
+                            ))
+                    elif isinstance(data, list):
+                        # Backward compatibility
+                        for o in data:
+                            entry_orders.append(Order(
+                                order_id=o.get("order_id", ""),
+                                symbol=o.get("symbol", ""),
+                                tradingsymbol=o.get("tradingsymbol", ""),
+                                side=OrderSide(o.get("side", "BUY")),
+                                order_type=OrderType(o.get("order_type", "MARKET")),
+                                product=ProductType(o.get("product", "MIS")),
+                                quantity=o.get("quantity", 0),
+                                price=o.get("price", 0.0),
+                                trigger_price=o.get("trigger_price", 0.0),
+                                status=OrderStatus(o.get("status", "COMPLETE")),
+                                filled_quantity=o.get("filled_quantity", 0),
+                                average_price=o.get("average_price", 0.0),
+                                timestamp=o.get("timestamp", ""),
+                                tag=o.get("tag", ""),
+                            ))
+                except Exception as e:
+                    logger.error(f"Error parsing entry_orders_json during restoration: {e}")
+
+            # Reconstruct TrailingState
+            ts = TrailingState(
                 position_id=row["position_id"],
                 tradingsymbol=row["tradingsymbol"],
                 symbol=row["symbol"],
@@ -2563,7 +2619,65 @@ class Prometheus:
                 risk_distance=row.get("risk_distance", 0),
                 bar_interval=row.get("bar_interval", "day"),
                 trade_mode=row.get("trade_mode", "swing"),
-            ))
+                entry_orders_json=orders_json,
+            )
+            if ma_label:
+                ts._multi_account_label = ma_label
+            states.append(ts)
+
+            # Reconstruct in OrderManager and Broker
+            stack = None
+            if ma_label and self.multi_account:
+                stack = self.multi_account.get_stack(ma_label)
+            else:
+                stack = self
+
+            if stack:
+                # 1. ManagedPosition restoration
+                managed = ManagedPosition(
+                    position_id=row["position_id"],
+                    symbol=row["symbol"],
+                    strategy=row.get("strategy", ""),
+                    direction=row["direction"],
+                    entry_orders=entry_orders,
+                    exit_orders=[],
+                    stop_loss=row["initial_sl"],
+                    target=row["target"],
+                    trailing_stop=row["current_sl"],
+                    entry_time=row.get("entry_time", ""),
+                )
+                managed.status = "open"
+                managed.tradingsymbol = row["tradingsymbol"]
+                managed.entry_premium = row["entry_premium"]
+                managed.sl_order_id = row.get("sl_order_id", "")
+                managed.max_bars = row.get("max_bars", 7)
+                managed.breakeven_ratio = row.get("breakeven_ratio", 0.6)
+                if ma_label:
+                    managed._multi_account_label = ma_label
+                
+                stack.order_manager.managed_positions[row["position_id"]] = managed
+                logger.info(f"Restored ManagedPosition {row['position_id']} in OrderManager ({ma_label or 'primary'}).")
+
+                # 2. Broker (PaperTrader) position restoration
+                if isinstance(stack.broker, PaperTrader):
+                    qty = sum(o.filled_quantity for o in entry_orders)
+                    if qty <= 0:
+                        from prometheus.utils.indian_market import get_lot_size
+                        qty = get_lot_size(row["symbol"])
+                    if row["direction"] == "bearish":
+                        qty = -qty
+
+                    p_type = ProductType.MIS if row.get("trade_mode") == "intraday" else ProductType.NRML
+                    stack.broker.positions[row["tradingsymbol"]] = Position(
+                        tradingsymbol=row["tradingsymbol"],
+                        symbol=row["symbol"],
+                        product=p_type,
+                        quantity=qty,
+                        average_price=row["entry_premium"],
+                        last_price=row["entry_premium"],
+                    )
+                    logger.info(f"Restored Position {row['tradingsymbol']} in PaperTrader broker (qty={qty}).")
+
         self.position_monitor.restore_positions(states)
         if states:
             self.telegram.send_message(
