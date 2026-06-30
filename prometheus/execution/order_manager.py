@@ -372,7 +372,7 @@ class OrderManager:
         self,
         position_id: str,
         reason: str = "manual",
-        state: Optional[Any] = None
+        state = None
     ) -> Optional[float]:
         """Close a managed position and return realized P&L."""
         if position_id not in self.managed_positions:
