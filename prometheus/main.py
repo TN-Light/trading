@@ -2521,6 +2521,51 @@ class Prometheus:
         except Exception as e:
             logger.debug(f"Equity restore error: {e}")
 
+    def _get_daily_state(self, key: str, default: Any = None) -> Any:
+        """Load daily state variable scoped by current date."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        full_key = f"daily_{key}_{today_str}"
+        val = self.store.load_state(full_key)
+        if val == "":
+            return default
+        # Guess/parse types
+        if isinstance(default, bool):
+            return val.lower() == "true"
+        if isinstance(default, int):
+            try:
+                return int(val)
+            except ValueError:
+                return default
+        if isinstance(default, set):
+            parts = list(filter(None, val.split(",")))
+            if "scan" in key:
+                from datetime import time as dtime_cls
+                res = set()
+                for p in parts:
+                    try:
+                        h, m = map(int, p.split(":"))
+                        res.add(dtime_cls(h, m))
+                    except Exception:
+                        pass
+                return res
+            return set(parts)
+        return val
+
+    def _set_daily_state(self, key: str, value: Any):
+        """Save daily state variable scoped by current date."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        full_key = f"daily_{key}_{today_str}"
+        if isinstance(value, set):
+            if any(hasattr(x, "strftime") for x in value):
+                val_str = ",".join(sorted(x.strftime("%H:%M") for x in value))
+            else:
+                val_str = ",".join(sorted(list(value)))
+        elif isinstance(value, bool):
+            val_str = "true" if value else "false"
+        else:
+            val_str = str(value)
+        self.store.save_state(full_key, val_str)
+
     def _restore_persisted_positions(self):
         """Restore open positions from SQLite after crash/restart."""
         # First, auto-close stale positions (older than 24h) — these are ghosts
@@ -3455,14 +3500,14 @@ class Prometheus:
             f"Scan aligned to bar interval | Square-off at 3:15 PM"
         )
 
-        _today_traded_symbols = set()
-        _intraday_trades_today = 0
-        _did_square_off = False
+        _today_traded_symbols = self._get_daily_state("dry_today_traded_symbols", set())
+        _intraday_trades_today = self._get_daily_state("dry_intraday_trades_today", 0)
+        _did_square_off = self._get_daily_state("dry_did_square_off", False)
         _last_scan_time = None
-        _did_send_daily_summary = False
-        _guardrail_breached = False
-        _guardrail_reason = ""
-        _did_send_reset_start_msg = False
+        _did_send_daily_summary = self._get_daily_state("dry_did_send_daily_summary", False)
+        _guardrail_breached = self._get_daily_state("dry_guardrail_breached", False)
+        _guardrail_reason = self._get_daily_state("dry_guardrail_reason", "")
+        _did_send_reset_start_msg = self._get_daily_state("dry_did_send_reset_start_msg", False)
 
         max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
@@ -3503,6 +3548,7 @@ class Prometheus:
                 if current_time >= dtime(9, 15) and not _did_send_reset_start_msg:
                     self._send_intraday_reset_start_message(mode_label, intraday_cfg)
                     _did_send_reset_start_msg = True
+                    self._set_daily_state("dry_did_send_reset_start_msg", True)
 
                 if current_time >= dtime(9, 15):
                     guard_eval = self._evaluate_intraday_pilot_guardrails(
@@ -3512,7 +3558,9 @@ class Prometheus:
                     _session_peak_equity = guard_eval.get("peak_equity", _session_peak_equity)
                     if guard_eval.get("breach") and not _guardrail_breached:
                         _guardrail_breached = True
+                        self._set_daily_state("dry_guardrail_breached", True)
                         _guardrail_reason = guard_eval.get("reason", "pilot guardrail breached")
+                        self._set_daily_state("dry_guardrail_reason", _guardrail_reason)
                         self._mark_intraday_guardrail_breach(mode_label, _guardrail_reason)
                         logger.warning(f"{mode_label}: pilot guardrail triggered — {_guardrail_reason}")
                         self.telegram.send_message(
@@ -3523,17 +3571,25 @@ class Prometheus:
                         if pilot_force_square_off and not _did_square_off:
                             self._square_off_intraday_positions()
                             _did_square_off = True
+                            self._set_daily_state("dry_did_square_off", True)
 
                 # Pre-market reset
                 if current_time < dtime(9, 15):
                     _today_traded_symbols.clear()
+                    self._set_daily_state("dry_today_traded_symbols", set())
                     _intraday_trades_today = 0
+                    self._set_daily_state("dry_intraday_trades_today", 0)
                     _did_square_off = False
+                    self._set_daily_state("dry_did_square_off", False)
                     _last_scan_time = None
                     _did_send_daily_summary = False
+                    self._set_daily_state("dry_did_send_daily_summary", False)
                     _guardrail_breached = False
+                    self._set_daily_state("dry_guardrail_breached", False)
                     _guardrail_reason = ""
+                    self._set_daily_state("dry_guardrail_reason", "")
                     _did_send_reset_start_msg = False
+                    self._set_daily_state("dry_did_send_reset_start_msg", False)
                     _session_peak_equity = self._get_current_equity()
                     self._reset_intraday_guardrail_audit(mode_label)
                     self.dashboard.show_status_line(
@@ -3555,6 +3611,7 @@ class Prometheus:
                 if current_time >= square_off_time and not _did_square_off:
                     self._square_off_intraday_positions()
                     _did_square_off = True
+                    self._set_daily_state("dry_did_square_off", True)
                     time.sleep(60)
                     continue
 
@@ -3563,6 +3620,7 @@ class Prometheus:
                     if current_time >= dtime(16, 0) and not _did_send_daily_summary:
                         self._send_daily_summary()
                         _did_send_daily_summary = True
+                        self._set_daily_state("dry_did_send_daily_summary", True)
                     self.dashboard.show_status_line(
                         f"{mode_label}: Squared off. Market closing soon."
                     )
@@ -3627,7 +3685,9 @@ class Prometheus:
                         )
                         if position:
                             _today_traded_symbols.add(symbol)
+                            self._set_daily_state("dry_today_traded_symbols", _today_traded_symbols)
                             _intraday_trades_today += 1
+                            self._set_daily_state("dry_intraday_trades_today", _intraday_trades_today)
                             # Register with monitor (intraday-tagged)
                             ts = self.order_manager.create_trailing_state(
                                 position.position_id
@@ -3757,13 +3817,13 @@ class Prometheus:
 
         # Intraday state
         intraday_cfg = get("intraday", {})
-        _intra_traded_symbols = set()
-        _intra_trades_today = 0
-        _did_square_off = False
+        _intra_traded_symbols = self._get_daily_state("live_intra_traded_symbols", set())
+        _intra_trades_today = self._get_daily_state("live_intra_trades_today", 0)
+        _did_square_off = self._get_daily_state("live_did_square_off", False)
         _last_intra_scan = None
-        _intra_guardrail_breached = False
-        _intra_guardrail_reason = ""
-        _did_send_reset_start_msg = False
+        _intra_guardrail_breached = self._get_daily_state("live_intra_guardrail_breached", False)
+        _intra_guardrail_reason = self._get_daily_state("live_intra_guardrail_reason", "")
+        _did_send_reset_start_msg = self._get_daily_state("live_did_send_reset_start_msg", False)
 
         intra_max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
@@ -3791,10 +3851,10 @@ class Prometheus:
         self._reset_intraday_guardrail_audit(mode_label)
 
         # Swing state
-        _completed_index_scans = set()
-        _completed_stock_scans = set()
-        _did_send_daily_summary = False
-        _swing_traded_symbols = set()  # dedup: one swing trade per symbol per day
+        _completed_index_scans = self._get_daily_state("live_completed_index_scans", set())
+        _completed_stock_scans = self._get_daily_state("live_completed_stock_scans", set())
+        _did_send_daily_summary = self._get_daily_state("live_did_send_daily_summary", False)
+        _swing_traded_symbols = self._get_daily_state("live_swing_traded_symbols", set())
         _consecutive_errors = 0
 
         # Dynamic Schedule Config
@@ -3829,6 +3889,7 @@ class Prometheus:
                 if current_time >= dtime(9, 15) and not _did_send_reset_start_msg:
                     self._send_intraday_reset_start_message(mode_label, intraday_cfg)
                     _did_send_reset_start_msg = True
+                    self._set_daily_state("live_did_send_reset_start_msg", True)
 
                 if current_time >= dtime(9, 15):
                     guard_eval = self._evaluate_intraday_pilot_guardrails(
@@ -3838,7 +3899,9 @@ class Prometheus:
                     _intra_session_peak_equity = guard_eval.get("peak_equity", _intra_session_peak_equity)
                     if guard_eval.get("breach") and not _intra_guardrail_breached:
                         _intra_guardrail_breached = True
+                        self._set_daily_state("live_intra_guardrail_breached", True)
                         _intra_guardrail_reason = guard_eval.get("reason", "pilot guardrail breached")
+                        self._set_daily_state("live_intra_guardrail_reason", _intra_guardrail_reason)
                         self._mark_intraday_guardrail_breach(mode_label, _intra_guardrail_reason)
                         logger.warning(f"{mode_label}: intraday guardrail triggered — {_intra_guardrail_reason}")
                         self.telegram.send_message(
@@ -3849,21 +3912,32 @@ class Prometheus:
                         if pilot_force_square_off and not _did_square_off:
                             self._square_off_intraday_positions()
                             _did_square_off = True
+                            self._set_daily_state("live_did_square_off", True)
 
                 # Pre-market reset
                 if current_time < dtime(9, 15):
                     _intra_traded_symbols.clear()
+                    self._set_daily_state("live_intra_traded_symbols", set())
                     _intra_trades_today = 0
+                    self._set_daily_state("live_intra_trades_today", 0)
                     _did_square_off = False
+                    self._set_daily_state("live_did_square_off", False)
                     _last_intra_scan = None
                     _intra_guardrail_breached = False
+                    self._set_daily_state("live_intra_guardrail_breached", False)
                     _intra_guardrail_reason = ""
+                    self._set_daily_state("live_intra_guardrail_reason", "")
                     _intra_session_peak_equity = self._get_current_equity()
                     _completed_index_scans.clear()
+                    self._set_daily_state("live_completed_index_scans", set())
                     _completed_stock_scans.clear()
+                    self._set_daily_state("live_completed_stock_scans", set())
                     _did_send_daily_summary = False
+                    self._set_daily_state("live_did_send_daily_summary", False)
                     _swing_traded_symbols.clear()
+                    self._set_daily_state("live_swing_traded_symbols", set())
                     _did_send_reset_start_msg = False
+                    self._set_daily_state("live_did_send_reset_start_msg", False)
                     self._reset_intraday_guardrail_audit(mode_label)
                     # Retry Telegram if it failed at startup
                     self.telegram.reconnect()
@@ -3887,6 +3961,7 @@ class Prometheus:
                 if current_time >= square_off_time and not _did_square_off:
                     self._square_off_intraday_positions()
                     _did_square_off = True
+                    self._set_daily_state("live_did_square_off", True)
 
                 # ── DYNAMIC SWING SCANS (INDICES) ──
                 for s_time in sorted(_idx_scan_times, reverse=True):
@@ -3922,6 +3997,7 @@ class Prometheus:
                                 self._dispatch_multi_account(refined)
                                 if position:
                                     _swing_traded_symbols.add(symbol)
+                                    self._set_daily_state("live_swing_traded_symbols", _swing_traded_symbols)
                                     ts = self.order_manager.create_trailing_state(position.position_id)
                                     if ts:
                                         ts.trade_mode = "swing"
@@ -3929,6 +4005,7 @@ class Prometheus:
                                         self.position_monitor.add_position(ts)
                                         self._handle_state_persist(ts)
                         _completed_index_scans.add(s_time)
+                        self._set_daily_state("live_completed_index_scans", _completed_index_scans)
                         time.sleep(60) # Space out from other scans
                         break # Only do one scan per iteration
 
@@ -3950,6 +4027,7 @@ class Prometheus:
                                 mode_label=mode_label,
                             )
                         _completed_stock_scans.add(s_time)
+                        self._set_daily_state("live_completed_stock_scans", _completed_stock_scans)
                         break
 
                 # ── INTRADAY SCAN (9:45-14:30) ──
@@ -3980,7 +4058,9 @@ class Prometheus:
                                     )
                                     if position:
                                         _intra_traded_symbols.add(isym)
+                                        self._set_daily_state("live_intra_traded_symbols", _intra_traded_symbols)
                                         _intra_trades_today += 1
+                                        self._set_daily_state("live_intra_trades_today", _intra_trades_today)
                                         ts = self.order_manager.create_trailing_state(
                                             position.position_id
                                         )
@@ -4003,6 +4083,7 @@ class Prometheus:
                     if not _did_send_daily_summary:
                         self._send_daily_summary()
                         _did_send_daily_summary = True
+                        self._set_daily_state("live_did_send_daily_summary", _did_send_daily_summary)
                     time.sleep(60)  # slow poll after hours
                     continue
 

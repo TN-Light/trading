@@ -113,3 +113,39 @@ def test_restoration_logic():
     assert pos.tradingsymbol == "SENSEX76600PE"
     assert pos.quantity == 50
     assert pos.average_price == 230.0
+
+
+def test_daily_state_persistence():
+    from prometheus.main import Prometheus
+    from datetime import time as dtime_cls
+    
+    ctrl = MockController()
+    
+    # Store mocked state dictionary
+    db_state = {}
+    ctrl.store.load_state.side_effect = lambda key: db_state.get(key, "")
+    ctrl.store.save_state.side_effect = lambda key, val: db_state.update({key: val})
+
+    # Bind helper methods to ctrl
+    ctrl._get_daily_state = Prometheus._get_daily_state.__get__(ctrl, MockController)
+    ctrl._set_daily_state = Prometheus._set_daily_state.__get__(ctrl, MockController)
+
+    # Test boolean
+    ctrl._set_daily_state("bool_val", True)
+    assert ctrl._get_daily_state("bool_val", False) is True
+
+    # Test integer
+    ctrl._set_daily_state("int_val", 42)
+    assert ctrl._get_daily_state("int_val", 0) == 42
+
+    # Test string set
+    test_set = {"NIFTY", "BANKNIFTY"}
+    ctrl._set_daily_state("set_val", test_set)
+    assert ctrl._get_daily_state("set_val", set()) == test_set
+
+    # Test datetime.time set (scans)
+    time_set = {dtime_cls(13, 0), dtime_cls(15, 35)}
+    ctrl._set_daily_state("index_scans", time_set)
+    restored_time_set = ctrl._get_daily_state("index_scans", set())
+    assert restored_time_set == time_set
+
