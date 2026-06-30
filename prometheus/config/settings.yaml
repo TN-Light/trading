@@ -140,7 +140,6 @@ intraday:
   - NIFTY 50
   - NIFTY BANK
   - NIFTY FIN SERVICE
-  - NIFTY IT
   - SENSEX
   bar_interval: auto
   use_backtest_generator: true
@@ -150,7 +149,6 @@ intraday:
   - NIFTY 50
   - NIFTY BANK
   - NIFTY FIN SERVICE
-  - NIFTY IT
   - SENSEX
   last_entry_time: '14:30'
   max_daily_trades: 3
@@ -332,17 +330,17 @@ market:
   exchange: NSE
   holidays_calendar: india_nse
   indices:
-  - SENSEX
   - NIFTY FIN SERVICE
   - NIFTY BANK
   - NIFTY 50
   - NIFTY MIDCAP SELECT
+  - SENSEX
   lot_sizes:
     NIFTY 50: 65
     NIFTY BANK: 15
     NIFTY FIN SERVICE: 25
-    SENSEX: 10
     NIFTY MIDCAP SELECT: 50
+    SENSEX: 10
   stocks:
   - HDFCBANK
   - RELIANCE

@@ -804,7 +804,7 @@ class BacktestEngine:
                         logger.info(f"DD circuit breaker released: DD {current_dd_pct*100:.1f}% recovered below resume threshold")
                         self._dd_halt_active = False
 
-            # Check daily loss limit (fixed 3% of initial capital)
+            # Check daily loss limit (3% of current capital, scales with compounding)
             daily_loss_limit = capital * 0.03
             if daily_pnl < -daily_loss_limit:
                 # Force close ALL positions on daily loss limit
