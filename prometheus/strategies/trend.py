@@ -430,7 +430,11 @@ class TrendStrategy:
                 if ltp > 0:
                     return ltp
 
-        # Fallback: Black-Scholes estimate
+        # Fallback: Black-Scholes estimate (only allowed in backtest mode)
+        if self.config.get("mode") != "backtest":
+            logger.debug(f"Trend: Live premium unavailable for {strike} {option_type} and theory disabled.")
+            return 0.0
+
         from prometheus.utils.options_math import black_scholes_price
         T = max(dte, 1) / 365
         sigma = self.current_iv if self.current_iv > 0 else 0.15

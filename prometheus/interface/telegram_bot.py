@@ -804,12 +804,12 @@ class TelegramBot:
         tradingsymbol = signal.get("tradingsymbol", "")
         tsym_part = f" (<code>{tradingsymbol}</code>)" if tradingsymbol else ""
         if friendly_contract:
-            contract_line = f"Contract: <b>{friendly_contract}</b>{tsym_part}\n"
+            contract_line = f"Contract: <code>{friendly_contract}</code>{tsym_part}\n"
         elif instrument:
-            contract_line = f"Contract: <b>{instrument}</b>{tsym_part}\n"
+            contract_line = f"Contract: <code>{instrument}</code>{tsym_part}\n"
         elif strike and option_type:
             exp = f" {expiry}" if expiry else ""
-            contract_line = f"Contract: <b>{symbol}{exp} {int(float(strike))}{option_type}</b>{tsym_part}\n"
+            contract_line = f"Contract: <code>{symbol}{exp} {int(float(strike))}{option_type}</code>{tsym_part}\n"
 
         # Source tag for alert segregation
         if source == "scan":
