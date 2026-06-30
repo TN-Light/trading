@@ -2904,12 +2904,10 @@ class Prometheus:
         ts_bars = int(profile.get("time_stop_bars", v2_cfg.get("time_stop_bars", 14)))
 
         self.telegram.send_message(
-            f"\U0001f9ed <b>INTRADAY DAILY RESET @ 09:15</b>\n"
+            f"🔄 <b>DAILY RESET COMPLETE</b>\n"
             f"Mode: {mode_label}\n"
-            f"Equity: Rs {current_equity:,.0f} | Bracket: {tier_key} ({bracket.name})\n"
-            f"Profile: conf(T/S) {conf_t:.1f}/{conf_s:.1f}, targetATR {target_atr:.1f}, timeStop {ts_bars}\n"
-            f"Guardrail: PF&lt;{min_pf:.2f} over {rolling_n} trades OR DD&gt;={max_dd:.1f}%\n"
-            f"Action on breach: block_new={block_new}, force_square_off={force_sq}"
+            f"Capital: Rs {current_equity:,.0f}\n"
+            f"System is ready for today's trading."
         )
 
     def _execute_signal_with_feedback(
