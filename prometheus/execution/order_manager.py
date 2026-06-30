@@ -371,12 +371,62 @@ class OrderManager:
     def close_position(
         self,
         position_id: str,
-        reason: str = "manual"
+        reason: str = "manual",
+        state: Optional[Any] = None
     ) -> Optional[float]:
         """Close a managed position and return realized P&L."""
         if position_id not in self.managed_positions:
-            logger.warning(f"Position not found: {position_id}")
-            return None
+            if state is not None:
+                # Reconstruct ManagedPosition from state and broker
+                qty = 0
+                try:
+                    for bp in self.broker.get_positions():
+                        if bp.tradingsymbol == state.tradingsymbol:
+                            qty = abs(bp.quantity)
+                            break
+                except Exception as e:
+                    logger.error(f"Error querying broker positions during recovery: {e}")
+                
+                if qty <= 0:
+                    from prometheus.utils.indian_market import get_lot_size
+                    qty = get_lot_size(state.symbol)
+                
+                # Reconstruct entry order
+                from prometheus.execution.broker import Order, OrderSide, OrderType, OrderStatus
+                dummy_entry = Order(
+                    symbol=state.symbol,
+                    tradingsymbol=state.tradingsymbol,
+                    side=OrderSide.BUY if state.direction == "bullish" else OrderSide.SELL,
+                    order_type=OrderType.MARKET,
+                    quantity=qty,
+                    filled_quantity=qty,
+                    average_price=state.entry_premium,
+                    status=OrderStatus.COMPLETE,
+                )
+                
+                managed = ManagedPosition()
+                managed.position_id = position_id
+                managed.symbol = state.symbol
+                managed.strategy = state.strategy
+                managed.direction = state.direction
+                managed.entry_orders = [dummy_entry]
+                managed.exit_orders = []
+                managed.stop_loss = state.initial_sl
+                managed.target = state.target
+                managed.trailing_stop = state.current_sl
+                managed.entry_time = state.entry_time
+                managed.status = "open"
+                managed.tradingsymbol = state.tradingsymbol
+                managed.entry_premium = state.entry_premium
+                managed.sl_order_id = state.sl_order_id
+                managed.max_bars = state.max_bars
+                managed.breakeven_ratio = state.breakeven_ratio
+                
+                self.managed_positions[position_id] = managed
+                logger.info(f"Reconstructed ManagedPosition for {position_id} ({state.tradingsymbol}, qty={qty}) from TrailingState.")
+            else:
+                logger.warning(f"Position not found: {position_id}")
+                return None
 
         managed = self.managed_positions[position_id]
         if managed.status == "closed":

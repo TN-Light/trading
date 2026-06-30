@@ -2369,14 +2369,14 @@ class Prometheus:
             stack = self.multi_account.get_stack(ma_label)
             if stack:
                 managed_snapshot = stack.order_manager.managed_positions.get(position_id)
-                pnl = stack.order_manager.close_position(position_id, reason)
+                pnl = stack.order_manager.close_position(position_id, reason, state)
                 logger.info(f"[{ma_label}] Position {position_id} closed ({reason}): P&L Rs {pnl if pnl is not None else 0:+,.0f}")
             else:
                 logger.warning(f"Multi-account stack '{ma_label}' not found for {position_id}")
         else:
             # Primary account exit
             managed_snapshot = self.order_manager.managed_positions.get(position_id)
-            pnl = self.order_manager.close_position(position_id, reason)
+            pnl = self.order_manager.close_position(position_id, reason, state)
 
         if self.position_monitor:
             self.position_monitor.remove_position(position_id)
