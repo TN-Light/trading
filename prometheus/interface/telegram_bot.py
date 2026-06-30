@@ -870,30 +870,16 @@ class TelegramBot:
             regime = r.get("regime", "unknown")
             adj_conf = r.get("adj_confidence", 0)
             sig_count = r.get("signal_count", 0)
-            quality, _ = REGIME_QUALITY.get(regime, ("???", ""))
-
-            if "CE" in action:
-                d_emoji = "\U0001f7e2"
-            elif "PE" in action:
-                d_emoji = "\U0001f534"
-            else:
-                d_emoji = "\u26aa"
-
-            if quality == "HIGH":
-                q_tag = "\u2705"
-            elif quality == "MED":
-                q_tag = "\U0001f7e1"
-            elif quality == "LOW":
-                q_tag = "\u26a0\ufe0f"
-            else:
-                q_tag = "\u274c"
-
-            sig_only = "  <i>(signal only)</i>" if not r.get("executable", True) else ""
-
+            tf = r.get("timeframe", "15minute")
+            tf_clean = tf.replace("intraday ", "").replace("minute", "m").replace("day", "D")
+            
+            direction = "CE Buy" if "CE" in action else "PE Buy" if "PE" in action else "HOLD"
+            d_emoji = "🟢" if "CE" in action else "🔴" if "PE" in action else "⚪"
+            
+            sig_only = " (sig only)" if not r.get("executable", True) else ""
+            
             return (
-                f"{d_emoji} <b>{symbol}</b>{sig_only}\n"
-                f"   {action} | <code>{adj_conf:>3.0%}</code> | {sig_count}/10\n"
-                f"   {q_tag} {regime.upper()} ({quality})"
+                f"{d_emoji} <b>{symbol} ({tf_clean})</b>: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {regime.upper()}{sig_only}"
             )
 
         if intraday_top:

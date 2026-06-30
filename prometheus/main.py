@@ -8323,48 +8323,39 @@ class Prometheus:
                 # Stock — use symbol directly
                 underlying = symbol.upper() if symbol else prefix
             
-            # Try to extract month from date portion
-            date_part = prefix[len(underlying):]
-            month_str = ''
-            if len(date_part) >= 4:
-                try:
-                    month_num = int(date_part[2:4])
-                    months = ['', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
-                              'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
-                    month_str = months[month_num] if 1 <= month_num <= 12 else ''
-                except (ValueError, IndexError):
-                    pass
+            # Parse the date_part (usually 5 chars, e.g. "26702" or "26JUL")
+            date_part = prefix[len(underlying):].upper()
+            if len(date_part) == 5:
+                if date_part[2:].isalpha():
+                    # Monthly: SENSEX26JUL76600PE -> SENSEX JUL 76600 PE
+                    mon = date_part[2:]
+                    return f"{underlying} {mon} {strike} {otype}"
+                else:
+                    # Weekly: SENSEX2670276600PE -> SENSEX 02nd JUL 76600 PE
+                    try:
+                        yy = int(date_part[0:2])
+                        m_char = date_part[2]
+                        dd = int(date_part[3:5])
+                        
+                        m_map = {
+                            "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
+                            "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12
+                        }
+                        month = m_map.get(m_char)
+                        if month and 1 <= dd <= 31:
+                            from datetime import date
+                            d = date(2000 + yy, month, dd)
+                            mon = d.strftime("%b").upper()
+                            if 11 <= dd <= 13:
+                                suffix = "th"
+                            else:
+                                suffix = {1: "st", 2: "nd", 3: "rd"}.get(dd % 10, "th")
+                            day_str = f"{dd:02d}{suffix}"
+                            return f"{underlying} {day_str} {mon} {strike} {otype}"
+                    except Exception:
+                        pass
             
-            # For SENSEX-style (SENSEX26JUN77000CE)
-            if not month_str and 'JAN' in date_part.upper():
-                month_str = 'JAN'
-            elif not month_str and 'FEB' in date_part.upper():
-                month_str = 'FEB'
-            elif not month_str and 'MAR' in date_part.upper():
-                month_str = 'MAR'
-            elif not month_str and 'APR' in date_part.upper():
-                month_str = 'APR'
-            elif not month_str and 'MAY' in date_part.upper():
-                month_str = 'MAY'
-            elif not month_str and 'JUN' in date_part.upper():
-                month_str = 'JUN'
-            elif not month_str and 'JUL' in date_part.upper():
-                month_str = 'JUL'
-            elif not month_str and 'AUG' in date_part.upper():
-                month_str = 'AUG'
-            elif not month_str and 'SEP' in date_part.upper():
-                month_str = 'SEP'
-            elif not month_str and 'OCT' in date_part.upper():
-                month_str = 'OCT'
-            elif not month_str and 'NOV' in date_part.upper():
-                month_str = 'NOV'
-            elif not month_str and 'DEC' in date_part.upper():
-                month_str = 'DEC'
-            
-            if month_str:
-                return f"{underlying} {month_str} {strike} {otype}"
-            else:
-                return f"{underlying} {strike} {otype}"
+            return f"{underlying} {date_part} {strike} {otype}"
         except Exception:
             return tradingsymbol
 
