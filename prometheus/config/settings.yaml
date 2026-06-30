@@ -139,7 +139,6 @@ intraday:
   allowed_instruments:
   - NIFTY 50
   - NIFTY BANK
-  - NIFTY FIN SERVICE
   - SENSEX
   bar_interval: auto
   use_backtest_generator: true
@@ -148,7 +147,6 @@ intraday:
   instruments:
   - NIFTY 50
   - NIFTY BANK
-  - NIFTY FIN SERVICE
   - SENSEX
   last_entry_time: '14:30'
   max_daily_trades: 3
@@ -330,7 +328,6 @@ market:
   exchange: NSE
   holidays_calendar: india_nse
   indices:
-  - NIFTY FIN SERVICE
   - NIFTY BANK
   - NIFTY 50
   - NIFTY MIDCAP SELECT
@@ -338,7 +335,6 @@ market:
   lot_sizes:
     NIFTY 50: 65
     NIFTY BANK: 15
-    NIFTY FIN SERVICE: 25
     NIFTY MIDCAP SELECT: 50
     SENSEX: 10
   stocks:

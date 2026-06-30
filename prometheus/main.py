@@ -396,22 +396,19 @@ class Prometheus:
                 results[label] = False
                 continue
 
-            # Ranked best-to-worst signal view for each account.
-            ranked_signal = dict(refined_signal)
-            ranked_signal["account_label"] = label
-            ranked_signal["account_capital"] = capital
-            ranked_signal["eligible_strikes"] = routed
+            execution_signal = self._build_execution_signal_from_candidate(
+                refined_signal, routed[0]
+            )
+            execution_signal["account_label"] = label
+            execution_signal["account_capital"] = capital
+
             sym = refined_signal.get("symbol", "")
             act = refined_signal.get("action", "HOLD")
             if not self._is_signal_duplicate(sym, act, account=label):
                 self._mark_signal_alerted(sym, act, account=label)
-                self.telegram.alert_new_signal(ranked_signal, source="multi")
+                self.telegram.alert_new_signal(execution_signal, source="multi")
             else:
                 logger.info(f"[{label}] Signal dedupe: {sym} {act} already alerted")
-
-            execution_signal = self._build_execution_signal_from_candidate(
-                refined_signal, routed[0]
-            )
 
             try:
                 position = stack.order_manager.execute_signal(execution_signal, confirm=False)
@@ -8676,6 +8673,17 @@ def main():
     if args.mode in ("semi_auto", "full_auto") and not preflight_report.ok():
         print(preflight_report.format())
         sys.exit(2)
+
+    if args.mode in ("paper", "semi_auto", "full_auto", "dry_run", "signal"):
+        import socket
+        try:
+            global _singleton_socket
+            _singleton_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _singleton_socket.bind(("127.0.0.1", 9999))
+            _singleton_socket.listen(1)
+        except socket.error:
+            print(f"[FATAL] Another instance of Prometheus daemon ({args.mode}) is already running (locked on port 9999). Exiting.")
+            sys.exit(0)
 
     # Initialize system
     prometheus = Prometheus(

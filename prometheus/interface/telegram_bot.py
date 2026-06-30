@@ -731,36 +731,64 @@ class TelegramBot:
         if action == "HOLD":
             return
 
-        ranked = signal.get("eligible_strikes", [])
-        if ranked:
-            account_label = signal.get("account_label", "account")
-            account_capital = float(signal.get("account_capital", 0) or 0)
-            direction = "BULLISH" if "CE" in action else "BEARISH"
-            lines = [
-                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                f"\U0001f4ca <b>SECONDARY \u2014 {account_label}</b>",
-                f"{symbol} | {direction}",
-                f"Capital: <code>Rs {account_capital:,.0f}</code>",
-                f"Confidence: <code>{confidence:.0%}</code>",
-            ]
-            if hold_line:
-                lines.append(hold_line.strip())
-            lines.extend([
-                "",
-                "<b>Eligible (Best -> Worst)</b>",
-            ])
+        # Generate user-friendly contract name if expiry and strike are present
+        friendly_contract = ""
+        if expiry and strike and option_type:
+            try:
+                from datetime import datetime as dt
+                from datetime import timedelta
+                if isinstance(expiry, str):
+                    d = dt.strptime(expiry[:10], "%Y-%m-%d")
+                else:
+                    d = expiry
+                strike_str = str(int(float(strike)))
+                mon = d.strftime("%b").upper()
+                
+                next_week = d + timedelta(days=7)
+                is_monthly = next_week.month != d.month
+                
+                if is_monthly:
+                    friendly_contract = f"{symbol} {mon} {strike_str} {option_type}"
+                else:
+                    day = d.day
+                    if 11 <= day <= 13:
+                        suffix = "th"
+                    else:
+                        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+                    day_str = f"{day:02d}{suffix}"
+                    friendly_contract = f"{symbol} {day_str} {mon} {strike_str} {option_type}"
+            except Exception as e:
+                logger.error(f"Error formatting friendly contract name: {e}")
 
-            for i, c in enumerate(ranked, 1):
-                lines.extend([
-                    f"{i}) <code>{c.get('instrument', '')}</code> [{c.get('strike_tier', '')}]",
-                    f"   Prem Rs {c.get('entry_price', 0):,.2f} | Cost Rs {c.get('lot_cost', 0):,.0f} | Lot {int(c.get('lot_size', 0))}",
-                    f"   MinCap Rs {c.get('min_capital_required', 0):,.0f} | Risk1L Rs {c.get('risk_amount_1lot', 0):,.0f}",
-                    f"   E {c.get('entry_price', 0):,.2f} | SL {c.get('stop_loss', 0):,.2f} | T {c.get('target', 0):,.2f} | RR 1:{c.get('risk_reward', 0):.2f}",
-                    f"   Rec lots: {int(c.get('recommended_lots', 1))}",
-                ])
+        # Account details if applicable
+        account_header = ""
+        account_label = signal.get("account_label", "")
+        if account_label:
+            capital_val = float(signal.get("account_capital", 0) or 0)
+            cap_str = f" | Capital: Rs {capital_val:,.0f}" if capital_val > 0 else ""
+            account_header = f"📊 <b>ACCOUNT: {account_label.upper()}</b>{cap_str}\n"
 
-            self.send_message("\n".join(lines))
-            return
+        # Trade sizing details
+        qty = int(signal.get("quantity", 0) or 0)
+        lots = int(signal.get("lots", 0) or 0)
+        lot_size = int(signal.get("lot_size", 0) or 0)
+        if lots > 0:
+            qty_part = f" ({qty} Qty)" if qty > 0 else ""
+            sizing_line = f"Sizing: <code>{lots} Lots</code>{qty_part}\n"
+        elif qty > 0:
+            sizing_line = f"Sizing: <code>{qty} Qty</code>\n"
+        else:
+            sizing_line = ""
+
+        # Investment / Margin required
+        lot_cost = float(signal.get("lot_cost", 0) or 0)
+        if lot_cost > 0 and lots > 0:
+            total_cost = lot_cost * lots
+            cost_line = f"Margin Required: <code>Rs {total_cost:,.0f}</code> (Rs {lot_cost:,.0f}/lot)\n"
+        elif lot_cost > 0:
+            cost_line = f"Margin Required: <code>Rs {lot_cost:,.0f}</code>\n"
+        else:
+            cost_line = ""
 
         emoji = "\U0001f7e2" if "CE" in action else "\U0001f534"
         direction = "BULLISH" if "CE" in action else "BEARISH"
@@ -773,37 +801,33 @@ class TelegramBot:
             caution = "\n\u26a0\ufe0f Volatile regime — lower conviction"
 
         contract_line = ""
-        if instrument:
-            contract_line = f"Contract: <code>{instrument}</code>\n"
+        tradingsymbol = signal.get("tradingsymbol", "")
+        tsym_part = f" (<code>{tradingsymbol}</code>)" if tradingsymbol else ""
+        if friendly_contract:
+            contract_line = f"Contract: <b>{friendly_contract}</b>{tsym_part}\n"
+        elif instrument:
+            contract_line = f"Contract: <b>{instrument}</b>{tsym_part}\n"
         elif strike and option_type:
             exp = f" {expiry}" if expiry else ""
-            contract_line = f"Contract: <code>{symbol}{exp} {int(float(strike))}{option_type}</code>\n"
-
-        lot_size = int(signal.get("lot_size", 0) or 0)
-        lot_cost = float(signal.get("lot_cost", 0) or 0)
-        min_cap = float(signal.get("min_capital_required", 0) or 0)
-        risk_1lot = float(signal.get("risk_amount_1lot", 0) or 0)
-        cost_line = ""
-        if lot_size > 0 and lot_cost > 0:
-            cost_line = f"Lot: <code>{lot_size}</code> | Cost: <code>Rs {lot_cost:,.0f}</code>\n"
-            if min_cap > 0:
-                cost_line += f"MinCap: <code>Rs {min_cap:,.0f}</code>\n"
-            if risk_1lot > 0:
-                cost_line += f"Risk(1 lot): <code>Rs {risk_1lot:,.0f}</code>\n"
+            contract_line = f"Contract: <b>{symbol}{exp} {int(float(strike))}{option_type}</b>{tsym_part}\n"
 
         # Source tag for alert segregation
         if source == "scan":
             source_tag = "  \U0001f4e1 <i>/scan</i>"
         elif source == "auto":
             source_tag = "  \u26a1 <i>auto</i>"
+        elif source == "multi":
+            source_tag = "  \u26a1 <i>multi</i>"
         else:
             source_tag = ""
 
         text = (
             f"{emoji} <b>NEW SIGNAL</b>{source_tag}\n"
+            f"{account_header}"
             f"{symbol} | {action} | {direction}\n"
             f"Confidence: <code>{confidence:.0%}</code> | R:R: <code>1:{rr:.1f}</code>\n"
             f"{contract_line}"
+            f"{sizing_line}"
             f"{cost_line}"
             f"Entry <code>Rs {entry:,.2f}</code> | SL <code>Rs {sl:,.2f}</code> | Target <code>Rs {target:,.2f}</code>\n"
             f"Regime: {regime.upper()} ({quality} — {wr})"
