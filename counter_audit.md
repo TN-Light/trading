@@ -1,3 +1,19 @@
+> [!NOTE]
+> **STATUS UPDATE (July 2026) — Most findings here have been acted on.**
+> This counter-audit was accurate when written. Changes since:
+> - **All 3 confirmed dead files** (`cross_asset_relay.py`, `loss_elimination_engine.py`, `signal_regression.py`) have been **DELETED** from disk.
+> - **`intraday.enabled`**: Now `true` (was `false`).
+> - **`max_bars` inconsistency** (§02): FIXED — `apex_generator.py` now reads from config instead of hardcoding 8. Value is now 16 (matching settings.yaml).
+> - **Dead zone**: Narrowed from 11:30-13:30 to 12:00-13:00.
+> - **Entry window**: Widened from 10:00-13:45 to 09:30-14:15.
+> - **AI keys**: Gemini and Groq now `enabled: false` (cleanly disabled).
+> - **`strategies.active_modules`**: Config key removed entirely.
+> - **Instruments**: Expanded to NIFTY 50, NIFTY BANK, SENSEX.
+> - **`signal_count` placeholder**: Fixed in main.py — now reports real AES edge score.
+> - **Optimizer OOS check**: Now two-sided (flags suspicious OOS >> IS as well as degradation).
+
+---
+
 # Counter-Audit: Prometheus Audit v2 — Verified Against Code
 
 Every claim below was checked against the actual source files. I'm marking each as **✅ CONFIRMED**, **⚠️ PARTIALLY WRONG**, or **❌ WRONG**.

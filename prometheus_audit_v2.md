@@ -1,3 +1,17 @@
+> [!CAUTION]
+> **HISTORICAL DOCUMENT — Written June 2026. Many findings have been addressed or corrected.**
+> This audit contains several factual errors identified by `counter_audit.md`. Key corrections:
+> - **Dead code list was wrong**: Only 3 of the 10 files listed were truly dead (§09). The other 7 (trend.py, volatility.py, expiry.py, selector.py, fusion.py, regime_detector.py, llm_analyzer.py) are LIVE — imported by main.py. All 3 truly dead files have since been **DELETED**.
+> - **Signal combo analysis (§05)**: The FVG/OTE/VP/LiqSweep combos are from the SWING backtest engine, NOT the live APEX intraday engine. APEX uses VWAP/Session-VWAP/EMA/SuperTrend/RSI — none of the ICT/SMC concepts.
+> - **SL system (§03)**: It's a 5-stage trailing ratchet + separate 3-phase premium floor, not a "3-phase SL system."
+> - **AES scoring (§03)**: 6 components (not 5) — missing `macro_flow: 0.05`.
+> - **max_bars (§02)**: APEX previously hardcoded 8 (not 16). This has since been FIXED to read from config (now 16).
+> - **All P1-P10 action items have been addressed**: intraday.enabled=true, instruments expanded to NIFTY 50/BANK/SENSEX, dead zone narrowed to 12:00-13:00, entry window 09:30-14:15, AI keys disabled cleanly, max_daily_trades raised to 5.
+>
+> For corrections, see `counter_audit.md`. For current system state, see `Project_Status.md`.
+
+---
+
 # PROMETHEUS ALGO SYSTEM · NSE/NFO INTRADAY · FULL AUDIT v2
 
 ## Complete System Audit & Strategy Analysis

@@ -971,202 +971,6 @@ class Prometheus:
 
         return signal
 
-    # ─────────────────────────────────────────────────────────────────────
-    # INTRADAY ANALYSIS PIPELINE
-    # ─────────────────────────────────────────────────────────────────────
-    def analyze_intraday(self, symbol: str, bar_interval: str = "5minute") -> Optional[FusedSignal]:
-        """
-        Intraday analysis pipeline — uses 5min/15min bars as primary.
-
-        Key differences from analyze():
-        1. Primary data = 5min or 15min bars (not daily)
-        2. Bias from one-level-up timeframe
-        3. Session-anchored VWAP (resets at market open)
-        4. Tags signal as intraday with MIS product
-        """
-        try:
-            return self._analyze_intraday_impl(symbol, bar_interval)
-        except Exception as e:
-            logger.error(f"analyze_intraday({symbol}) failed: {e}")
-            return None
-
-    def _analyze_intraday_impl(self, symbol: str, bar_interval: str = "5minute") -> Optional[FusedSignal]:
-        """Internal implementation — separated for per-symbol error isolation."""
-        logger.info(f"Intraday analyzing {symbol} ({bar_interval})...")
-
-        # 1. Fetch data
-        data_primary = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
-        if bar_interval == "5minute":
-            data_bias = self.data.fetch_historical(symbol, days=10, interval="15minute")
-        else:
-            data_bias = self.data.fetch_historical(symbol, days=30, interval="60minute")
-
-        if data_primary.empty:
-            logger.warning(f"No intraday data for {symbol}")
-            return None
-
-        return self._analyze_intraday_from_data(symbol, data_primary, data_bias, bar_interval)
-
-    def _analyze_intraday_from_data(
-        self,
-        symbol: str,
-        data_primary: pd.DataFrame,
-        data_bias: pd.DataFrame,
-        bar_interval: str,
-    ) -> Optional[FusedSignal]:
-        """Intraday analysis using supplied data slices (live-path replay helper)."""
-        if data_primary is None or data_primary.empty:
-            return None
-
-        spot = data_primary["close"].iloc[-1]
-
-        # 2. Technical signals
-        tech_signals = []
-
-        # ATR from primary for intraday SL (compute early — needed by EMA margin)
-        atr_value = 0.0
-        if len(data_primary) >= 15:
-            atr_series = calculate_atr(data_primary)
-            if not atr_series.empty:
-                atr_value = float(atr_series.iloc[-1])
-
-        # Session VWAP (key for intraday)
-        vwap_df = calculate_session_vwap(data_primary)
-        if not vwap_df.empty and "vwap" in vwap_df.columns:
-            last_vwap = vwap_df["vwap"].iloc[-1]
-            if last_vwap > 0:
-                vwap_dir = "bullish" if spot > last_vwap else "bearish"
-                vwap_dist = abs(spot - last_vwap) / last_vwap
-                tech_signals.append(TechnicalSignal(
-                    name="vwap",
-                    direction=vwap_dir,
-                    strength=min(vwap_dist * 20, 0.9),
-                    timeframe=bar_interval,
-                ))
-
-        # Supertrend on primary
-        if len(data_primary) >= 20:
-            st_df = calculate_supertrend(data_primary)
-            if not st_df.empty and "supertrend_direction" in st_df.columns:
-                st_dir = st_df["supertrend_direction"].iloc[-1]
-                tech_signals.append(TechnicalSignal(
-                    name="supertrend",
-                    direction="bullish" if st_dir == 1 else "bearish",
-                    strength=0.65,
-                    timeframe=bar_interval,
-                ))
-
-        # EMA 9/21 alignment (Session 23 addition)
-        if len(data_primary) >= 25:
-            ema9 = data_primary["close"].ewm(span=9, adjust=False).mean()
-            ema21 = data_primary["close"].ewm(span=21, adjust=False).mean()
-            if not ema9.empty and not ema21.empty:
-                ema9_now = ema9.iloc[-1]
-                ema21_now = ema21.iloc[-1]
-                margin = atr_value * 0.1 if atr_value > 0 else 0
-                if ema9_now > ema21_now + margin:
-                    tech_signals.append(TechnicalSignal(
-                        name="ema",
-                        direction="bullish",
-                        strength=0.65,
-                        timeframe=bar_interval,
-                    ))
-                elif ema9_now < ema21_now - margin:
-                    tech_signals.append(TechnicalSignal(
-                        name="ema",
-                        direction="bearish",
-                        strength=0.65,
-                        timeframe=bar_interval,
-                    ))
-
-        # RSI Divergence on bias TF
-        if not data_bias.empty and len(data_bias) > 44:
-            div_result = detect_rsi_divergence(data_bias, rsi_period=14)
-            if div_result:
-                tech_signals.append(TechnicalSignal(
-                    name="rsi_divergence",
-                    direction=div_result["direction"],
-                    strength=div_result.get("strength", 0.5),
-                    timeframe="bias",
-                ))
-
-        # FVG on primary
-        if len(data_primary) > 3:
-            fvgs = detect_fair_value_gaps(data_primary)
-            for f in fvgs[-3:]:
-                direction = "bullish" if f.get("type") == "bullish_fvg" else "bearish"
-                tech_signals.append(TechnicalSignal(
-                    name="fvg_imbalance",
-                    direction=direction,
-                    strength=min(f.get("gap_pct", 0.1) / 0.5, 0.8),
-                    timeframe=bar_interval,
-                ))
-
-        # Liquidity Sweeps on primary
-        if len(data_primary) > 10:
-            sweeps = detect_liquidity_sweeps(data_primary)
-            for s in sweeps[-3:]:
-                direction = "bullish" if s.get("type") == "bullish_sweep" else "bearish"
-                tech_signals.append(TechnicalSignal(
-                    name="liquidity_sweep",
-                    direction=direction,
-                    strength=s.get("strength", 0.5),
-                    timeframe=bar_interval,
-                ))
-
-        # 3. Regime from intraday data (short-term structure, not 90-day daily)
-        # Use VIX as volatility anchor so intraday bar frequency does not skew regime volatility state.
-        intraday_vix = self.data.get_vix()
-        regime = self.regime_detector.detect(data_primary, vix=intraday_vix) if len(data_primary) >= 50 else None
-
-        # 4. Fuse with Session 23 intraday weight overrides
-        # Swap in a NEW dict with intraday-specific weights (avoids mutating class dict)
-        saved_weights = self.fusion.SIGNAL_WEIGHTS
-        current_equity = self._get_current_equity()
-        bracket = self.risk.bracket_manager.get_bracket(current_equity)
-        intraday_cfg = get("intraday", {})
-        intraday_v2_cfg = intraday_cfg.get("v2", {}) if isinstance(intraday_cfg.get("v2", {}), dict) else {}
-        intra_profile = self._apply_intraday_ab_profile(
-            self._resolve_capital_profile("intraday", current_equity).get("profile", {}),
-            symbol=symbol,
-            intraday_v2_cfg=intraday_v2_cfg,
-        )
-        saved_conf = self.fusion.min_confluence_score
-        intraday_weights = dict(saved_weights)
-        intraday_weights["vwap"] = 1.0         # Session VWAP is primary
-        intraday_weights["supertrend"] = 1.0   # Supertrend boosted
-        intraday_weights["ema"] = 0.75          # EMA 9/21 alignment
-        self.fusion.SIGNAL_WEIGHTS = intraday_weights
-        self.fusion.min_confluence_score = float(intra_profile.get("confluence_trending", saved_conf))
-
-        try:
-            signal = self.fusion.fuse(
-                symbol=symbol,
-                spot_price=spot,
-                technical_signals=tech_signals,
-                oi_signals=[],
-                regime=regime,
-                ai_sentiment=None,
-                min_rr=float(intra_profile.get("min_rr", intraday_v2_cfg.get("min_rr", 2.0))),
-            )
-        finally:
-            # Restore original weights (so swing analyze() is unaffected)
-            self.fusion.SIGNAL_WEIGHTS = saved_weights
-            self.fusion.min_confluence_score = saved_conf
-
-        # Attach ATR-based SL and limit pullback params
-        if signal and atr_value > 0:
-            signal.atr = atr_value
-            signal.entry_pullback_atr = float(self.config.get("entry_pullback_atr", 0.3))
-            if signal.stop_loss == 0 or signal.stop_loss == spot * 0.985:
-                sl = self.risk.calculate_dynamic_stop_loss(spot, atr_value, signal.direction)
-                signal.stop_loss = sl
-                risk = abs(spot - sl)
-                if risk > 0 and signal.target > 0:
-                    signal.risk_reward = round(abs(signal.target - spot) / risk, 2)
-
-        return signal
-
     def _select_intraday_interval(self) -> str:
         """Auto-select 5min vs 15min based on VIX."""
         intraday_cfg = get("intraday", {})
@@ -1431,6 +1235,10 @@ class Prometheus:
         use_backtest_generator: bool,
     ) -> Optional[Dict]:
         """Return an executable intraday signal dict for the given mode."""
+        if not use_backtest_generator:
+            logger.warning(f"Intraday fallback logic (analyze_intraday) was removed. Forcing use_backtest_generator=True for {symbol}")
+            use_backtest_generator = True
+            
         if use_backtest_generator:
             backtest_signal = self._get_intraday_backtest_signal(symbol, bar_interval)
             execution_signal = self._legacy_convert_backtest_signal_for_execution(backtest_signal)
@@ -1439,13 +1247,6 @@ class Prometheus:
                 execution_signal.setdefault("timeframe", "intraday")
             return execution_signal
 
-        signal = self.analyze_intraday(symbol, bar_interval)
-        if signal and signal.action != "HOLD":
-            execution_signal = self.refine_with_strategy(signal)
-            if execution_signal:
-                execution_signal["trade_mode"] = "intraday"
-                execution_signal.setdefault("timeframe", "intraday")
-            return execution_signal
         return None
 
     def _legacy_get_swing_backtest_signal(
@@ -7954,9 +7755,10 @@ class Prometheus:
 
         def _scan_intra(symbol):
             try:
-                signal = self.analyze_intraday(symbol, "15minute")
-                if signal and signal.action != "HOLD":
-                    return f"• {symbol}: {signal.action} (Intraday 15m)"
+                use_backtest = bool(get("intraday.use_backtest_generator", False))
+                exec_sig = self._get_intraday_signal_for_execution(symbol, "15minute", use_backtest)
+                if exec_sig and exec_sig.get("action", "HOLD") != "HOLD":
+                    return f"• {symbol}: {exec_sig.get('action')} (Intraday 15m)"
             except Exception as e:
                 pass
             return None
@@ -8118,8 +7920,9 @@ class Prometheus:
 
                 def _scan_intra_cmd(symbol):
                     try:
-                        signal = self.analyze_intraday(symbol, bar_interval)
-                        if not signal:
+                        use_backtest = bool(get("intraday.use_backtest_generator", False))
+                        exec_sig = self._get_intraday_signal_for_execution(symbol, bar_interval, use_backtest)
+                        if not exec_sig:
                             return None
                             
                         intra_data = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
@@ -8128,25 +7931,28 @@ class Prometheus:
                             regime = self.regime_detector.detect(intra_data)
                             regime_str = regime.regime.value
                             
-                        raw_confidence = signal.confidence
+                        raw_confidence = exec_sig.get("confidence", 0.5)
                         regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
                         adj_confidence = raw_confidence * regime_mult
-                        sig_count = len(signal.contributing_signals) if signal.contributing_signals else 0
                         
                         return {
                             "symbol": f"{symbol} (intraday {bar_interval})",
-                            "action": signal.action,
+                            "action": exec_sig.get("action", "HOLD"),
                             "raw_confidence": raw_confidence,
                             "adj_confidence": adj_confidence,
                             "regime": regime_str,
-                            "signal_count": sig_count,
-                            "entry_price": signal.entry_price,
-                            "stop_loss": signal.stop_loss,
-                            "target": signal.target,
-                            "risk_reward": getattr(signal, "risk_reward", 0),
-                            "reasoning": getattr(signal, "reasoning", ""),
+                            "signal_count": int(exec_sig.get("edge_score", exec_sig.get("confidence", 0) * 100)),
+                            "entry_price": exec_sig.get("entry_price", 0),
+                            "stop_loss": exec_sig.get("stop_loss", 0),
+                            "target": exec_sig.get("target", 0),
+                            "risk_reward": exec_sig.get("risk_reward", 0),
+                            "reasoning": exec_sig.get("reasoning", exec_sig.get("strategy", "")),
                             "executable": symbol not in SIGNAL_ONLY,
                             "timeframe": "intraday",
+                            "instrument": exec_sig.get("instrument", ""),
+                            "strike": exec_sig.get("strike", 0),
+                            "option_type": exec_sig.get("option_type", ""),
+                            "expiry": exec_sig.get("expiry", ""),
                         }
                     except Exception as e:
                         logger.debug(f"Intraday scan failed for {symbol}: {e}")

@@ -286,3 +286,43 @@ Alerts (optional): python-telegram-bot
 - Swing-15m is the locked execution path for paper/live alerts and execution.
 - Do not mix swing logic with a separate intraday execution path unless the user explicitly asks for it.
 - Treat 15-minute bars as the swing timeframe for this workflow; keep any intraday code isolated or disabled.
+
+---
+
+## Status Update — July 2026
+
+The following changes have been made since Session 30:
+
+### Configuration Changes (all verified in settings.yaml):
+- `intraday.enabled`: `false` → **`true`**
+- `intraday.instruments`: NIFTY 50 only → **NIFTY 50, NIFTY BANK, SENSEX**
+- Dead zone: 11:30-13:30 → **12:00-13:00**
+- Entry window: 10:00-13:45 → **09:30-14:15**
+- `ai.gemini.enabled`: `true` (broken) → **`false`** (cleanly disabled)
+- `ai.groq.enabled`: `true` (broken) → **`false`** (cleanly disabled)
+- `strategies.active_modules`: removed entirely from config
+- `intraday.v2.max_daily_trades`: 3 → **5**
+- `intraday.use_backtest_generator`: **true**
+- `swing.use_backtest_generator`: **true**
+
+### Code Changes:
+- **Deleted dead code**: `signals/cross_asset_relay.py`, `risk/loss_elimination_engine.py`, `intelligence/signal_regression.py`
+- **Fixed max_bars inconsistency**: `apex_generator.py` no longer hardcodes `max_bars: 8`. Now reads from config (`intraday.v2.time_stop_bars: 16`).
+- **Fixed signal_count placeholder**: CLI dashboard now shows real AES edge score instead of hardcoded `5`.
+- **Added two-sided optimizer check**: `run_apex_optimizer.py` now flags OOS CAGR >3x in-sample as `SUSPICIOUS` instead of `VERIFIED`.
+- **Intraday consolidation**: Legacy `analyze_intraday()` path being removed. `_get_intraday_signal_for_execution()` now unconditionally uses backtest-validated generator.
+
+### Architecture Notes:
+- The system has TWO separate signal engines (always has, now clearly documented):
+  1. **APEX** (intraday, live): VWAP, Session VWAP, EMA 9/21, SuperTrend, RSI Divergence → AES 6-factor scoring
+  2. **Swing/Pro** (research/backtest): FVG, Liquidity Sweeps, OTE, Volume Profile → Weighted fusion
+- Performance numbers from swing backtests (61.3% WR, 12.55 PF) apply to the swing engine only, NOT to APEX.
+- APEX performance: see `reports/apex_yearly_*.md` and `reports/apex_trades_*.csv`.
+
+### Deployment Status:
+- `system.mode: paper`
+- Instruments: NIFTY 50, NIFTY BANK, SENSEX
+- All 3 dead code files deleted
+- AI features cleanly disabled
+- Backtest CAGR numbers should NOT be used for forward planning (strategy design hill-climbing caveat)
+

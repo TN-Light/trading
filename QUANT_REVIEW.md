@@ -1,3 +1,17 @@
+> [!CAUTION]
+> **HISTORICAL DOCUMENT — Several modules referenced here have been DELETED.**
+> Key changes since this review was written:
+> - **`risk/loss_elimination_engine.py`**: Praised as "institutional-level risk controls" (§Risk Management) — this file has been **DELETED**. It was dead code (zero imports from main.py). The "meta-lookahead bias" warning about XGBoost/SHAP in `pattern_miner.py` is moot since this consumer no longer exists.
+> - **`intelligence/signal_regression.py`**: Referenced as live — **DELETED** (dead code).
+> - **`signals/cross_asset_relay.py`**: **DELETED** (dead code).
+> - **`alpha_intraday_engine.py`** and **`nexus_system.py`**: Referenced for backtesting — these are standalone experimental scripts, not part of the core Prometheus pipeline.
+> - **AI stack**: Groq and Gemini are now `enabled: false` (cleanly disabled), not silently failing with empty keys.
+>
+> The execution-realism findings (SL gap slippage, fixed IV=0.15 fallback) remain architecturally relevant.
+> For current system state, see `Project_Status.md`.
+
+---
+
 # Quantitative & Architectural Codebase Review
 
 ## 1. Executive Summary

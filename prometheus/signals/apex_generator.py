@@ -15,6 +15,7 @@ from .strike_gravity import StrikeGravityMapper
 from .expiry_clock import ExpiryClock
 
 from prometheus.signals.technical import calculate_vwap, calculate_session_vwap, calculate_ema, calculate_supertrend, calculate_rsi
+from prometheus.config import get as cfg_get
 from prometheus.utils.indian_market import (
     get_atm_strike,
     days_to_expiry,
@@ -29,6 +30,9 @@ from prometheus.utils.options_math import black_scholes_price, calculate_greeks
 
 from loguru import logger
 
+# Default max hold time in bars if config is missing
+_DEFAULT_MAX_BARS = 8
+
 class ApexSignalGenerator:
     def __init__(self, symbol: str):
         self.symbol = symbol
@@ -36,6 +40,11 @@ class ApexSignalGenerator:
         self.aes = AesFusionEngine()
         self.gravity = StrikeGravityMapper()
         self.expiry = ExpiryClock()
+        # Read max_bars from config — resolves the hardcode vs settings.yaml mismatch
+        self._max_bars = int(
+            cfg_get("intraday.v2.time_stop_bars",
+                     cfg_get("intraday.time_stop_bars_15min", _DEFAULT_MAX_BARS))
+        )
         self.stats = {
             "bars_checked": 0,
             "reject_confluence": 0,
@@ -346,9 +355,9 @@ class ApexSignalGenerator:
         implied_dte = int(min(pricing_dte, 4))
         dte_multiplier = DTE_MULTS.get(implied_dte, 1.0)
         
-        # Max bars allowed by velocity gate
-        max_duration_bars = 8 
-        # Intraday holding time in days (e.g. 5min bars * 8)
+        # Max bars allowed — driven by config (intraday.v2.time_stop_bars)
+        max_duration_bars = self._max_bars
+        # Intraday holding time in days
         holding_time_days = max_duration_bars / 75.0 
         
         # Worst-case theta erosion
@@ -405,7 +414,7 @@ class ApexSignalGenerator:
             "aes_factors": factors,
             "regime": qrd_state.dominant_regime,
             "strategy": "apex_intraday",
-            "max_bars": 8,  # Reduced max hold time to match velocity gate expectation
+            "max_bars": self._max_bars,
             "delta": delta,
             "strike": strike,
             "instrument_type": "options",
