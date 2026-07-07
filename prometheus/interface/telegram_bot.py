@@ -822,20 +822,19 @@ class TelegramBot:
             source_tag = ""
 
         text = (
-            f"{emoji} <b>NEW SIGNAL</b>{source_tag}\n"
-            f"{account_header}"
-            f"{symbol} | {action} | {direction}\n"
-            f"Confidence: <code>{confidence:.0%}</code> | R:R: <code>1:{rr:.1f}</code>\n"
-            f"{contract_line}"
-            f"{sizing_line}"
-            f"{cost_line}"
-            f"Entry <code>Rs {entry:,.2f}</code> | SL <code>Rs {sl:,.2f}</code> | Target <code>Rs {target:,.2f}</code>\n"
-            f"Regime: {regime.upper()} ({quality} — {wr})"
-            f"{hold_line}"
-            f"{caution}\n"
+            f"{emoji} <b>NEW TRADING SIGNAL</b>{source_tag}\n"
+            f"{account_header}\n"
+            f"<b>Symbol:</b> <code>{symbol}</code>\n"
+            f"<b>Action:</b> {action} {contract_line.replace('Contract: ', '')}\n"
+            f"<b>Entry Price:</b> Rs {entry:,.1f}\n"
+            f"<b>Stop Loss:</b> Rs {sl:,.1f}\n"
+            f"<b>Target:</b> Rs {target:,.1f}\n\n"
+            f"<i>{sizing_line.replace('Sizing: ', 'Quantity: ')}</i>"
+            f"<i>{cost_line.replace('Margin Required: ', 'Est. Capital: ')}</i>"
+            f"{hold_line}\n"
         )
         if reasoning:
-            text += f"\n<i>{reasoning[:200]}</i>"
+            text += f"\n<i>Note: {reasoning[:150]}</i>"
 
         self.send_message(text)
 

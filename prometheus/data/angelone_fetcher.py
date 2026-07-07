@@ -79,6 +79,8 @@ class AngelOneFetcher:
         self._obj = None
         self._auth_token = None
         self._login_time = None
+        import threading
+        self._lock = threading.Lock()
 
     def _login(self) -> bool:
         """Login to Angel One SmartAPI with TOTP."""
@@ -104,11 +106,12 @@ class AngelOneFetcher:
 
     def _ensure_connected(self) -> bool:
         """Ensure we have a valid session (re-login if >6 hours old)."""
-        if self._obj is None or self._login_time is None:
-            return self._login()
-        if (datetime.now() - self._login_time).total_seconds() > 6 * 3600:
-            return self._login()
-        return True
+        with self._lock:
+            if self._obj is None or self._login_time is None:
+                return self._login()
+            if (datetime.now() - self._login_time).total_seconds() > 6 * 3600:
+                return self._login()
+            return True
 
     def fetch_historical(
         self,
