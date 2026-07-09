@@ -5454,8 +5454,9 @@ class Prometheus:
         )
 
 
-        print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
-        if param_overrides and param_overrides.get("apex"):
+        _apex_enabled = apex or (param_overrides and param_overrides.get("apex"))
+        print(f'APEX PARAM: {_apex_enabled}')
+        if _apex_enabled:
             from prometheus.signals.apex_generator import ApexSignalGenerator
             apex_gen = ApexSignalGenerator(symbol)
             apex_gen.precompute(data_slice)
@@ -5870,7 +5871,9 @@ class Prometheus:
         print(f" Session: 09:45-14:30 entries | 15:15 square-off")
         print(f"{'='*70}")
 
-        if param_overrides and param_overrides.get("apex"):
+        if apex:
+            if param_overrides is None:
+                param_overrides = {}
             param_overrides = dict(param_overrides)
             param_overrides["apex"] = True
         result, engine = self._run_intraday_backtest_on_slice(
@@ -8743,7 +8746,7 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
-                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
+                bar_interval="auto",  # Let _select_intraday_interval() pick 5min/15min via VIX
                 param_overrides=intraday_overrides if intraday_overrides else None,
                 apex=getattr(args, "apex", False),
                 force_refresh=args.force_refresh,
@@ -8860,7 +8863,7 @@ def main():
                 dsq_soft=args.dsq_soft,
                 dsq_hard=args.dsq_hard,
                 dsq_min_scalar=args.dsq_min_scalar,
-                bar_interval=str(args.interval)+'minute' if str(args.interval).isdigit() else args.interval,
+                bar_interval="auto",  # Let _select_intraday_interval() pick 5min/15min via VIX
                 param_overrides=intraday_overrides if intraday_overrides else None,
                 apex=getattr(args, "apex", False),
                 force_refresh=args.force_refresh,
