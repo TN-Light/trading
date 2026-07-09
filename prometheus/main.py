@@ -5454,18 +5454,6 @@ class Prometheus:
         )
 
 
-        _apex_enabled = apex or (param_overrides and param_overrides.get("apex"))
-        print(f'APEX PARAM: {_apex_enabled}')
-        if _apex_enabled:
-            from prometheus.signals.apex_generator import ApexSignalGenerator
-            apex_gen = ApexSignalGenerator(symbol)
-            apex_gen.precompute(data_slice)
-
-            def _mock_gen(data_so_far, current_oi=None):
-                return apex_gen.generate(data_so_far, current_oi)
-
-            signal_gen = _mock_gen
-
         result = engine.run(
             data=data_slice,
             signal_generator=signal_gen,
@@ -5741,17 +5729,6 @@ class Prometheus:
 
         warmup = 20 if bar_interval == "5minute" else 10
 
-        print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
-        if param_overrides and param_overrides.get("apex"):
-            from prometheus.signals.apex_generator import ApexSignalGenerator
-            apex_gen = ApexSignalGenerator(symbol)
-            apex_gen.precompute(data_slice)
-
-            def _mock_gen(data_so_far, current_oi=None):
-                return apex_gen.generate(data_so_far, current_oi)
-
-            signal_gen = _mock_gen
-
         result = engine.run(
             data=data_slice,
             signal_generator=signal_gen,
@@ -5833,7 +5810,6 @@ class Prometheus:
         dsq_hard: float = 0.60,
         dsq_min_scalar: float = 0.25,
         param_overrides: Optional[Dict] = None,
-        apex: bool = False,
         force_refresh: bool = False,
     ):
         """Run intraday backtest — completely separate from swing backtest."""
@@ -5871,11 +5847,6 @@ class Prometheus:
         print(f" Session: 09:45-14:30 entries | 15:15 square-off")
         print(f"{'='*70}")
 
-        if apex:
-            if param_overrides is None:
-                param_overrides = {}
-            param_overrides = dict(param_overrides)
-            param_overrides["apex"] = True
         result, engine = self._run_intraday_backtest_on_slice(
             data_slice=data_intraday,
             data_daily=data_daily,
@@ -5923,7 +5894,6 @@ class Prometheus:
         dsq_hard: float = 0.60,
         dsq_min_scalar: float = 0.25,
         param_overrides: Optional[Dict] = None,
-        apex: bool = False,
         force_refresh: bool = False,
     ):
         """Intraday walk-forward validation (percentage-split, ~60 day limit)."""
@@ -5967,11 +5937,6 @@ class Prometheus:
 
         # In-sample
         print(f"\n--- IN-SAMPLE (Train: {train_start} to {train_end}) ---")
-        if apex:
-            if param_overrides is None:
-                param_overrides = {}
-            param_overrides = dict(param_overrides)
-            param_overrides["apex"] = True
         result_is, engine_is = self._run_intraday_backtest_on_slice(
             data_slice=data_train,
             data_daily=data_daily,
@@ -5998,11 +5963,6 @@ class Prometheus:
 
         # Out-of-sample
         print(f"\n--- OUT-OF-SAMPLE (Test: {test_start} to {test_end}) ---")
-        if apex:
-            if param_overrides is None:
-                param_overrides = {}
-            param_overrides = dict(param_overrides)
-            param_overrides["apex"] = True
         result_oos, engine_oos = self._run_intraday_backtest_on_slice(
             data_slice=data_test,
             data_daily=data_daily,
@@ -6290,18 +6250,6 @@ class Prometheus:
                      + (" [PARRONDO]" if parrondo else "")
                  + (" [RISK-OVERLAYS]" if (vol_target or dd_throttle or equity_curve_filter or half_capacity_mode or dsq_filter or equity_ma_sizing) else ""))
 
-
-        _apex_enabled = apex or (param_overrides and param_overrides.get("apex"))
-        print(f'APEX PARAM: {_apex_enabled}')
-        if _apex_enabled:
-            from prometheus.signals.apex_generator import ApexSignalGenerator
-            apex_gen = ApexSignalGenerator(symbol)
-            apex_gen.precompute(data_primary)
-
-            def _mock_gen(data_so_far, current_oi=None):
-                return apex_gen.generate(data_so_far, current_oi)
-
-            signal_gen = _mock_gen
 
         result = engine.run(
             data=data_primary,
@@ -8609,10 +8557,7 @@ def main():
         default=False,
         help="Raise signal quality thresholds: confluence 3.0/4.0, net edge 2.0, Kelly WR 0.35",
     )
-    parser.add_argument("--apex",
-        action="store_true",
-        default=False,
-    )
+
     parser.add_argument(
         "--intraday",
         action="store_true",
@@ -8754,7 +8699,6 @@ def main():
                 dsq_min_scalar=args.dsq_min_scalar,
                 bar_interval="auto",  # Let _select_intraday_interval() pick 5min/15min via VIX
                 param_overrides=intraday_overrides if intraday_overrides else None,
-                apex=getattr(args, "apex", False),
                 force_refresh=args.force_refresh,
             )
         else:
@@ -8871,7 +8815,6 @@ def main():
                 dsq_min_scalar=args.dsq_min_scalar,
                 bar_interval="auto",  # Let _select_intraday_interval() pick 5min/15min via VIX
                 param_overrides=intraday_overrides if intraday_overrides else None,
-                apex=getattr(args, "apex", False),
                 force_refresh=args.force_refresh,
             )
         else:
