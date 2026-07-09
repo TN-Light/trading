@@ -17,20 +17,19 @@
 - **Technical stack**: VWAP, Session VWAP, EMA 9/21 cross, SuperTrend, RSI Divergence
 - **Scoring**: AES 6-factor edge score (0–100):
   - regime_alignment: 30%, signal_confluence: 25%, volatility_support: 15%
-  - gravity_clearance: 15%, time_decay_edge: 10%, macro_flow: 5%
-- **Gates**: Confluence (≥3/5), Compression Coil / EMA21 Retest, AES threshold, TVI (theta vulnerability), Gamma Ambush (Thursdays 10:45–11:15)
-- **Sizing**: Edge-tier bounded (`get_bounded_sizing()`)
-- **Supporting modules**: `qrd_estimator.py` (QRD regime), `strike_gravity.py`, `expiry_clock.py`
-- **Config**: `intraday.enabled: true`, `intraday.use_backtest_generator: true`
+## Architecture — Signal Engine (July 2026)
 
-### 2. Swing/Pro Engine (research/backtest)
-- **Entry**: `signals/fusion.py` + `signals/technical.py`
-- **Technical stack**: VWAP, Volume Profile, FVG, Liquidity Sweeps, OTE, RSI Divergence, SuperTrend (ICT/SMC concepts)
-- **Scoring**: Weighted confluence sum (hardcoded weights in fusion.py)
+### Apex Hunter (live path — the only active signal engine)
+- **Entry**: `_make_signal_generator()` in `main.py` → `signals/fusion.py` + `signals/technical.py`
+- **Technical stack**: VWAP, Volume Profile, FVG, Liquidity Sweeps, OTE, RSI Divergence, SuperTrend, EMA (ICT/SMC concepts)
+- **Scoring**: Weighted confluence sum (`fusion.py`)
 - **Sizing**: Risk-based (`_size_position()`)
-- **Config**: `swing.use_backtest_generator: true`
+- **Intraday tuning**: V2 config overrides applied per scan (confluence thresholds, RR, time stops, dead zones, VWAP/EMA/SuperTrend alignment gates)
+- **Bar interval**: Auto-selected via VIX (≥18 → 5min, <18 → 15min)
+- **Config**: `intraday.use_backtest_generator: true`
+- **Validated**: 818 trades / 11 years, 18.7% max drawdown (swing backtest)
 
-> **Important**: Performance numbers from swing backtests (61.3% WR, 12.55 PF from `prometheus_audit_v2.md`) apply to the swing engine only, NOT to APEX. APEX performance is in `reports/apex_yearly_*.md`.
+> **Note**: A separate `apex_generator.py` was built and tested but deleted on 2026-07-09 after -58% on Bank Nifty in 30 days. All references removed. The term "Apex Hunter" now refers exclusively to `_make_signal_generator()`.
 
 ---
 
@@ -40,12 +39,11 @@
 | File | Purpose |
 |------|---------|
 | `prometheus/signals/technical.py` | VWAP, Volume Profile, FVG, Liquidity Sweeps, OTE, RSI, ATR, SuperTrend, EMA |
-| `prometheus/signals/apex_generator.py` | APEX 5-component intraday signal generator |
-| `prometheus/signals/aes_fusion.py` | AES 6-factor edge scoring (0–100) |
-| `prometheus/signals/fusion.py` | Weighted confluence engine for swing/pro signals |
+| `prometheus/signals/fusion.py` | Weighted confluence engine — primary signal path (Apex Hunter) |
+| `prometheus/signals/aes_fusion.py` | AES 6-factor edge scoring (used by fusion.py) |
 | `prometheus/signals/regime_detector.py` | AMD/Parrondo regime classification |
 | `prometheus/signals/oi_analyzer.py` | PCR, Max Pain, OI support/resistance, IV skew |
-| `prometheus/signals/qrd_estimator.py` | Quantum Regime Detection for APEX |
+| `prometheus/signals/qrd_estimator.py` | Quantum Regime Detection |
 | `prometheus/signals/strike_gravity.py` | Strike-level gravity/penalty mapping |
 | `prometheus/signals/expiry_clock.py` | Expiry session timing evaluation |
 
@@ -78,7 +76,8 @@
 | `prometheus/intelligence/llm_analyzer.py` | LLM analysis (lazy-loaded; AI currently disabled) |
 | `prometheus/interface/telegram_bot.py` | Two-way Telegram bot with proxy/SNI fallbacks |
 | `prometheus/backtest/engine.py` | Walk-forward, Monte Carlo, PBO validation |
-| `prometheus/main.py` | CLI orchestrator (~9000 lines) |
+| `prometheus/main.py` | CLI orchestrator (~8,900 lines) |
+| `smoke_test_quick.py` | Pre-commit 4-check smoke test |
 
 ---
 
@@ -86,6 +85,7 @@
 - `signals/cross_asset_relay.py` — dead code, zero imports
 - `risk/loss_elimination_engine.py` — dead code, zero imports
 - `intelligence/signal_regression.py` — dead code, zero imports
+- `signals/apex_generator.py` — deleted 2026-07-09; -58% on Bank Nifty; replaced by Apex Hunter
 
 ---
 
@@ -136,21 +136,35 @@
 | `swing.use_backtest_generator` | `true` |
 | `ai.gemini.enabled` | `false` (cleanly disabled) |
 | `ai.groq.enabled` | `false` (cleanly disabled) |
-| Entry window | 09:30–14:15 |
-| Dead zone | 12:00–13:00 |
+| Entry window | 09:30–14:30 |
+| Dead zone | 11:30–13:30 |
+| Square-off | 15:15 |
+| Max daily loss | Rs 15,000 |
+| Max positions | 6 |
+| Drawdown halt | 50% |
 | `intraday.v2.max_daily_trades` | 5 |
-| `intraday.v2.time_stop_bars` | 16 (APEX reads from config) |
 
 ### Paper Mode Risk Overrides (currently active)
 Paper mode uses relaxed limits (`100%` thresholds, `150%` position size) for uninterrupted statistics collection. **Base risk limits must be verified before live deployment.**
 
 ---
 
-## Operational Notes
-- **Swing-15m** is the locked execution path for paper/live
-- The legacy `analyze_intraday()` path is being consolidated (`use_backtest_generator=True` unconditionally)
-- Walk-forward optimizer (`run_apex_optimizer.py`) validates 4 hyperparameters with **two-sided OOS check** (rejects both degradation AND suspiciously good OOS)
-- Backtest CAGR numbers should NOT be used for forward planning (strategy design hill-climbing caveat)
+## Known Bugs Fixed (July 2026)
+| Bug | Impact | Fixed |
+|-----|--------|-------|
+| `--interval 300` misused as bar interval → `300minute` candles | Zero trades in backtest | ✅ 2026-07-09 |
+| `--apex` flag silently ignored (apex param never wired) | Backtest used wrong engine | ✅ 2026-07-09 (then flag removed) |
+| Duplicate process on reboot (3 startup mechanisms) | 2 live processes running simultaneously | ✅ 2026-07-09 |
+| Telegram credentials empty | No signals delivered | ✅ 2026-07-09 |
+
+---
+
+## Pre-Commit Checklist
+Run before every `git push`:
+```powershell
+python smoke_test_quick.py
+```
+Catches: ImportErrors, CLI crashes, 300minute regression, zero-trade regression.
 
 ---
 
