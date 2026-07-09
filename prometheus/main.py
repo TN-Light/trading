@@ -5923,6 +5923,7 @@ class Prometheus:
         dsq_hard: float = 0.60,
         dsq_min_scalar: float = 0.25,
         param_overrides: Optional[Dict] = None,
+        apex: bool = False,
         force_refresh: bool = False,
     ):
         """Intraday walk-forward validation (percentage-split, ~60 day limit)."""
@@ -5961,12 +5962,14 @@ class Prometheus:
         print(f" INTRADAY WALK-FORWARD: {symbol} | {bar_interval}")
         print(f" Train: {train_start} to {train_end} ({len(data_train)} bars)")
         print(f" Test:  {test_start} to {test_end} ({len(data_test)} bars)")
-        print(f" WARNING: Limited data (~60 days via yfinance)")
+        print(f" NOTE: Data window limited to ~60 days for intraday bars")
         print(f"{'='*70}")
 
         # In-sample
         print(f"\n--- IN-SAMPLE (Train: {train_start} to {train_end}) ---")
-        if param_overrides and param_overrides.get("apex"):
+        if apex:
+            if param_overrides is None:
+                param_overrides = {}
             param_overrides = dict(param_overrides)
             param_overrides["apex"] = True
         result_is, engine_is = self._run_intraday_backtest_on_slice(
@@ -5995,7 +5998,9 @@ class Prometheus:
 
         # Out-of-sample
         print(f"\n--- OUT-OF-SAMPLE (Test: {test_start} to {test_end}) ---")
-        if param_overrides and param_overrides.get("apex"):
+        if apex:
+            if param_overrides is None:
+                param_overrides = {}
             param_overrides = dict(param_overrides)
             param_overrides["apex"] = True
         result_oos, engine_oos = self._run_intraday_backtest_on_slice(
@@ -6286,8 +6291,9 @@ class Prometheus:
                  + (" [RISK-OVERLAYS]" if (vol_target or dd_throttle or equity_curve_filter or half_capacity_mode or dsq_filter or equity_ma_sizing) else ""))
 
 
-        print(f'APEX PARAM: {param_overrides.get("apex") if param_overrides else False}')
-        if param_overrides and param_overrides.get("apex"):
+        _apex_enabled = apex or (param_overrides and param_overrides.get("apex"))
+        print(f'APEX PARAM: {_apex_enabled}')
+        if _apex_enabled:
             from prometheus.signals.apex_generator import ApexSignalGenerator
             apex_gen = ApexSignalGenerator(symbol)
             apex_gen.precompute(data_primary)
