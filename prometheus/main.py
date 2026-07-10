@@ -8189,6 +8189,13 @@ class Prometheus:
             except Exception:
                 lines.append(f"\u26aa {symbol}:  <i>intraday error</i>")
 
+        lines.extend([
+            "",
+            "─────────────────────────",
+            "<i>ℹ️ WR = historical win rate when a valid setup formed in this regime.</i>",
+            "<i>HIGH regime ≠ signal now. System waits for full confluence before alerting.</i>",
+        ])
+
         return "\n".join(lines)
 
     def _tg_cmd_positions(self, args: str = "") -> str:
