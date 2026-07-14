@@ -140,6 +140,10 @@ intraday:
   - NIFTY 50
   - NIFTY BANK
   - SENSEX
+  - NIFTY MIDCAP SELECT
+  - HDFCBANK
+  - TATAMOTORS
+  - ICICIBANK
   bar_interval: auto
   use_backtest_generator: true
   breakeven_ratio: 0.4
@@ -148,6 +152,10 @@ intraday:
   - NIFTY 50
   - NIFTY BANK
   - SENSEX
+  - NIFTY MIDCAP SELECT
+  - HDFCBANK
+  - TATAMOTORS
+  - ICICIBANK
   last_entry_time: '14:30'
   max_daily_trades: 3
   risk_per_trade_pct: 2.0
@@ -184,7 +192,7 @@ intraday:
       target_premium_rs: 200.0
       trendday_breakout_override_atr: 0.6
       trendday_persistence_min: 0.45
-      trendday_prefilter: true
+      trendday_prefilter: false
       use_oi_pcr_filter: false
       vix_buy_only_above: 18.0
       vix_sell_only_below: 12.0
@@ -286,10 +294,10 @@ intraday:
         min_rr: 1.8
         target_atr_mult: 2.8
         time_stop_bars: 12
-    require_ema_alignment: true
-    require_supertrend_alignment: true
+    require_ema_alignment: false
+    require_supertrend_alignment: false
     require_volume_surge: false
-    require_vwap_alignment: true
+    require_vwap_alignment: false
     skip_1dte_buying: true
     symbol_overrides:
       NIFTY 50:
@@ -307,11 +315,11 @@ intraday:
     time_stop_bars: 16
     trendday_breakout_override_atr: 0.6
     trendday_persistence_min: 0.45
-    trendday_prefilter: true
+    trendday_prefilter: false
     use_oi_pcr_filter: false
     use_second_window: true
-    vix_buy_only_above: 18.0
-    vix_sell_only_below: 12.0
+    vix_buy_only_above: 25.0
+    vix_sell_only_below: 9.0
     vol_adaptive_trailing: true
     weight_ema: 1.0
     weight_supertrend: 1.25

@@ -450,9 +450,9 @@ class DataEngine:
         """Resolve provider priority based on mode and data characteristics."""
         sources: List[str] = []
 
-        # Hardcode override: try local CSV first for large NIFTY intraday backtests,
-        # but still allow fallbacks if the file is missing or stale.
-        if symbol == "NIFTY 50" and interval in ["5minute", "5m"]:
+        # Hardcode override: try local CSV first for large intraday backtests
+        import os
+        if os.path.exists(f"dataset/{symbol}_{interval}.csv"):
             sources.append("csv")
 
         if self.historical_source != "auto":
@@ -492,16 +492,7 @@ class DataEngine:
         """Fetch raw OHLCV data from a specific source."""
         if source == "csv":
             import os, pandas as pd
-            file_map = {
-                "5minute": "dataset/NIFTY 50_5minute.csv",
-                "5m": "dataset/NIFTY 50_5minute.csv",
-                "minute": "dataset/NIFTY 50_minute.csv",
-                "1m": "dataset/NIFTY 50_minute.csv",
-            }
-            if symbol != "NIFTY 50" or interval not in file_map:
-                logger.warning(f"CSV not supported for {symbol} / {interval}")
-                return pd.DataFrame()
-            filepath = file_map[interval]
+            filepath = f"dataset/{symbol}_{interval}.csv"
             if not os.path.exists(filepath):
                 logger.warning(f"File not found: {filepath}")
                 return pd.DataFrame()
@@ -534,6 +525,19 @@ class DataEngine:
                 "minute": "1m",
             }
             yf_interval = yf_interval_map.get(interval, "1d")
+            # yfinance limits intraday data (1m, 5m, 15m, 1h) to the last 60 days.
+            # If we request exactly 60 days, timezone offsets can push it over the limit,
+            # causing the entire download to fail. Cap at 50 days to ensure success.
+            if yf_interval in ("1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"):
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                    if (end_dt - start_dt).days >= 60:
+                        start_date = (end_dt - timedelta(days=50)).strftime("%Y-%m-%d")
+                        logger.info(f"yfinance: Capped historical intraday fetch days to 50 for {symbol} to fit 60d limit")
+                except Exception:
+                    pass
+            
             return self.yf.get_historical_data(symbol, start_date, end_date, yf_interval)
 
         logger.warning(f"Unknown source '{source}'")
@@ -580,7 +584,8 @@ class DataEngine:
         # bypass shared cache so provider comparisons stay deterministic.
         use_cache = (self.historical_source == "auto") and (not force_refresh)
         # Always bypass cache for large intraday requests targeting CSV overrides
-        if symbol == "NIFTY 50" and interval in ["5minute", "5m"]:
+        import os
+        if os.path.exists(f"dataset/{symbol}_{interval}.csv"):
             use_cache = False
             
         if use_cache:

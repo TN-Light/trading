@@ -59,6 +59,10 @@ class ScanData:
             except Exception:
                 pass
 
+    @property
+    def is_usable(self) -> bool:
+        return self.status in (DataStatus.OK, DataStatus.STALE)
+
 
 @dataclass
 class SignalResult:

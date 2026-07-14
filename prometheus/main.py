@@ -1007,14 +1007,14 @@ class Prometheus:
         bar_interval: str,
     ) -> Optional[Dict]:
         """Generate intraday signal using backtest signal generator logic."""
-        data_primary = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+        data_primary = self.data.fetch_intraday(symbol, interval=bar_interval, days=30)
         if data_primary.empty:
             return None
 
         if bar_interval == "5minute":
             data_bias = self.data.fetch_historical(symbol, days=10, interval="15minute")
         else:
-            data_bias = self.data.fetch_historical(symbol, days=30, interval="60minute")
+            data_bias = self.data.fetch_historical(symbol, days=60, interval="60minute")
 
         data_daily = self.data.fetch_historical(symbol, days=120, interval="day")
         regime_state = self.regime_detector.detect(data_daily) if len(data_daily) >= 50 else None

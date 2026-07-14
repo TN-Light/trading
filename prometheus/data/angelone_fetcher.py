@@ -151,6 +151,7 @@ class AngelOneFetcher:
         all_candles = []
         chunk_start = start_date
         request_count = 0
+        chunk_failed = False
 
         logger.info(f"Angel One: fetching {symbol} {interval} data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')} ({days} days)")
 
@@ -166,28 +167,48 @@ class AngelOneFetcher:
             }
 
             # Retry with exponential backoff for rate limiting
-            max_retries = 3
+            max_retries = 5
+            success = False
             for attempt in range(max_retries):
                 try:
+                    # Enforce a small delay before call to avoid slamming API
+                    time.sleep(0.5)
                     result = self._obj.getCandleData(params)
 
                     if result and result.get("status") and result.get("data"):
                         candles = result["data"]
                         all_candles.extend(candles)
                         request_count += 1
+                        success = True
 
                         if request_count % 20 == 0:
                             logger.info(f"  ... fetched {len(all_candles)} candles so far ({chunk_start.strftime('%Y-%m-%d')})")
                         break  # Success, exit retry loop
 
-                    # Rate limiting: ~3 requests/sec to be safe
-                    time.sleep(0.35)
-                    break  # No data but no error, don't retry
+                    # Check for rate limit returned as a dict (status=False, errorcode=AB1021)
+                    if result and not result.get("status"):
+                        err_code = str(result.get("errorcode", ""))
+                        err_msg = str(result.get("message", ""))
+                        if err_code == "AB1021" or "too many requests" in err_msg.lower():
+                            wait = round(2 * (1.5 ** attempt), 1)
+                            logger.warning(f"Angel One rate limited (AB1021) at {chunk_start.strftime('%Y-%m-%d')} (attempt {attempt+1}/{max_retries}), waiting {wait}s...")
+                            time.sleep(wait)
+                            if attempt == max_retries - 1:
+                                logger.error(f"Angel One: chunk {chunk_start.strftime('%Y-%m-%d')} failed after {max_retries} retries (AB1021)")
+                            continue  # Retry!
+
+                    # No data but no error, don't retry
+                    break
 
                 except Exception as e:
                     err_msg = str(e)
-                    if "exceeding access rate" in err_msg.lower() or "access denied" in err_msg.lower():
-                        wait = (2 ** attempt)  # 1s, 2s, 4s
+                    is_rate_limit = (
+                        "exceeding access rate" in err_msg.lower() or 
+                        "access denied" in err_msg.lower() or 
+                        "ab1021" in err_msg.lower()
+                    )
+                    if is_rate_limit:
+                        wait = round(2 * (1.5 ** attempt), 1)  # 2s, 3s, 4.5s, 6.8s, 10.1s
                         logger.warning(f"Angel One rate limited at {chunk_start.strftime('%Y-%m-%d')} (attempt {attempt+1}/{max_retries}), waiting {wait}s...")
                         time.sleep(wait)
                         if attempt == max_retries - 1:
@@ -197,9 +218,17 @@ class AngelOneFetcher:
                         time.sleep(1)
                         break  # Non-rate-limit errors don't benefit from retry
 
+            if not success:
+                chunk_failed = True
+                break
+
             # Small delay between chunks to avoid rate limits
-            time.sleep(0.35)
+            time.sleep(0.4)
             chunk_start = chunk_end
+
+        if chunk_failed:
+            logger.error(f"Angel One: data fetch failed because one or more chunks failed for {symbol}")
+            return pd.DataFrame()
 
         if not all_candles:
             logger.warning(f"Angel One: no data returned for {symbol} {interval}")
