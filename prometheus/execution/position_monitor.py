@@ -481,6 +481,14 @@ class PositionMonitor:
                 # Track last increment per-position using _last_bar_ts
                 last_ts = getattr(state, "_last_bar_ts", None)
                 if last_ts is None:
+                    try:
+                        entry_dt = datetime.strptime(state.entry_time, "%Y-%m-%d %H:%M:%S")
+                        elapsed_sec = (now - entry_dt).total_seconds()
+                        if elapsed_sec > 0:
+                            state.entry_bar_count = int(elapsed_sec // (interval_minutes * 60))
+                            logger.info(f"[MONITOR] Initialized bar count for {state.position_id} to {state.entry_bar_count} based on entry time {state.entry_time}")
+                    except Exception as e:
+                        logger.error(f"[MONITOR] Error parsing entry_time for {state.position_id}: {e}")
                     state._last_bar_ts = now
                     continue
 

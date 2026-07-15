@@ -52,8 +52,10 @@ class ExecutionGate:
         symbol = signal.symbol
         
         # 1. Symbol daily dedup
+        from prometheus.config import get
+        allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", False))
         dedup_key = f"{symbol}_{signal.direction}"
-        if dedup_key in self._today_traded:
+        if dedup_key in self._today_traded and not allow_mult:
             reason = f"{symbol} already traded today in {signal.direction} direction"
             logger.info(f"ExecutionGate: REJECT — {reason}")
             return GateResult(

@@ -751,12 +751,7 @@ class TelegramBot:
                     friendly_contract = f"{symbol} {mon} {strike_str} {option_type}"
                 else:
                     day = d.day
-                    if 11 <= day <= 13:
-                        suffix = "th"
-                    else:
-                        suffix = {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
-                    day_str = f"{day:02d}{suffix}"
-                    friendly_contract = f"{symbol} {day_str} {mon} {strike_str} {option_type}"
+                    friendly_contract = f"{symbol} {day} {mon} {strike_str} {option_type}"
             except Exception as e:
                 logger.error(f"Error formatting friendly contract name: {e}")
 

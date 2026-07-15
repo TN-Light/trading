@@ -375,6 +375,7 @@ class OrderManager:
         state = None
     ) -> Optional[float]:
         """Close a managed position and return realized P&L."""
+        from prometheus.execution.broker import Order, OrderSide, OrderType, OrderStatus
         if position_id not in self.managed_positions:
             if state is not None:
                 # Reconstruct ManagedPosition from state and broker
@@ -392,7 +393,6 @@ class OrderManager:
                     qty = get_lot_size(state.symbol)
                 
                 # Reconstruct entry order
-                from prometheus.execution.broker import Order, OrderSide, OrderType, OrderStatus
                 dummy_entry = Order(
                     symbol=state.symbol,
                     tradingsymbol=state.tradingsymbol,

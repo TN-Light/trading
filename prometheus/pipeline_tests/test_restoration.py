@@ -82,6 +82,8 @@ def test_restoration_logic():
     # Bind the actual main.py _restore_persisted_positions to our MockController
     from prometheus.main import Prometheus
     ctrl._restore_persisted_positions = Prometheus._restore_persisted_positions.__get__(ctrl, MockController)
+    ctrl._parse_strike_otype_from_tradingsymbol = Prometheus._parse_strike_otype_from_tradingsymbol.__get__(ctrl, MockController)
+    ctrl._parse_expiry_from_tradingsymbol = Prometheus._parse_expiry_from_tradingsymbol.__get__(ctrl, MockController)
 
     # Execute restoration
     ctrl._restore_persisted_positions()

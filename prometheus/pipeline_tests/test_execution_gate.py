@@ -14,6 +14,7 @@ Covers:
 
 import pytest
 from datetime import date
+from unittest.mock import patch
 from prometheus.pipeline.types import ExecutableSignal, GateVerdict
 from prometheus.pipeline.execution_gate import ExecutionGate
 
@@ -73,8 +74,10 @@ class TestExecutionGatePass:
 class TestExecutionGateReject:
     """Test cases where signals should be rejected."""
     
-    def test_duplicate_symbol_rejected(self):
+    @patch("prometheus.config.get")
+    def test_duplicate_symbol_rejected(self, mock_get):
         """Same symbol on same day rejected."""
+        mock_get.return_value = False
         gate = ExecutionGate(max_positions=3)
         
         result1 = gate.check(_make_executable("NIFTY 50", bar_ts="2026-01-05 10:30:00"))

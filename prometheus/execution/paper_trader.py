@@ -479,7 +479,12 @@ class PaperTrader(BrokerBase):
             price = order.price if order.price > 0 else self._price_feed.get(order.tradingsymbol, 100)
             return price * order.quantity
         else:
-            # Option selling requires higher margin — estimate 3x premium
+            # If we hold a long position for this symbol/tradingsymbol, closing it does NOT require margin/cash.
+            pos = self.positions.get(order.tradingsymbol)
+            if pos and pos.quantity > 0:
+                return 0.0
+            
+            # Otherwise, option selling requires higher margin — estimate 3x premium
             price = order.price if order.price > 0 else self._price_feed.get(order.tradingsymbol, 100)
             return price * order.quantity * 3
 

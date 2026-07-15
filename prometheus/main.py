@@ -2034,6 +2034,31 @@ class Prometheus:
         )
         self.position_monitor.start()
 
+        if isinstance(self.broker, PaperTrader):
+            self._start_paper_price_refresher()
+
+    def _start_paper_price_refresher(self):
+        """Start a background thread that continuously updates open paper options prices."""
+        import threading
+        from prometheus.utils.indian_market import is_trading_day
+
+        def _loop():
+            # Initial sleep to allow smartConnect to log in
+            time.sleep(15)
+            logger.info("Paper price refresher thread: starting loop")
+            while self.running:
+                try:
+                    now = datetime.now()
+                    if is_trading_day(now.date()) and getattr(self.data, "angelone_options", None):
+                        self._refresh_open_paper_prices()
+                except Exception as e:
+                    logger.error(f"Error in paper price refresher loop: {e}")
+                time.sleep(30)
+
+        t = threading.Thread(target=_loop, daemon=True, name="paper-price-refresher")
+        t.start()
+        logger.info("Paper price refresher thread started (refreshes every 30s)")
+
     def _lookup_spot_close_for_trade_date(self, symbol: str, trade_date: date) -> Optional[float]:
         """Resolve best available underlying close for a trade date.
 
@@ -2499,6 +2524,22 @@ class Prometheus:
                 managed.sl_order_id = row.get("sl_order_id", "")
                 managed.max_bars = row.get("max_bars", 7)
                 managed.breakeven_ratio = row.get("breakeven_ratio", 0.6)
+                strike = float(row.get("strike") or 0.0)
+                otype = row.get("option_type", "")
+                if (strike <= 0 or not otype) and managed.tradingsymbol:
+                    parsed_strike, parsed_otype = self._parse_strike_otype_from_tradingsymbol(managed.tradingsymbol, managed.symbol)
+                    if parsed_strike > 0:
+                        strike = parsed_strike
+                    if parsed_otype:
+                        otype = parsed_otype
+                managed.strike = strike
+                managed.option_type = otype
+                
+                # Restore expiry_date by parsing tradingsymbol
+                parsed_exp = self._parse_expiry_from_tradingsymbol(managed.tradingsymbol, managed.symbol)
+                if parsed_exp:
+                    managed.expiry_date = parsed_exp
+                
                 if ma_label:
                     managed._multi_account_label = ma_label
                 
@@ -3289,6 +3330,8 @@ class Prometheus:
             on_state_changed=self._handle_state_persist,
         )
         self.position_monitor.start()
+        if isinstance(self.broker, PaperTrader):
+            self._start_paper_price_refresher()
         self._restore_equity_state()
         self._restore_persisted_positions()
 
@@ -3468,8 +3511,9 @@ class Prometheus:
 
                 logger.info(f"{mode_label}: Scanning ({bar_interval}, next in {scan_interval}s)...")
 
+                allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", False))
                 for symbol in intraday_instruments:
-                    if symbol in _today_traded_symbols:
+                    if symbol in _today_traded_symbols and not allow_mult:
                         continue
 
                     refined = self._get_intraday_signal_for_execution(
@@ -8310,18 +8354,97 @@ class Prometheus:
                             from datetime import date
                             d = date(2000 + yy, month, dd)
                             mon = d.strftime("%b").upper()
-                            if 11 <= dd <= 13:
-                                suffix = "th"
-                            else:
-                                suffix = {1: "st", 2: "nd", 3: "rd"}.get(dd % 10, "th")
-                            day_str = f"{dd:02d}{suffix}"
-                            return f"{underlying} {day_str} {mon} {strike} {otype}"
+                            return f"{underlying} {dd} {mon} {strike} {otype}"
                     except Exception:
                         pass
             
             return f"{underlying} {date_part} {strike} {otype}"
         except Exception:
             return tradingsymbol
+
+    def _parse_expiry_from_tradingsymbol(self, tsym: str, symbol: str) -> str:
+        """Parse expiry date YYYY-MM-DD from NSE token/tradingsymbol format."""
+        try:
+            if not tsym:
+                return ""
+            INDEX_MAP = {
+                'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY',
+                'FINNIFTY': 'FINNIFTY', 'MIDCPNIFTY': 'MIDCPNIFTY',
+                'SENSEX': 'SENSEX',
+            }
+            underlying = ""
+            for name in INDEX_MAP:
+                if tsym.startswith(name):
+                    underlying = name
+                    break
+            if not underlying:
+                underlying = symbol.upper() if symbol else ""
+            if not underlying or not tsym.startswith(underlying):
+                return ""
+
+            body = tsym[len(underlying):]
+            if body.endswith("CE") or body.endswith("PE"):
+                body = body[:-2]
+            else:
+                return ""
+
+            date_part = body[:5].upper() if len(body) >= 5 else ""
+            if len(date_part) == 5:
+                if not date_part[2:].isalpha():
+                    # Weekly: e.g. 26721
+                    yy = int(date_part[0:2])
+                    m_char = date_part[2]
+                    dd = int(date_part[3:5])
+                    m_map = {
+                        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
+                        "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12
+                    }
+                    month = m_map.get(m_char)
+                    if month and 1 <= dd <= 31:
+                        return f"20{yy:02d}-{month:02d}-{dd:02d}"
+            return ""
+        except Exception:
+            return ""
+
+    def _parse_strike_otype_from_tradingsymbol(self, tsym: str, symbol: str) -> tuple:
+        """Parse strike (float) and option_type (str) from NSE token/tradingsymbol format."""
+        try:
+            if not tsym:
+                return 0.0, ""
+            INDEX_MAP = {
+                'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY',
+                'FINNIFTY': 'FINNIFTY', 'MIDCPNIFTY': 'MIDCPNIFTY',
+                'SENSEX': 'SENSEX',
+            }
+            underlying = ""
+            for name in INDEX_MAP:
+                if tsym.startswith(name):
+                    underlying = name
+                    break
+            if not underlying:
+                underlying = symbol.upper() if symbol else ""
+            if not underlying or not tsym.startswith(underlying):
+                return 0.0, ""
+
+            body = tsym[len(underlying):]
+            if body.endswith("CE"):
+                option_type = "CE"
+                body = body[:-2]
+            elif body.endswith("PE"):
+                option_type = "PE"
+                body = body[:-2]
+            else:
+                return 0.0, ""
+
+            if len(body) > 5:
+                strike_str = body[5:]
+                try:
+                    return float(strike_str), option_type
+                except ValueError:
+                    pass
+            return 0.0, ""
+        except Exception:
+            return 0.0, ""
 
     def _tg_cmd_set_price(self, args: str = "") -> str:
         """Handle /set_price — push synthetic LTP for dry-run testing.
