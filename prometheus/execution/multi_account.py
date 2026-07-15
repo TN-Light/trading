@@ -44,8 +44,12 @@ class AccountStack:
         if config.capital_overrides:
             merged_risk["capital_config_override"] = config.capital_overrides
         self.risk = RiskManager(merged_risk, config.initial_capital)
-        self.order_manager = OrderManager(self.trader, self.risk, "paper")
+        self.order_manager = OrderManager(self.trader, self.risk, "paper", config.label)
         self.equity_curve: List[float] = [config.initial_capital]
+
+    @property
+    def broker(self) -> PaperTrader:
+        return self.trader
 
     def get_summary(self) -> Dict:
         """Return current account state for dashboard display."""

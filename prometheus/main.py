@@ -689,6 +689,13 @@ class Prometheus:
             expiry = refined_signal.get("expiry", "")
             if not strike:
                 return
+            # If tradingsymbol is available, parse exact expiry date from it directly to prevent mismatching with longer-dated expiries
+            if instrument and hasattr(self.data.angelone_options, "_parse_tradingsymbol"):
+                underlying = self.data.angelone_options.UNDERLYING_MAP.get(symbol, "NIFTY")
+                parsed = self.data.angelone_options._parse_tradingsymbol(instrument, underlying)
+                if parsed and parsed.get("expiry_str"):
+                    expiry = parsed["expiry_str"]
+
             # "WEEKLY" or empty = nearest expiry, pass None to skip expiry filter
             if not expiry or expiry.upper() == "WEEKLY":
                 expiry = None

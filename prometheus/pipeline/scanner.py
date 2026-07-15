@@ -694,6 +694,12 @@ class LiveScanner:
             if not strike or strike <= 0:
                 return None
             
+            if hasattr(executable, 'instrument') and executable.instrument and hasattr(client, "_parse_tradingsymbol"):
+                underlying = client.UNDERLYING_MAP.get(symbol, "NIFTY")
+                parsed = client._parse_tradingsymbol(executable.instrument, underlying)
+                if parsed and parsed.get("expiry_str"):
+                    expiry = parsed["expiry_str"]
+
             if not expiry or expiry.upper() == "WEEKLY":
                 expiry = None
             

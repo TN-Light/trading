@@ -419,6 +419,15 @@ class AngelOneOptionChain:
             symbol, expiry_date=expiry, strikes_around_atm=20, spot_price=spot_price
         )
 
+        # If expiry is None, filter to the nearest available expiry to avoid matching longer-dated contracts
+        if not expiry and contracts:
+            expiries = sorted({c.get("expiry", "") for c in contracts if c.get("expiry", "")})
+            today_iso = date.today().isoformat()
+            future_expiries = [e for e in expiries if e >= today_iso]
+            nearest_expiry = future_expiries[0] if future_expiries else (expiries[0] if expiries else None)
+            if nearest_expiry:
+                contracts = [c for c in contracts if c.get("expiry") == nearest_expiry]
+
         # Find exact match
         target = None
         for c in contracts:

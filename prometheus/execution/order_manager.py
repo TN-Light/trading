@@ -75,11 +75,13 @@ class OrderManager:
         self,
         broker: BrokerBase,
         risk_manager: RiskManager,
-        mode: str = "paper"
+        mode: str = "paper",
+        label: str = "primary"
     ):
         self.broker = broker
         self.risk = risk_manager
         self.mode = mode
+        self.label = label
         self.store = DataStore()
         self.managed_positions: Dict[str, ManagedPosition] = {}
         self._position_counter = 0
@@ -375,7 +377,6 @@ class OrderManager:
         state = None
     ) -> Optional[float]:
         """Close a managed position and return realized P&L."""
-        from prometheus.execution.broker import Order, OrderSide, OrderType, OrderStatus
         if position_id not in self.managed_positions:
             if state is not None:
                 # Reconstruct ManagedPosition from state and broker
@@ -588,4 +589,5 @@ class OrderManager:
     def _next_position_id(self) -> str:
         """Generate a unique position ID."""
         self._position_counter += 1
-        return f"POS-{datetime.now().strftime('%Y%m%d')}-{self._position_counter:04d}"
+        label_part = f"{self.label}-" if self.label != "primary" else ""
+        return f"POS-{label_part}{datetime.now().strftime('%Y%m%d')}-{self._position_counter:04d}"

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, asdict
 
 from prometheus.utils.logger import logger
 from prometheus.utils.indian_market import is_market_open, is_trading_day
+from prometheus.execution.broker import OrderStatus
 
 
 @dataclass
@@ -231,7 +232,8 @@ class PositionMonitor:
                         self._ltp_alert_sent.pop(pid, None)
                         self._process_tick(state, ltp)
                     except Exception as e:
-                        logger.error(f"PositionMonitor tick error {pid}: {e}")
+                        import traceback
+                        logger.error(f"PositionMonitor tick error {pid}: {e}\n{traceback.format_exc()}")
 
                 time.sleep(self.poll_interval)
 
@@ -420,7 +422,6 @@ class PositionMonitor:
             logger.debug(f"No SL order ID for {state.position_id}, skip modify")
             return
         try:
-            from prometheus.execution.broker import OrderStatus
             # Check if order is still pending/open
             order = self.broker.get_order_status(state.sl_order_id)
             if order.status in (OrderStatus.COMPLETE, OrderStatus.CANCELLED, OrderStatus.REJECTED):
