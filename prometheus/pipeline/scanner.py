@@ -473,6 +473,18 @@ class LiveScanner:
                 position = self._prometheus.order_manager.execute_signal(
                     exec_dict, confirm=False
                 )
+                
+                # Dispatch to multi-account stacks (e.g. paper_100k)
+                if hasattr(self._prometheus, "_dispatch_multi_account"):
+                    try:
+                        self._prometheus._dispatch_multi_account(
+                            exec_dict,
+                            is_intraday=(executable.bar_interval != "day"),
+                            bar_interval=executable.bar_interval
+                        )
+                    except Exception as mae:
+                        logger.error(f"LiveScanner: multi-account dispatch failed: {mae}")
+                
                 if position:
                     result.executed = True
                     self._notifier.notify_execution_result(executable, position)
@@ -596,6 +608,18 @@ class LiveScanner:
                     position = self._prometheus.order_manager.execute_signal(
                         exec_dict, confirm=False
                     )
+                    
+                    # Dispatch to multi-account stacks (e.g. paper_100k)
+                    if hasattr(self._prometheus, "_dispatch_multi_account"):
+                        try:
+                            self._prometheus._dispatch_multi_account(
+                                exec_dict,
+                                is_intraday=(executable.bar_interval != "day"),
+                                bar_interval=executable.bar_interval
+                            )
+                        except Exception as mae:
+                            logger.error(f"LiveScanner: multi-account dispatch failed: {mae}")
+                    
                     result = pending.get('result', SymbolScanResult(symbol=symbol))
                     if position:
                         result.executed = True
