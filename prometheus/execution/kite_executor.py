@@ -338,7 +338,7 @@ def generate_tradingsymbol(
     """
     from datetime import datetime as dt, timedelta
 
-    d = dt.strptime(expiry_date, "%Y-%m-%d")
+    d = dt.strptime(expiry_date[:10], "%Y-%m-%d")  # strip time if present e.g. '2026-07-21 00:00:00'
 
     # Strike formatting — remove .0 for whole numbers
     strike_str = str(int(strike)) if strike == int(strike) else str(strike)

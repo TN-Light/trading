@@ -1202,6 +1202,7 @@ class Prometheus:
         if lot_size > 0 and quantity > 0:
             out["lots"] = max(1, int(quantity / lot_size))
 
+            sym_upper = symbol.upper()
             # Index name → Kite underlying mapping
             INDEX_MAP = {
                 "SENSEX": "SENSEX",

@@ -95,7 +95,7 @@ capital:
       name: 2L+ Institutional
       sl_atr_mult: 1.5
   initial: 15000
-  max_correlated_exposure: 0.5
+  max_correlated_exposure: 0.9
   max_deployment: 0.45
   max_single_trade: 0.45
   reserved_cash: 0.15
