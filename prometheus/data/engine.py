@@ -472,7 +472,8 @@ class DataEngine:
                 sources.append("kite")
 
         # Prefer Angel One for intraday history when available.
-        if self.angelone and interval in intraday_intervals:
+        # Also use as fallback for daily/hourly — it supports day, 60minute, 15minute, 5minute.
+        if self.angelone:
             if "angelone" not in sources:
                 sources.append("angelone")
 
