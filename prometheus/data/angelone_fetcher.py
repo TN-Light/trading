@@ -171,9 +171,10 @@ class AngelOneFetcher:
             success = False
             for attempt in range(max_retries):
                 try:
-                    # Enforce a small delay before call to avoid slamming API
-                    time.sleep(0.5)
-                    result = self._obj.getCandleData(params)
+                    # Enforce a small delay before call and use lock to serialize API requests across threads
+                    with self._lock:
+                        time.sleep(0.5)
+                        result = self._obj.getCandleData(params)
 
                     if result and result.get("status") and result.get("data"):
                         candles = result["data"]
