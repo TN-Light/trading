@@ -743,7 +743,10 @@ class DataEngine:
                     "todate": now.strftime("%Y-%m-%d 15:30"),
                 }
                 if self.angelone._ensure_connected():
-                    result = self.angelone._obj.getCandleData(params)
+                    import time
+                    with self.angelone._lock:
+                        time.sleep(0.5)
+                        result = self.angelone._obj.getCandleData(params)
                     if result and result.get("status") and result.get("data"):
                         candles = result["data"]
                         if candles:
