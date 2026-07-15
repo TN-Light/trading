@@ -236,7 +236,72 @@ class PaperTrader(BrokerBase):
 
     def get_ltp(self, tradingsymbol: str, exchange: str = "NFO") -> float:
         """Get last price from simulated feed."""
-        return self._price_feed.get(tradingsymbol, 0.0)
+        price = self._price_feed.get(tradingsymbol, 0.0)
+        if price > 0:
+            return price
+
+        # Try translation if it looks like a Zerodha symbol
+        translated = self._translate_zerodha_to_angelone(tradingsymbol)
+        if translated:
+            price = self._price_feed.get(translated, 0.0)
+            if price > 0:
+                return price
+
+        return 0.0
+
+    def _translate_zerodha_to_angelone(self, ts: str) -> Optional[str]:
+        """Translate Zerodha symbol format to Angel One format for LTP lookup."""
+        try:
+            underlying = None
+            for prefix in ["MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "NIFTY", "SENSEX"]:
+                if ts.startswith(prefix):
+                    underlying = prefix
+                    break
+            if not underlying:
+                return None
+
+            suffix = ts[len(underlying):]
+            if len(suffix) < 7:
+                return None
+
+            if suffix.endswith("CE"):
+                option_type = "CE"
+            elif suffix.endswith("PE"):
+                option_type = "PE"
+            else:
+                return None
+            suffix = suffix[:-2]
+
+            import re
+            # 1. Weekly pattern: e.g. "2672124100" -> YY="26", Month="7", Day="21", Strike="24100"
+            m_week = re.match(r'^(\d{2})([1-9OND])(\d{2})(\d+(?:\.\d+)?)$', suffix)
+            if m_week:
+                yy, m_char, dd, strike_str = m_week.groups()
+                month_map = {
+                    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
+                    "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12
+                }
+                month = month_map.get(m_char)
+                if month:
+                    from datetime import datetime
+                    d_obj = datetime(2000 + int(yy), month, int(dd))
+                    strike_val = float(strike_str)
+                    strike_formatted = str(int(strike_val)) if strike_val == int(strike_val) else str(strike_val)
+                    return f"{underlying}{d_obj.strftime('%d%b%y').upper()}{strike_formatted}{option_type}"
+
+            # 2. Monthly pattern: e.g. "26JUL24100" -> YY="26", Month="JUL", Strike="24100"
+            m_month = re.match(r'^(\d{2})([A-Z]{3})(\d+(?:\.\d+)?)$', suffix)
+            if m_month:
+                yy, mon, strike_str = m_month.groups()
+                strike_val = float(strike_str)
+                strike_formatted = str(int(strike_val)) if strike_val == int(strike_val) else str(strike_val)
+                pattern = re.compile(rf"^{underlying}\d{{2}}{mon}{yy}{strike_formatted}{option_type}$")
+                for key in self._price_feed.keys():
+                    if pattern.match(key):
+                        return key
+        except Exception:
+            pass
+        return None
 
     def get_portfolio_value(self) -> float:
         """Total portfolio value including unrealized P&L."""
