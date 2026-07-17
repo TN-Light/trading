@@ -2009,11 +2009,26 @@ class Prometheus:
         if not getattr(self.data, "angelone_options", None):
             return
 
-        for managed in self.order_manager.managed_positions.values():
+        # FIX (audit): iterate across primary AND every multi-account stack so
+        # paper-position premiums are refreshed even when the primary account
+        # rejected the trade (e.g. capital constraints) but a sub-account holds it.
+        managed_positions = list(self.order_manager.managed_positions.values())
+        if self.multi_account:
+            for stack in self.multi_account.stacks.values():
+                managed_positions.extend(stack.order_manager.managed_positions.values())
+
+        # De-duplicate by (tradingsymbol, position_id) so the same instrument held
+        # on multiple stacks is refreshed only once per cycle.
+        seen = set()
+        for managed in managed_positions:
             if managed.status != "open":
                 continue
             if not managed.tradingsymbol:
                 continue
+            key = (managed.tradingsymbol, id(managed))
+            if key in seen:
+                continue
+            seen.add(key)
             signal = {
                 "symbol": managed.symbol,
                 "strike": managed.strike,
@@ -2572,6 +2587,36 @@ class Prometheus:
                         last_price=row["entry_premium"],
                     )
                     logger.info(f"Restored Position {row['tradingsymbol']} in PaperTrader broker (qty={qty}).")
+
+                    # FIX (audit): realise entry cash cost so eventual SELL-close refund
+                    # nets to true P&L instead of inflating available_cash by entry*qty.
+                    entry_cost = row["entry_premium"] * abs(qty)
+                    stack.broker.available_cash -= entry_cost
+                    stack.broker.used_margin   += entry_cost
+
+                    # FIX (audit): re-place broker SL-M order to restore the safety net
+                    # lost in the in-memory PaperTrader.orders dict during restart.
+                    sl_trigger = float(row.get("current_sl") or row.get("initial_sl") or 0)
+                    if sl_trigger > 0 and managed.tradingsymbol and abs(qty) > 0:
+                        try:
+                            sl_order = stack.order_manager._place_stop_loss(
+                                managed.tradingsymbol,
+                                abs(qty),
+                                sl_trigger,
+                                (managed.option_type or "CE"),
+                                managed.entry_premium,
+                            )
+                            if sl_order:
+                                managed.exit_orders.append(sl_order)
+                                managed.sl_order_id = sl_order.order_id
+                                logger.info(
+                                    f"Re-placed broker SL-M {sl_order.order_id} for "
+                                    f"{row['position_id']} @ {sl_trigger:.2f}"
+                                )
+                        except Exception as sle:
+                            logger.warning(
+                                f"Could not re-place SL-M for {row['position_id']}: {sle}"
+                            )
 
         self.position_monitor.restore_positions(states)
         if states:

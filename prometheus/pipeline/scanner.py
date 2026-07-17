@@ -641,8 +641,9 @@ class LiveScanner:
                                     self._prometheus.position_monitor.add_position(ts)
                         except Exception as e:
                             logger.warning(f"LiveScanner: trailing setup failed: {e}")
-                        
-                        self._dispatch_multi_account(exec_dict, executable)
+                        # NOTE: multi-account dispatch already occurred at line 615
+                        # (self._prometheus._dispatch_multi_account). Do NOT re-dispatch
+                        # here — the duplicate-instrument risk gate would reject anyway.
                     else:
                         self._gate.undo_pass(symbol, executable.direction)
                 except Exception as e:
