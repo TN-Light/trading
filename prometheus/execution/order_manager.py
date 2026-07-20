@@ -179,10 +179,62 @@ class OrderManager:
         # otherwise fall back to ATM calculation
         if signal.get("strike") and signal.get("instrument"):
             strike = signal["strike"]
-            tradingsymbol = signal["instrument"]
+            instrument_raw = str(signal["instrument"]).strip()
             estimated_premium = signal.get("entry_price", 0)
             lots = signal.get("lots", max(1, quantity // lot_size))
             total_qty = lots * lot_size
+
+            # Normalize the tradingsymbol to strict Kite/NSE API format.
+            # Signals sometimes arrive via strategies/trend.py:256 with a
+            # human-readable placeholder like "NIFTY 50 24150 CE" — that's not
+            # a valid tradingsymbol and the broker can never quote it. We
+            # rebuild it as "NIFTY2672124150CE" from symbol+expiry+strike here.
+            # This was the 2026-07-17 paper_100k bug: the paper broker's
+            # tradingsymbol "NIFTY 50 24150 CE" never got quote updates after
+            # the 13:19 service restart, so square-off filled at 0.0 and lost
+            # Rs 11,476.
+            from prometheus.utils.symbol_format import (
+                api_tradingsymbol, parse_api_tradingsymbol,
+            )
+            needs_regen = (
+                " " in instrument_raw
+                or instrument_raw != instrument_raw.upper()
+                or not (instrument_raw.endswith("CE") or instrument_raw.endswith("PE"))
+            )
+            if needs_regen:
+                # Resolve expiry string from signal data
+                expiry_in = signal.get("expiry")
+                expiry_str = None
+                if expiry_in:
+                    if hasattr(expiry_in, "strftime"):
+                        expiry_str = expiry_in.strftime("%Y-%m-%d")
+                    elif isinstance(expiry_in, str) and expiry_in != "WEEKLY":
+                        expiry_str = expiry_in[:10]
+                if expiry_str is None:
+                    # Fall back to nearest expiry from indian_market
+                    try:
+                        from prometheus.utils.indian_market import get_expiry_date
+                        expiry_str = get_expiry_date(symbol).strftime("%Y-%m-%d")
+                    except Exception:
+                        expiry_str = None
+
+                gen = api_tradingsymbol(symbol, expiry_str, strike, option_type)
+                if gen:
+                    tradingsymbol = gen
+                    logger.info(
+                        f"Normalized tradingsymbol '{instrument_raw}' -> "
+                        f"'{tradingsymbol}' (symbol={symbol}, expiry={expiry_str}, "
+                        f"strike={strike}, {option_type})"
+                    )
+                else:
+                    logger.warning(
+                        f"Could not normalize tradingsymbol '{instrument_raw}' "
+                        f"via symbol_format.api_tradingsymbol (expiry missing?) — "
+                        f"using raw placeholder; broker may not be able to quote it."
+                    )
+                    tradingsymbol = instrument_raw
+            else:
+                tradingsymbol = instrument_raw
         else:
             from prometheus.utils.indian_market import get_atm_strike
             spot = signal.get("spot_price", signal.get("entry_price", 0))
@@ -374,9 +426,19 @@ class OrderManager:
         self,
         position_id: str,
         reason: str = "manual",
-        state = None
+        state = None,
+        exit_price_hint: float = 0.0,
     ) -> Optional[float]:
-        """Close a managed position and return realized P&L."""
+        """Close a managed position and return realized P&L.
+
+        Args:
+            exit_price_hint: fallback fill price for the close order when the
+                broker has no live quote (e.g. square-off after Angel One feed
+                dropped). Passed down to the broker's MARKET order as
+                ``order.price`` so PaperTrader's fill logic has a non-zero floor.
+                This is the fix for the 2026-07-17 Rs 11,476 paper loss where
+                square-off filled at 0.0 because the quote feed had died.
+        """
         if position_id not in self.managed_positions:
             if state is not None:
                 # Reconstruct ManagedPosition from state and broker
@@ -455,6 +517,10 @@ class OrderManager:
                 order_type=OrderType.MARKET,
                 product=entry_order.product,
                 quantity=entry_order.filled_quantity,
+                # Pass the hint down so PaperTrader has a non-zero floor when
+                # the live quote feed has died (the 2026-07-17 square-off bug).
+                # KiteExecutor ignores this for MARKET orders anyway.
+                price=max(0.0, exit_price_hint),
                 tag=f"P-EXIT-{reason[:5]}",
             )
 

@@ -73,42 +73,28 @@ class Notifier:
             self._send('\n'.join(lines))
     
     def _make_kite_search_name(self, signal: ExecutableSignal) -> str:
-        """Generate Kite-searchable contract name.
-        
-        Kite search format: BANKNIFTY JUN 45000 CE
-        This is what users paste into Kite's search bar.
+        """Generate a Kite-app search-bar friendly name.
+
+        Format:
+          Monthly : ``NIFTY JUL 24500 CE``          (year stripped)
+          Weekly  : ``NIFTY 21st JUL 24500 CE``     (ordinal day suffix)
+
+        This is what you copy-paste into the Kite mobile app's search box, NOT
+        what the API receives. The API's tradingsymbol lives in
+        ``signal.instrument`` (e.g. ``NIFTY2672124150CE``) and is used by the
+        broker. See ``prometheus/utils/symbol_format.py`` for the full rationale.
         """
         if not signal.strike or signal.strike <= 0:
             return ''
-        
-        # Determine underlying name for Kite
-        sym = signal.symbol.upper()
-        INDEX_MAP = {
-            'SENSEX': 'SENSEX',
-            'NIFTY 50': 'NIFTY',
-            'NIFTY BANK': 'BANKNIFTY',
-            'NIFTY FIN SERVICE': 'FINNIFTY',
-            'NIFTY MIDCAP SELECT': 'MIDCPNIFTY',
-        }
-        underlying = INDEX_MAP.get(signal.symbol, sym)
-        
-        # Month from expiry date
-        month_str = ''
-        if signal.expiry:
-            try:
-                from datetime import datetime as dt
-                d = dt.strptime(signal.expiry, '%Y-%m-%d')
-                month_str = d.strftime('%b').upper()  # JUN, JUL etc.
-            except Exception:
-                month_str = ''
-        
-        strike_str = str(int(signal.strike)) if signal.strike == int(signal.strike) else str(signal.strike)
-        otype = signal.option_type or 'CE'
-        
-        if month_str:
-            return f"{underlying} {month_str} {strike_str} {otype}"
-        else:
-            return f"{underlying} {strike_str} {otype}"
+
+        # Delegate to the centralized formatter — single source of truth for
+        # underlying mapping (NIFTY 50 → NIFTY), monthly/weekly detection
+        # (post-Sep-2025 NSE Tuesday standardization preserved), and ordinal
+        # day-suffix rendering for weeklies.
+        from prometheus.utils.symbol_format import human_search_name
+        return human_search_name(
+            signal.symbol, signal.expiry, signal.strike, signal.option_type,
+        )
     
     def notify_signal_alert(self, signal: ExecutableSignal):
         """Send a detailed signal alert with Kite-searchable contract name."""

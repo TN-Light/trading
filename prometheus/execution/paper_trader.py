@@ -142,7 +142,33 @@ class PaperTrader(BrokerBase):
             else:
                 current_price = self._price_feed.get(order.tradingsymbol, order.price)
                 if current_price <= 0:
-                    current_price = order.price
+                    # 2026-07-17 fix: previously fell through to `order.price` which
+                    # was also 0 when the caller (e.g. square-off) created a MARKET
+                    # order without setting an explicit price. That caused the
+                    # position to fill at 0.0 and book the entire premium as loss
+                    # when the live quote feed had died mid-session.
+                    # Now: if the caller supplied a non-zero `order.price` (the
+                    # exit_price_hint forwarded by close_position), use it. If even
+                    # that is zero, REJECT the order instead of silently booking a
+                    # catastrophic loss — safer to leave the position open than to
+                    # print a phantom fill.
+                    if order.price > 0:
+                        current_price = order.price
+                        logger.warning(
+                            f"Paper MARKET fill falling back to order.price for "
+                            f"{order.tradingsymbol}: Rs {current_price:.2f} "
+                            f"(live quote feed unavailable)"
+                        )
+                    else:
+                        order.status = OrderStatus.REJECTED
+                        order.message = (
+                            f"No live quote for {order.tradingsymbol} and no fallback "
+                            f"price supplied. Refusing to fill at 0.0 (would book a "
+                            f"phantom loss). Place a real order with a price hint."
+                        )
+                        logger.error(f"Paper order rejected: {order.message}")
+                        self.orders[order.order_id] = order
+                        return order
 
                 # Simulate slippage (0.15% — realistic options slippage, matches backtest)
                 slippage = current_price * 0.0015

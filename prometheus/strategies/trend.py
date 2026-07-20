@@ -61,6 +61,7 @@ class TradeSetup:
     strategy: str
     signal_strength: float
     reasoning: str
+    delta: float = 0.5    # BS-derived option delta used for SL/target math
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +82,7 @@ class TradeSetup:
             "strategy": self.strategy,
             "signal_strength": self.signal_strength,
             "reasoning": self.reasoning,
+            "delta": self.delta,
         }
 
 
@@ -194,8 +196,22 @@ class TrendStrategy:
         index_sl_move = abs(entry_price_index - sl_index)
         index_target_move = abs(target_index - entry_price_index)
 
-        # Estimate option delta for more accurate SL/target
-        delta = 0.5  # ATM default
+        # Estimate option delta from BS for accurate SL/target instead of hardcoded ATM=0.5.
+        # Trend currently picks ATM strikes via `_select_strike` for ≥50K capital and 1-OTM
+        # for <50K; the actual delta for 1-OTM is ~0.30-0.40, not 0.50. Using a real delta
+        # keeps target/SL realistic and consistent with the backtest engine's re-pricing
+        # (engine.py line 1063 reads signal.get("delta", 0.5)).
+        try:
+            from prometheus.utils.options_math import calculate_greeks, OptionType
+            _T = max(dte, 1) / 365.0
+            _r = 0.07
+            _sigma = self.current_iv if self.current_iv > 0 else 0.20
+            _opt_type = OptionType.CALL if option_type == "CE" else OptionType.PUT
+            _greeks = calculate_greeks(spot_price, strike, _T, _r, _sigma, _opt_type)
+            delta = max(abs(_greeks.get("delta", 0.5)), 0.20)
+        except Exception:
+            delta = 0.5  # safe fallback if options_math unavailable
+
         option_target = premium + (index_target_move * abs(delta))
 
         risk_per_lot = (premium - option_sl) * lot_size
@@ -233,11 +249,34 @@ class TrendStrategy:
             oi_metrics, signal_strength, rr
         )
 
-        expiry_str = f"WEEKLY"  # To be resolved with actual expiry date
+        # Resolve the actual expiry ISO date string. Previously this was a
+        # placeholder "WEEKLY" string and the instrument was built as
+        # "{symbol} {strike} {option_type}" — a human-readable string that
+        # wasn't a valid tradingsymbol on either Kite or Angel One. The
+        # 2026-07-17 paper_100k bug originated here: the placeholder
+        # "NIFTY 50 24150 CE" leaked through to the broker and got zero
+        # quotes after the 13:19 service restart. We now compute the next
+        # expiry date and emit a proper NSE-format tradingsymbol.
+        from datetime import date as _date
+        try:
+            from prometheus.utils.indian_market import get_expiry_date
+            from prometheus.utils.symbol_format import api_tradingsymbol as _fmt_api_symbol
+            _expiry_date = get_expiry_date(symbol)
+            expiry_str = _expiry_date.strftime("%Y-%m-%d")
+            instrument = _fmt_api_symbol(symbol, _expiry_date, strike, option_type)
+            if not instrument:
+                # Fallback to the legacy placeholder if the formatter fails (e.g.
+                # unknown underlying). order_manager and signal_converter will
+                # attempt to re-normalize at execution time.
+                instrument = f"{symbol} {strike} {option_type}"
+        except Exception as _e:
+            logger.debug(f"Trend: tradingsymbol build failed for {symbol}: {_e}")
+            expiry_str = "WEEKLY"
+            instrument = f"{symbol} {strike} {option_type}"
 
         setup = TradeSetup(
             symbol=symbol,
-            instrument=f"{symbol} {strike} {option_type}",
+            instrument=instrument,
             action="BUY",
             option_type=option_type,
             strike=strike,
@@ -253,6 +292,7 @@ class TrendStrategy:
             strategy="trend",
             signal_strength=round(signal_strength, 3),
             reasoning=reasoning,
+            delta=float(delta),
         )
 
         log_signal("TREND", symbol, signal_strength, setup.to_dict())
