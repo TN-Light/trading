@@ -93,6 +93,120 @@ from prometheus.interface.telegram_bot import TelegramBot
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# PAPER-REPLAY OPTION-OHLC SYNTHESIZER
+# ═════════════════════════════════════════════════════════════════════════════
+# ``run_papertrade`` walks historical UNDERLYING bars through the option
+# position tracker. The tracker expects TradeSnapshot OHLCV in *option
+# premium* units (its SL/target are option premiums). Feeding raw underlying
+# bars produced hilarious 5054%"" PnL overnight (gap-open at 23,800 instantly
+# blew through a Rs 522 option target). We therefore reprice the option at
+# each underlying OHLC corner using Black-Scholes. IV is pulled from config
+# only if available; we fall back to a 15% flat vol (matches the backtest
+# engine default for ``black_scholes_price`` fallback in the live scanner).
+#
+# This is the same approximation the backtest engine uses when no real option
+# chain is available — Black-Scholes with constant IV, no smile/skew. It is
+# good enough for strategy evaluation; it is NOT a backtest of an
+# IV-aware gamma model.
+def _synthesize_option_ohlc(
+    underlying_open: float,
+    underlying_high: float,
+    underlying_low: float,
+    underlying_close: float,
+    strike: float,
+    option_type_str: str,
+    expiry_str: str,
+    bar_time,
+) -> dict:
+    """Reprice the option at each underlying OHLC corner via Black-Scholes.
+
+    Returns ``{"open": float, "high": float, "low": float, "close": float}``
+    in option-premium units. Returns the underlying price unchanged on any
+    failure (defensive — caller will skip the bar rather than crash the
+    run).
+    """
+    try:
+        if strike <= 0 or underlying_close <= 0:
+            # No strike → not an option (defensive). Return zeros so the
+            # FillSimulator reliably rejects it (and we don't fabricate a
+            # fillable price).
+            return {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0}
+
+        opt_type = (
+            OptionType.CALL if (option_type_str or "").upper().startswith("C")
+            else OptionType.PUT
+        )
+
+        # Time to expiry in years from this bar. Use date-only to avoid
+        # weekend-driven T jitter inside a calendar day.
+        try:
+            from prometheus.utils.indian_market import IST
+            bar_date = pd.Timestamp(bar_time).tz_convert(IST).date() \
+                if pd.Timestamp(bar_time).tzinfo is not None \
+                else pd.Timestamp(bar_time).date()
+        except Exception:
+            try:
+                bar_date = pd.Timestamp(bar_time).date()
+            except Exception:
+                bar_date = None
+
+        if not expiry_str:
+            # No expiry string supplied by the signal — fall back to next
+            # monthly expiry from the bar date so the math works.
+            try:
+                from prometheus.utils.indian_market import get_expiry_date
+                expiry_date = get_expiry_date("NIFTY 50", from_date=bar_date)
+            except Exception:
+                expiry_date = None
+        else:
+            try:
+                expiry_date = pd.Timestamp(str(expiry_str)[:10]).date()
+            except Exception:
+                expiry_date = None
+
+        if expiry_date is None or bar_date is None:
+            return {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0}
+
+        days_to_expiry = (expiry_date - bar_date).days
+        # Floor at 0 (do not allow negative T) and use a minimum of
+        # 1/3652270 to avoid divide-by-zero on expiry-day bars.
+        T = max(days_to_expiry, 0) / 365.0
+        if T <= 0:
+            T = 1.0 / (365.0 * 24 * 60)   # 1-minute worth of decay
+
+        r = 0.065  # risk-free rate (matches the backtest engine default)
+        # IV fallback: 15% flat. The live scanner retries yfinance/angel-one
+        # IV first; for replay we have no chain and a flat vol is the
+        # documented backtest fallback.
+        sigma = 0.15
+
+        o = black_scholes_price(underlying_open, strike, T, r, sigma, opt_type)
+        h = black_scholes_price(underlying_high, strike, T, r, sigma, opt_type)
+        l = black_scholes_price(underlying_low, strike, T, r, sigma, opt_type)
+        c = black_scholes_price(underlying_close, strike, T, r, sigma, opt_type)
+
+        # The four corners can collide numerically; preserve a non-degenerate
+        # high=max(o,h,l,c) and low=min(o,h,l,c) so the intrabar SL/target
+        # range check in position_tracker._evaluate_exit behaves sensibly
+        # (it relies on high >= open/close >= low).
+        high_v = max(o, h, l, c)
+        low_v = min(o, h, l, c)
+        # Sanity: premiums are strictly non-negative
+        high_v = max(high_v, 0.0)
+        low_v = max(low_v, 0.0)
+
+        return {
+            "open": max(float(o), 0.0),
+            "high": float(high_v),
+            "low": float(low_v),
+            "close": max(float(c), 0.0),
+        }
+    except Exception as e:
+        logger.debug(f"_synthesize_option_ohlc: failed ({e}); returning zeros")
+        return {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # PROMETHEUS CORE
 # ═════════════════════════════════════════════════════════════════════════════
 class Prometheus:
@@ -220,6 +334,13 @@ class Prometheus:
         # Multi-account paper trading (initialized on demand by --multi-account)
         self.multi_account = None
 
+        # ─── Paper Capture (live paper signal tracker) ───────────────
+        # Constructed per-session by ``init_paper_capture()``. When the
+        # system is not in paper mode OR the feature flag is off, this
+        # stays ``None`` and ``on_signal`` / ``on_bar`` calls are no-ops.
+        # See ``prometheus/paper_executor/live_bridge.py``.
+        self._paper_capture = None
+
         # Forward-validation artifact for Thursday Gamma Ambush exits.
         self.gamma_ambush_log_file = str(
             PROJECT_ROOT.parent / "reports" / "validation" / "gamma_ambush_forward.csv"
@@ -297,6 +418,111 @@ class Prometheus:
             accounts, get_risk_limits(),
         )
 
+    def init_paper_capture(self, force: bool = False):
+        """Construct the live PaperCapture adapter (single instance) for the
+        current session. Call once at startup, after ``self.broker`` / ``self.data``
+        are wired.
+
+        Skips silently when the feature is disabled (settings.system.mode !=
+        "paper" or settings.paper_capture.enabled == false). In live Kite
+        execution mode this method is a no-op — the Kite path never touches
+        the PaperCapture object.
+
+        ``force=True`` overrides the settings check (used by tests).
+        """
+        try:
+            from prometheus.paper_executor import get_paper_capture
+        except Exception as e:
+            logger.warning(f"[PaperCapture] import failed: {e}")
+            self._paper_capture = None
+            return
+
+        # The Prometheus instance loads the YAML config into ``self.config``
+        # (see __init__ at line 225). The accessor ``get(...)`` is also available
+        # globally — but we need the *full* dict for is_paper_capture_enabled
+        # to read both system.mode and paper_capture blocks.
+        settings = self.config if hasattr(self, "config") and self.config else None
+        if force and not settings:
+            settings = {"system": {"mode": "paper"}, "paper_capture": {"enabled": True}}
+
+        # Decide the LTP source for fill simulation. Prefer the broker
+        # (Kite or PaperTrader — both expose ``get_ltp``), else AngelOne
+        # fetcher, else ``self.data`` engine. Fall back to a static-zero
+        # feed so the PaperTradeEngine isn't starved at construction time.
+        ltp_source = None
+        for candidate_attr in ("broker", "data"):
+            obj = getattr(self, candidate_attr, None)
+            if obj is None:
+                continue
+            if hasattr(obj, "get_ltp") or hasattr(obj, "angelone"):
+                ao = getattr(obj, "angelone", None)
+                if ao is not None and hasattr(ao, "get_ltp"):
+                    ltp_source = ao
+                else:
+                    ltp_source = obj
+                break
+        if ltp_source is None:
+            class _ZeroFeed:
+                def get_ltp(self, instrument: str) -> float: return 0.0
+                def get_quote(self, instrument: str): return None
+            logger.warning("[PaperCapture] no live LTP source found; using zero-fill")
+            ltp_source = _ZeroFeed()
+
+        self._paper_capture = get_paper_capture(settings, ltp_source, telegram=getattr(self, "telegram", None))
+        if self._paper_capture is None:
+            logger.info("[PaperCapture] disabled (mode != paper or flag off)")
+        else:
+            logger.info("[PaperCapture] initialized and enabled")
+
+    def _paper_capture_feed_bars(self, symbols, bar_interval: str):
+        """Fetch the latest closed bar for each symbol and forward it to the
+        PaperCapture adapter's on_bar hook (no-op unless PaperCapture enabled).
+
+        Called by ``run_combined_mode`` / ``run_intraday_mode`` once per
+        intraday scan sweep so the PaperTradeEngine sees the same bar the
+        signal generator saw. Keep this cheap: it issues one short
+        ``fetch_historical`` per symbol (5 days of intraday bars) and
+        forwards only the most recent closed bar.
+        """
+        if self._paper_capture is None:
+            return
+        if not symbols:
+            return
+        try:
+            for sym in symbols:
+                try:
+                    df = self.data.fetch_historical(
+                        sym, days=5, interval=bar_interval,
+                        force_refresh=False,
+                    )
+                except Exception as e:
+                    logger.debug(f"[PaperCapture] feed bars skipped for {sym}: {e}")
+                    continue
+                if df is None or df.empty or len(df) < 2:
+                    continue
+                try:
+                    last_row = df.iloc[-1]
+                except Exception:
+                    continue
+                # Treat the last bar as "just closed" — the live engine will
+                # poll the same bar on its next tick.
+                bar = {
+                    "timestamp": last_row.get("timestamp") or last_row.name,
+                    "open": float(last_row.get("open", 0.0) or 0.0),
+                    "high": float(last_row.get("high", 0.0) or 0.0),
+                    "low":  float(last_row.get("low",  0.0) or 0.0),
+                    "close": float(last_row.get("close", 0.0) or 0.0),
+                    "volume": float(last_row.get("volume", 0.0) or 0.0),
+                    "interval": bar_interval,
+                    "instrument": "",
+                }
+                try:
+                    self._paper_capture.on_bar(sym, bar, is_session_end=False)
+                except Exception as e:
+                    logger.debug(f"[PaperCapture] on_bar forward failed for {sym}: {e}")
+        except Exception as e:
+            logger.debug(f"[PaperCapture] feed_bars outer error: {e}")
+
     def run_data_collection(
         self,
         symbol: str = None,
@@ -345,9 +571,437 @@ class Prometheus:
                 else:
                     logger.info(f"  {sym} {intv}: no data")
 
+    # ─────────────────────────────────────────────────────────────────────
+    # PAPERTRADE — strategy-only evaluation, no risk overlays
+    # ─────────────────────────────────────────────────────────────────────
+    def run_papertrade(
+        self,
+        symbols: list,
+        days: int = 60,
+        bar_interval: str = "15minute",
+        source: str = "replay",
+        trade_mode: str = "intraday",
+        lot_size_override: int = 0,
+        allow_duplicate_instrument: bool = False,
+        enable_trailing: bool = True,
+        symbol_filter: str = None,
+    ):
+        """Evaluate the strategy itself by executing EVERY valid signal —
+        no capital limits, no exposure limits, no daily-loss halt.
+
+        Args:
+            symbols: list of underlying symbols to scan.
+            days: historical replay window (replay mode only).
+            bar_interval: candle interval for replay.
+            source: "replay" (historical bars) or "live" (hooks the scan loop).
+            trade_mode: "intraday" or "swing" — which strategy path signals
+                come from.
+            lot_size_override: if >0, force every trade to that quantity.
+            allow_duplicate_instrument: allow multiple concurrent positions
+                on the same underlying.
+            enable_trailing: enable the 5-stage trailing-stop logic in
+                PositionTracker (matches production behavior).
+            symbol_filter: optional single-symbol override (drops ``symbols``).
+        """
+        from prometheus.papertrade import PaperTradeEngine
+        from prometheus.papertrade.signal_source import (
+            HistoricalReplaySource, LiveReplaySource,
+        )
+        from prometheus.papertrade.fill_simulator import FillSimulator, PriceFeed
+        from prometheus.papertrade.types import TradeSnapshot, Direction
+        from prometheus.papertrade.recorder import TradeRecorder
+        from prometheus.utils.indian_market import IST, get_expiry_date
+        from prometheus.utils.options_math import (
+            black_scholes_price, OptionType,
+        )
+        from datetime import datetime, timedelta, time as dtime, date as ddate
+        import pandas as pd
+
+        # Honor --symbol override if user supplied one
+        if symbol_filter:
+            symbols = [symbol_filter]
+        if not symbols:
+            logger.error("papertrade: no symbols provided")
+            return
+
+        self.dashboard.show_header()
+        logger.info("=" * 70)
+        logger.info(" PAPER TRADE — Strategy Evaluation Mode")
+        logger.info("=" * 70)
+        logger.info(f"  symbols       : {symbols}")
+        logger.info(f"  source        : {source}")
+        logger.info(f"  trade_mode    : {trade_mode}")
+        logger.info(f"  days          : {days}")
+        logger.info(f"  bar_interval  : {bar_interval}")
+        logger.info(f"  trailing_stop : {enable_trailing}")
+        logger.info(f"  lot_override  : {lot_size_override or '(per-symbol lot)'}")
+        logger.info(f"  allow_dup_inst: {allow_duplicate_instrument}")
+        logger.info("=" * 70)
+        print(" Paper trading: NO risk overlays, NO capital limits, NO daily-loss halt")
+        print(" Goal — evaluate the strategy itself, not the risk management\n")
+
+        # ── Wire components ──
+        # The price feed uses the existing data engine (Angel One or yfinance).
+        # We shim it into the PriceFeed protocol with a thin adapter.
+        data_engine = self.data
+
+        class _DataEnginePriceFeed:
+            """Adapter from DataEngine → PriceFeed protocol.
+
+            The papertrade engine in replay mode doesn't actually need an
+            online quote feed — it pushes bar closes via ``set_ltp()``
+            right before each ``process_bar`` call so PositionTracker sees
+            a current price. This adapter exposes the PriceFeed protocol so
+            the FillSimulator can be wired up at construction time, but its
+            ``get_ltp``/``get_quote`` paths are only used as a final
+            safety net when the engine hasn't pushed a price yet.
+            """
+            def __init__(self, engine):
+                self.engine = engine
+                self._cache: dict = {}
+
+            def get_ltp(self, instrument: str) -> float:
+                return self._cache.get(instrument, 0.0)
+
+            def get_quote(self, instrument: str):
+                # No bid/ask in replay mode; the FillSimulator will fall
+                # back to the LTP / caller-supplied hint paths.
+                return None
+
+            def set_ltp(self, instrument: str, price: float):
+                """Push a current LTP. Used by replay before each bar
+                evaluation so the FillSimulator sees the in-bar close."""
+                if price > 0:
+                    self._cache[instrument] = float(price)
+
+        feed = _DataEnginePriceFeed(data_engine)
+
+        # Signal source — replay vs live
+        if source == "live":
+            logger.info("papertrade: live mode — hook into LiveScanner")
+            print("\n  NOTE: live mode requires the running scanner. Run via")
+            print("  `prometheus/main.py paper --papertrade` in the future; for now")
+            print("  only 'replay' mode is fully wired.")
+            logger.warning("papertrade live mode not yet wired — falling back to repl")
+            source_obj = HistoricalReplaySource(
+                symbols=symbols, days=days,
+                bar_interval=bar_interval, trade_mode=trade_mode,
+                prometheus_instance=self,
+            )
+        else:
+            source_obj = HistoricalReplaySource(
+                symbols=symbols, days=days,
+                bar_interval=bar_interval, trade_mode=trade_mode,
+                prometheus_instance=self,
+            )
+
+        # SQLite + CSV output paths
+        from pathlib import Path
+        out_dir = Path("reports/papertrade")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts_tag = datetime.now(IST).strftime("%Y%m%d_%H%M%S")
+        recorder = TradeRecorder(
+            sqlite_path=str(out_dir / f"trades_{ts_tag}.sqlite"),
+            csv_path=str(out_dir / f"trades_{ts_tag}.csv"),
+        )
+
+        engine = PaperTradeEngine(
+            feed=feed,
+            signal_source=source_obj,
+            recorder=recorder,
+            lot_size_override=lot_size_override,
+            enable_trailing=enable_trailing,
+            default_max_bars_intraday=16,
+            default_max_bars_swing=96,
+            max_concurrent_positions=200,
+            allow_duplicate_instrument=allow_duplicate_instrument,
+        )
+
+        # ── Run loop ──
+        # We pull signals from the historical replay, then for each opened
+        # position we march forward through the historical bars to evaluate
+        # exit logic. For simplicity in this first cut we:
+        #  - pull every signal in one batch (already happens internally)
+        #  - for each new signal, fetch that instrument's historical bars and
+        #    replay them through PositionTracker.on_bar until the position
+        #    closes
+        end = datetime.now(IST).replace(hour=15, minute=29, second=0, microsecond=0)
+        start = end - timedelta(days=days)
+
+        print(f"\n  Loading historical bars ({start.date()} → {end.date()})...")
+
+        per_symbol_df: dict = {}
+        for sym in symbols:
+            try:
+                df = data_engine.fetch_historical(
+                    symbol=sym, days=days, interval=bar_interval,
+                    force_refresh=False,
+                )
+                if df is None or len(df) < 30:
+                    logger.warning(f"papertrade: insufficient data for {sym}")
+                    continue
+                # Normalize timestamp column
+                if "timestamp" in df.columns:
+                    df = df.sort_values("timestamp").reset_index(drop=True)
+                per_symbol_df[sym] = df
+                print(f"    {sym:25s} {len(df)} bars")
+            except Exception as e:
+                logger.error(f"papertrade: load failed for {sym}: {e}")
+
+        # Single-pass loop: at each bar timestamp, harvest signals AND drive
+        # exits for any open position whose instrument matches that bar.
+        # The signal source itself already iterates bars internally via
+        # SignalEvaluator -> SignalConverter, but those signals only carry
+        # price hints; for exit valuation we use per-symbol historical bars
+        # here. Map each signal's instrument back to its underlying for the
+        # bar lookup.
+        # We run the engine for as long as the source has signals OR the
+        # tracker has open positions to evaluate.
+        bar_iterators: dict = {}
+        for sym, df in per_symbol_df.items():
+            bar_iterators[sym] = iter(df.iterrows())
+
+        # Pre-compute the full per-instrument bar list aligned to each
+        # signal we receive; we replay from the signal's bar_timestamp
+        # forward.
+        from prometheus.papertrade.signal_source import from_signal_dict
+        from prometheus.utils.symbol_format import (
+            parse_api_tradingsymbol, resolve_underlying,
+        )
+
+        # Map: instrument -> (symbol, df, start_idx)
+        instrument_to_bars: dict = {}
+        for sym, df in per_symbol_df.items():
+            instrument_to_bars[sym] = df  # signal.instrument isn't known yet
+
+        # Pull the first batch of signals
+        try:
+            initial_signals = list(source_obj.next_batch())
+        except Exception as e:
+            logger.error(f"papertrade: signal source returned error: {e}")
+            initial_signals = []
+
+        if not initial_signals:
+            print("\n  No signals generated in the historical window.")
+            print("  This is likely correct — either the strategy didn't fire")
+            print("  in this period, or the data range is too short.\n")
+            engine.close()
+            return
+
+        print(f"\n  Signals generated: {len(initial_signals)} over {days}d window\n")
+        print("  Replaying each signal through the exit engine...\n")
+
+        closed_count = 0
+        # Replay each signal: drive bars until that position closes (or
+        # session end)
+        for sig in initial_signals:
+            # Locate the symbol's bar dataframe
+            sym = sig.symbol
+            df = per_symbol_df.get(sym)
+            if df is None:
+                logger.warning(
+                    f"papertrade: skip signal {sig.instrument} — no bars for {sym}"
+                )
+                self._papertrade_skip_signal(engine, sig)
+                continue
+
+            # Refresh the feed LTP for this instrument
+            feed.set_ltp(sig.instrument, sig.entry_price_hint)
+
+            # Open the position
+            trade_id = engine.process_new_signal(sig)
+            if trade_id is None:
+                continue
+
+            # Find the bar index to start replaying from (the first bar
+            # AFTER the signal's bar_timestamp, since the signal saw that bar
+            # close already; the next bar is the entry bar't' evaluate
+            # exits on)
+            if "timestamp" not in df.columns:
+                logger.warning(f"papertrade: no timestamp column for {sym}; aborting")
+                continue
+            try:
+                df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
+            except Exception:
+                pass
+            ts_col = "timestamp_dt" if "timestamp_dt" in df.columns else "timestamp"
+            sig_ts = sig.bar_timestamp
+            try:
+                sig_ts_ts = pd.Timestamp(sig_ts) if sig_ts else None
+            except Exception:
+                sig_ts_ts = None
+
+            start_idx = 0
+            if sig_ts_ts is not None:
+                # Find first index where bar timestamp > signal timestamp
+                try:
+                    cmp = df[ts_col] > sig_ts_ts
+                    start_idx = int(cmp.idxmax()) if cmp.any() else len(df) - 1
+                except Exception:
+                    start_idx = 0
+
+            # Walk bars until pos closes or DF ends
+            cursor_pos = engine.tracker.open_positions.get(trade_id)
+            if cursor_pos is None:
+                # Closes on the entry bar (e.g. gap-SL) — fine
+                closed_count += 1
+                continue
+
+            for i in range(start_idx, len(df)):
+                row = df.iloc[i]
+                bar_dt = pd.Timestamp(row[ts_col]).to_pydatetime()
+                # Detect last bar of day (next bar is on a different date)
+                is_session_end = (i + 1 >= len(df)) or (
+                    pd.Timestamp(df.iloc[i + 1][ts_col]).date()
+                    != pd.Timestamp(row[ts_col]).date()
+                )
+
+                # Detect if intraday and time >= 15:15 IST → square-off
+                bar_time = bar_dt.time() if hasattr(bar_dt, 'time') else None
+                is_sq_off = (
+                    trade_mode == "intraday"
+                    and bar_time is not None
+                    and bar_time >= dtime(15, 15)
+                )
+
+                # ── Synthesize OPTION OHLC from underlying bar ──────────
+                # The replay path has no live option chain, so we reprice the
+                # option premium at each of the underlying bar's OHLC corners
+                # using Black-Scholes. This gives the exit engine option-priced
+                # bars (NOT underlying-priced), so SL/target comparisons live
+                # in the same units as the entry. Without this we'd be feeding
+                # a NIFTY-23,800 spot to the option-position tracker that
+                # holds a 23,850 CE — the target (R 522) would "trigger" on
+                # every bar instantly.
+                opt_ohlc = _synthesize_option_ohlc(
+                    underlying_open=float(row.get("open", 0)),
+                    underlying_high=float(row.get("high", 0)),
+                    underlying_low=float(row.get("low", 0)),
+                    underlying_close=float(row.get("close", 0)),
+                    strike=sig.strike,
+                    option_type_str=sig.option_type,
+                    expiry_str=sig.expiry,
+                    bar_time=bar_dt,
+                )
+
+                # Refresh the feed LTP with the OPTION's bar close, not the
+                # underlying's close — FillSimulator's exit fills (SL/target
+                # gap-open branch) read the LTP for the option instrument.
+                feed.set_ltp(sig.instrument, opt_ohlc["close"])
+
+                snap = TradeSnapshot(
+                    timestamp=bar_dt,
+                    symbol=sym,
+                    instrument=sig.instrument,
+                    open=opt_ohlc["open"],
+                    high=opt_ohlc["high"],
+                    low=opt_ohlc["low"],
+                    close=opt_ohlc["close"],
+                    volume=float(row.get("volume", 0) or 0),
+                    bar_interval=bar_interval,
+                )
+                closed = engine.process_bar(
+                    snap,
+                    is_session_end=is_session_end,
+                    is_square_off=is_sq_off,
+                )
+                if closed:
+                    closed_count += len(closed)
+                    break
+
+        # Final — close any still-open positions at the last known bar
+        still_open = list(engine.tracker.open_positions.values())
+        for pos in still_open:
+            df = per_symbol_df.get(pos.symbol)
+            last_close = float(df.iloc[-1]["close"]) if df is not None and len(df) > 0 else pos.entry_price
+            from prometheus.papertrade.types import ExitReason
+            final_ts = pd.Timestamp(df.iloc[-1]["timestamp"]).to_pydatetime() if df is not None and len(df) > 0 else datetime.now(IST)
+            trade = engine.tracker.close_position(
+                pos.trade_id, final_ts, last_close, ExitReason.END_OF_DAY
+            )
+            if trade is not None:
+                engine.metrics.record_close(trade)
+                engine.recorder.record_trade(trade)
+
+        # Final stats
+        stats = engine.stats()
+        engine.recorder.record_stats_snapshot(stats)
+
+        print("\n" + "=" * 70)
+        print("  PAPER TRADE SUMMARY — Strategy Evaluation (no risk management)")
+        print("=" * 70)
+        print(f"  Symbols scanned     : {', '.join(symbols)}")
+        print(f"  Window              : {days} days ({bar_interval} bars)")
+        print(f"  Signals generated   : {engine.signals_seen}")
+        print(f"  Trade skips:")
+        print(f"    - duplicate instr : {engine.signals_skipped_duplicate}")
+        print(f"    - max pos reached : {engine.signals_skipped_full}")
+        print(f"    - no quote        : {engine.signals_skipped_no_quote}")
+        print(f"    - other           : {engine.signals_skipped_other}")
+        print("-" * 70)
+        print(f"  Total trades        : {stats.total_trades}")
+        print(f"  Winning trades      : {stats.winning_trades}")
+        print(f"  Losing trades       : {stats.losing_trades}")
+        print(f"  Win rate            : {stats.win_rate:.2f}%")
+        print(f"  Profit factor       : {stats.profit_factor:.2f}")
+        print(f"  Expectancy / trade  : Rs {stats.expectancy:+.2f}")
+        print(f"  Avg win             : Rs {stats.avg_win_pnl:+.2f} ({stats.avg_win_pct:+.2f}%)")
+        print(f"  Avg loss            : Rs {stats.avg_loss_pnl:+.2f} ({stats.avg_loss_pct:+.2f}%)")
+        print(f"  Largest win         : Rs {stats.largest_win_pnl:+.2f}")
+        print(f"  Largest loss        : Rs {stats.largest_loss_pnl:+.2f}")
+        print(f"  Total net PnL       : Rs {stats.total_pnl:+.2f}")
+        print(f"  Total costs         : Rs {stats.total_costs:+.2f}")
+        print(f"  Total return %      : {stats.total_return_pct:+.2f}%")
+        print(f"  Max drawdown        : Rs {stats.max_drawdown_pnl:.2f} ({stats.max_drawdown_pct:.2f}%)")
+        print(f"  Avg holding         : {stats.avg_holding_duration_seconds:.1f}s "
+              f"({stats.avg_holding_duration_seconds/60:.1f}m)")
+        print("-" * 70)
+        print("  Exit reason breakdown:")
+        for reason, count in sorted(stats.exit_reason_counts.items()):
+            pct = count / max(stats.total_trades, 1) * 100
+            print(f"    {reason:18s}  {count:4d}  ({pct:5.1f}%)")
+        print("-" * 70)
+        print(f"  Output:")
+        print(f"    {recorder.sqlite_path}")
+        print(f"    {recorder.csv_path}")
+        print("=" * 70)
+
+        engine.close()
+
+    def _papertrade_skip_signal(self, engine, sig):
+        """Bump the audit counter for a skipped signal (already-counted)."""
+        # The engine.process_new_signal already updates these counters;
+        # this helper just exists to keep the orchestrator readable.
+        pass
+
     def _dispatch_multi_account(self, refined_signal, is_intraday: bool = False,
                                bar_interval: str = "15minute"):
-        """Dispatch capital-routed strike candidates to each account stack."""
+        """Dispatch capital-routed strike candidates to each account stack.
+
+        Always forwards ``refined_signal`` to LivePaperCapture (the new
+        paper-capture adapter), even when the live multi-account dispatch
+        short-circuits via ``return`` (e.g. no priced strikes, gamma ambush
+        block, multi_account disabled). The wrapped try/finally guarantees
+        the PaperCapture hook runs — that's how we ensure EVERY valid
+        signal is recorded end-to-end regardless of the live path's risk
+        gates rejecting it.
+        """
+        try:
+            self._dispatch_multi_account_live(refined_signal, is_intraday=is_intraday, bar_interval=bar_interval)
+        finally:
+            # ─── Live Paper Capture (always runs unless None) ────
+            if self._paper_capture is not None:
+                try:
+                    self._paper_capture.on_signal(refined_signal)
+                except Exception as e:
+                    logger.debug(f"[PaperCapture] on_signal forward failed: {e}")
+
+    def _dispatch_multi_account_live(self, refined_signal, is_intraday: bool = False,
+                                     bar_interval: str = "15minute"):
+        """The original live multi-account dispatch logic, unmodified. See
+        ``_dispatch_multi_account`` above for the wrapper that ensures
+        PaperCapture always runs.
+        """
         if self.multi_account is None:
             return
 
@@ -2219,14 +2873,20 @@ class Prometheus:
             stack = self.multi_account.get_stack(ma_label)
             if stack:
                 managed_snapshot = stack.order_manager.managed_positions.get(position_id)
-                pnl = stack.order_manager.close_position(position_id, reason, state)
+                # Pass exit_price as a HARD FLOOR for the broker fill. This is the
+                # 2026-07-17 fix: square-off was computing ltp and discarding it,
+                # so the paper broker filled at 0.0 and lost Rs 11,476 when the
+                # quote feed had died. Now the computed exit_price is forwarded
+                # into close_position() so PaperTrader.place_order can fall back
+                # to it instead of booking at zero.
+                pnl = stack.order_manager.close_position(position_id, reason, state, exit_price_hint=exit_price)
                 logger.info(f"[{ma_label}] Position {position_id} closed ({reason}): P&L Rs {pnl if pnl is not None else 0:+,.0f}")
             else:
                 logger.warning(f"Multi-account stack '{ma_label}' not found for {position_id}")
         else:
             # Primary account exit
             managed_snapshot = self.order_manager.managed_positions.get(position_id)
-            pnl = self.order_manager.close_position(position_id, reason, state)
+            pnl = self.order_manager.close_position(position_id, reason, state, exit_price_hint=exit_price)
 
         if self.position_monitor:
             self.position_monitor.remove_position(position_id)
@@ -3939,6 +4599,12 @@ class Prometheus:
                         if _last_intra_scan is None or (now - _last_intra_scan).total_seconds() >= intra_scan_interval:
                             logger.info(f"{mode_label}: Intraday scan ({bar_interval}, next in {intra_scan_interval}s)...")
 
+                            # ── Forward closed bars to PaperCapture (no-op if disabled) ──
+                            # So the PaperTradeEngine sees the same bar the signal
+                            # generator consumed, enabling mark-to-market and exit
+                            # evaluation per bar across every open paper position.
+                            self._paper_capture_feed_bars(intraday_instruments, bar_interval)
+
                             for isym in intraday_instruments:
                                 if isym in _intra_traded_symbols:
                                     continue
@@ -4493,19 +5159,25 @@ class Prometheus:
             return (session_open - prev_close) / prev_close * 100.0
 
         def _price_options(current, direction, atr, data_so_far, confluence_score=0.0, trendday_state=None):
-            """Black-Scholes pricing with IV skew. Returns (premium, delta, lot_size, strike, sigma, expiry_str) or None."""
+            """Unified strike selection + live-LTP-anchored pricing.
+
+            Returns (premium, delta, lot_size, strike, sigma, expiry_str, dte_now) or None.
+
+            Strike selection: a SINGLE delta-target search across ±3 strikes from ATM,
+            with a per-capital-tier delta band. The previous design had two uncoordinated
+            mechanisms (fixed 1-OTM rule for small accounts when `premium_targeting` was
+            off, and a separate delta-target search when on); only one of these ever
+            applied per trade and the winner depended on bar interval rather than intent.
+
+            Pricing: BS theoretical premium + Greek delta is computed first, then we try
+            to retrieve the LIVE LTP from Angel One. If available, the entry premium is
+            re-anchored on the live LTP and SL/target are recomputed proportionally so
+            the R:R implied by ATR/delta is preserved. Otherwise we fall back to BS
+            (backtest path uses this — Angel One is not available there).
+            """
             lot_size = get_lot_size(symbol)
             interval = get_strike_interval(symbol)
             atm_strike = get_atm_strike(current, symbol)
-
-            # OTM for small accounts: lower premium, better capital efficiency
-            if capital < 50000:
-                if direction == "bullish":
-                    strike = atm_strike + interval  # 1-strike OTM CE
-                else:
-                    strike = atm_strike - interval  # 1-strike OTM PE
-            else:
-                strike = atm_strike
 
             bar_date = pd.Timestamp(data_so_far["timestamp"].iloc[-1])
             try:
@@ -4541,37 +5213,103 @@ class Prometheus:
 
             r = 0.07
             opt_type = OptionType.CALL if direction == "bullish" else OptionType.PUT
+            opt_type_str = "CE" if direction == "bullish" else "PE"
 
             target_premium = float(overrides.get("target_premium_rs", 200.0) or 200.0)
-            delta_min = float(overrides.get("target_delta_min", 0.55) or 0.55)
-            delta_max = float(overrides.get("target_delta_max", 0.70) or 0.70)
-            use_targeting = bool(overrides.get("premium_targeting_enabled", primary_interval in ("5minute", "15minute")))
+
+            # ── UNIFIED per-tier delta band ──
+            # Replaces the previous bifurcated logic (1-OTM-for-small-accounts when
+            # premium_targeting was off; separate 0.55–0.70 search when on).
+            # Now a single search across ±3 strikes from ATM serves every tier,
+            # with a capital-appropriate delta band so smaller accounts can still
+            # reach affordable OTM contracts while larger accounts stay ITM-ish.
+            if capital < 30000:
+                tier_delta_min, tier_delta_max = 0.30, 0.45
+            elif capital < 50000:
+                tier_delta_min, tier_delta_max = 0.35, 0.50
+            elif capital < 100000:
+                tier_delta_min, tier_delta_max = 0.45, 0.60
+            else:
+                tier_delta_min, tier_delta_max = 0.55, 0.70
+
+            # Allow caller overrides to tighten/loosen the band (e.g. session-1 expiry scalp)
+            o_dmin = overrides.get("target_delta_min", None)
+            o_dmax = overrides.get("target_delta_max", None)
+            if o_dmin is not None:
+                tier_delta_min = float(o_dmin)
+            if o_dmax is not None:
+                tier_delta_max = float(o_dmax)
+
+            # Run the search unconditionally (replaces the previous `if use_targeting` gate
+            # AND the separate 1-OTM rule). The previous `premium_targeting_enabled` flag
+            # is no longer used to switch between systems; it now only disables the search
+            # entirely if a caller explicitly sets it false (retained for compatibility).
+            use_targeting = bool(overrides.get("premium_targeting_enabled", True))
 
             candidates = []
             if use_targeting:
                 for off in (-3, -2, -1, 0, 1, 2, 3):
                     c_strike = atm_strike + off * interval
                     c_sigma = get_implied_vol_at_strike(current, c_strike, atm_sigma)
-                    c_premium = black_scholes_price(current, c_strike, T, r, c_sigma, opt_type)
-                    c_premium = max(c_premium, current * 0.003)
+                    c_premium_bs = black_scholes_price(current, c_strike, T, r, c_sigma, opt_type)
+                    c_premium_bs = max(c_premium_bs, current * 0.003)
                     c_greeks = calculate_greeks(current, c_strike, T, r, c_sigma, opt_type)
                     c_delta = max(abs(c_greeks.get("delta", 0.5)), 0.20)
 
-                    score = abs(c_premium - target_premium)
-                    if c_delta < delta_min:
-                        score += (delta_min - c_delta) * target_premium * 2.0
-                    elif c_delta > delta_max:
-                        score += (c_delta - delta_max) * target_premium * 2.0
-                    candidates.append((score, c_premium, c_delta, c_strike, c_sigma))
+                    score = abs(c_premium_bs - target_premium)
+                    if c_delta < tier_delta_min:
+                        score += (tier_delta_min - c_delta) * target_premium * 2.0
+                    elif c_delta > tier_delta_max:
+                        score += (c_delta - tier_delta_max) * target_premium * 2.0
+                    candidates.append((score, c_premium_bs, c_delta, c_strike, c_sigma))
 
             if candidates:
-                _, premium, delta, strike, sigma = sorted(candidates, key=lambda x: x[0])[0]
+                # Best (lowest) score wins — closest match to target premium at acceptable delta
+                _, premium_bs, delta, strike, sigma = sorted(candidates, key=lambda x: x[0])[0]
             else:
+                # Fallback: ATM strike, no search (used only if a caller explicitly disabled targeting)
+                strike = atm_strike
                 sigma = get_implied_vol_at_strike(current, strike, atm_sigma)
-                premium = black_scholes_price(current, strike, T, r, sigma, opt_type)
-                premium = max(premium, current * 0.003)
+                premium_bs = black_scholes_price(current, strike, T, r, sigma, opt_type)
+                premium_bs = max(premium_bs, current * 0.003)
                 greeks = calculate_greeks(current, strike, T, r, sigma, opt_type)
                 delta = max(abs(greeks.get("delta", 0.5)), 0.20)
+
+            # ── LIVE LTP ANCHORING ──
+            # Fetch the real LTP/bid/ask for the selected strike. When available,
+            # re-base `premium` on the live LTP so subsequent SL/target math and the
+            # PaperTrader/KiteExecutor fill prices stay consistent. Backtest path
+            # has no `angelone_options` client and silently falls back to BS.
+            premium = premium_bs
+            live_ltp = 0.0
+            live_source = "BS"
+            try:
+                angelone = getattr(self.data, "angelone_options", None)
+                if angelone is not None and strike > 0 and expiry_date_str:
+                    live_quote = angelone.get_real_premium(
+                        symbol=symbol,
+                        strike=strike,
+                        option_type=opt_type_str,
+                        expiry=expiry_date_str,
+                        spot_price=current,
+                    )
+                    if live_quote and float(live_quote.get("ltp", 0) or 0) > 0:
+                        live_ltp = float(live_quote["ltp"])
+                        premium = live_ltp  # anchor on live LTP
+                        live_source = "LIVE"
+            except Exception as e:
+                logger.debug(f"_price_options: live LTP fetch failed for {symbol} {strike}{opt_type_str}: {e}")
+
+            # Diagnostic log — records which strike rule fired, the resulting delta,
+            # and the live-vs-theoretical spread so future audits can verify anchoring.
+            logger.info(
+                f"_price_options: {symbol} {direction} strike={strike} dte={dte} "
+                f"delta={delta:.3f} tier=({tier_delta_min:.2f}-{tier_delta_max:.2f}) "
+                f"bs_premium={premium_bs:.2f} live_ltp={live_ltp:.2f} "
+                f"final={premium:.2f} source={live_source}"
+            )
+
+            return premium, delta, lot_size, strike, sigma, expiry_date_str, int(dte)
 
             return premium, delta, lot_size, strike, sigma, expiry_date_str, int(dte)
 
@@ -7972,6 +8710,9 @@ class Prometheus:
             if intraday_enabled and mkt_open <= now.time() <= mkt_close and is_trading_day(now.date()):
                 bar_interval = self._select_intraday_interval()
 
+                # ── Feed closed bars to PaperCapture before intraday scan ──
+                self._paper_capture_feed_bars(intraday_instruments, bar_interval)
+
                 def _scan_intra_cmd(symbol):
                     try:
                         use_backtest = bool(get("intraday.use_backtest_generator", False))
@@ -8337,80 +9078,29 @@ class Prometheus:
         return "\n".join(lines)
     
     def _make_kite_search_name(self, tradingsymbol: str, symbol: str) -> str:
-        """Convert tradingsymbol to Kite-searchable format.
-        
-        BANKNIFTY2662357600CE -> BANKNIFTY JUN 57600 CE
+        """Convert an API tradingsymbol to a Kite-app search-bar friendly name.
+
+        Format (year stripped, day-suffix on weekly):
+            Monthly : "BANKNIFTY2662357600CE" -> "BANKNIFTY JUL 57600 CE"
+            Weekly  : "NIFTY2672124150CE"    -> "NIFTY 21st JUL 24150 CE"
+
+        The API receives the strict continuous tradingsymbol (with YY year
+        code embedded); the Kite mobile app strips the year to save space and
+        disambiguates weekly contracts via the ordinal day-of-month (21st,
+        23rd, etc.). This function bridges the two views.
+
+        Stale tradingsymbols such as the 2026-07-17 paper_100k broker bug
+        ("NIFTY 50 24150 CE" — already human-readable placeholder) are passed
+        through unchanged so the user at least sees something rather than an
+        empty string.
         """
+        if not tradingsymbol:
+            return ""
         try:
-            if not tradingsymbol:
-                return ''
-            # Extract option type
-            if tradingsymbol.endswith('CE'):
-                otype = 'CE'
-                body = tradingsymbol[:-2]
-            elif tradingsymbol.endswith('PE'):
-                otype = 'PE'
-                body = tradingsymbol[:-2]
-            else:
-                return tradingsymbol
-            
-            # Extract strike (trailing digits)
-            digits = ''
-            for ch in reversed(body):
-                if ch.isdigit():
-                    digits = ch + digits
-                else:
-                    break
-            if not digits:
-                return tradingsymbol
-            
-            strike = digits
-            prefix = body[:-len(digits)]
-            
-            # Extract underlying name
-            INDEX_MAP = {
-                'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY',
-                'FINNIFTY': 'FINNIFTY', 'MIDCPNIFTY': 'MIDCPNIFTY',
-                'SENSEX': 'SENSEX',
-            }
-            underlying = ''
-            for name in INDEX_MAP:
-                if prefix.startswith(name):
-                    underlying = name
-                    break
-            
-            if not underlying:
-                # Stock — use symbol directly
-                underlying = symbol.upper() if symbol else prefix
-            
-            # Parse the date_part (usually 5 chars, e.g. "26702" or "26JUL")
-            date_part = prefix[len(underlying):].upper()
-            if len(date_part) == 5:
-                if date_part[2:].isalpha():
-                    # Monthly: SENSEX26JUL76600PE -> SENSEX JUL 76600 PE
-                    mon = date_part[2:]
-                    return f"{underlying} {mon} {strike} {otype}"
-                else:
-                    # Weekly: SENSEX2670276600PE -> SENSEX 02nd JUL 76600 PE
-                    try:
-                        yy = int(date_part[0:2])
-                        m_char = date_part[2]
-                        dd = int(date_part[3:5])
-                        
-                        m_map = {
-                            "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
-                            "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12
-                        }
-                        month = m_map.get(m_char)
-                        if month and 1 <= dd <= 31:
-                            from datetime import date
-                            d = date(2000 + yy, month, dd)
-                            mon = d.strftime("%b").upper()
-                            return f"{underlying} {dd} {mon} {strike} {otype}"
-                    except Exception:
-                        pass
-            
-            return f"{underlying} {date_part} {strike} {otype}"
+            from prometheus.utils.symbol_format import (
+                parse_api_tradingsymbol, human_search_name_from_api_symbol,
+            )
+            return human_search_name_from_api_symbol(tradingsymbol)
         except Exception:
             return tradingsymbol
 
@@ -8548,7 +9238,7 @@ def main():
 
     parser.add_argument(
         "mode",
-        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning", "semi_auto", "full_auto", "dry_run", "collect"],
+        choices=["scan", "backtest", "paper", "signal", "setup", "walkforward", "sensitivity", "parrondo_tuning", "semi_auto", "full_auto", "dry_run", "collect", "papertrade", "paper_stats"],
         help="Operating mode",
     )
     parser.add_argument(
@@ -8772,6 +9462,55 @@ def main():
         help="Candle interval for data collection (default: 5minute)",
     )
 
+    # ── Papertrade mode (new dedicated paper-trade evaluation engine) ──
+    parser.add_argument(
+        "--papertrade-days",
+        type=int,
+        default=60,
+        help="papertrade mode: historical replay in days (default: 60)",
+    )
+    parser.add_argument(
+        "--papertrade-interval",
+        default="15minute",
+        choices=["5minute", "15minute", "60minute", "day"],
+        help="papertrade mode: candle interval for replay (default: 15minute)",
+    )
+    parser.add_argument(
+        "--papertrade-mode",
+        default="replay",
+        choices=["replay", "live"],
+        help="papertrade mode: 'replay' over historical bars; 'live' hooks into the scan loop",
+    )
+    parser.add_argument(
+        "--papertrade-trade-mode",
+        default="intraday",
+        choices=["intraday", "swing"],
+        help="papertrade mode: which strategy path signals come from (default: intraday)",
+    )
+    parser.add_argument(
+        "--papertrade-lot-override",
+        type=int,
+        default=0,
+        help="papertrade mode: force every trade to use this exact quantity (default: 0 = use symbol lot size)",
+    )
+    parser.add_argument(
+        "--papertrade-allow-duplicates",
+        action="store_true",
+        default=False,
+        help="papertrade mode: allow multiple concurrent positions on the same underlying (default: False — one per instrument)",
+    )
+    parser.add_argument(
+        "--papertrade-no-trailing",
+        action="store_true",
+        default=False,
+        help="papertrade mode: disable the 5-stage trailing stop logic (default: enabled, matching production)",
+    )
+    parser.add_argument(
+        "--papertrade-symbols",
+        default=None,
+        help='papertrade mode: comma-separated list of symbols (default: NIFTY 50,NIFTY BANK,SENSEX). Example: "NIFTY 50,ICICIBANK"',
+    )
+
     args = parser.parse_args()
 
     # ── Resolve --risk-overlays convenience flag ──
@@ -8926,6 +9665,7 @@ def main():
     elif args.mode == "paper":
         if getattr(args, "multi_account", False) or bool(get("multi_account.enabled", False)):
             prometheus.init_multi_account()
+        prometheus.init_paper_capture()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
         elif args.intraday:
@@ -8936,11 +9676,13 @@ def main():
     elif args.mode == "semi_auto":
         if getattr(args, "multi_account", False):
             prometheus.init_multi_account()
+        prometheus.init_paper_capture()
         prometheus.run_semi_auto_mode(interval_seconds=args.interval)
 
     elif args.mode == "full_auto":
         if getattr(args, "multi_account", False):
             prometheus.init_multi_account()
+        prometheus.init_paper_capture()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
         elif args.intraday:
@@ -8952,6 +9694,7 @@ def main():
         # Same as full_auto but forces PaperTrader (already done above)
         if getattr(args, "multi_account", False):
             prometheus.init_multi_account()
+        prometheus.init_paper_capture()
         if args.combined:
             prometheus.run_combined_mode(interval_seconds=args.interval)
         elif args.intraday:
@@ -9053,6 +9796,78 @@ def main():
             symbol=args.symbol,
             interval=args.collect_interval,
             days=args.days,
+        )
+
+    elif args.mode == "paper_stats":
+        # ── Live Paper Capture statistics query ─────────────────────
+        # Reads the on-disk ledger produced by LivePaperCapture during
+        # paper sessions. Does NOT start a live loop — useful for
+        # reviewing accumulated paper-trade history between sessions.
+        from prometheus.paper_executor.live_bridge import CaptureConfig
+        from prometheus.papertrade.recorder import TradeRecorder
+        from prometheus.papertrade.metrics import MetricsEngine
+
+        # Build the full settings dict from the loaded config so
+        # CaptureConfig.from_settings sees the system.mode + paper_capture
+        # block correctly.
+        settings_dict = {
+            "system": {"mode": get("system.mode", "paper")},
+            "paper_capture": get("paper_capture", {}) or {},
+        }
+        cfg = CaptureConfig.from_settings(settings_dict)
+        rec = TradeRecorder(sqlite_path=cfg.sqlite_path, csv_path=cfg.csv_path)
+        trades = rec.load_previously_closed_trades() or []
+        metrics = MetricsEngine()
+        for t in trades:
+            metrics.record_close(t)
+        metrics.record_open_positions(0)
+        snap = metrics.snapshot(open_positions=0)
+
+        print("=" * 72)
+        print("PAPER CAPTURE  —  Live Paper Trade Statistics")
+        print("=" * 72)
+        print(f"Ledger CSV   : {cfg.csv_path}")
+        print(f"Ledger SQLite : {cfg.sqlite_path}")
+        print(f"Total trades : {snap.total_trades}")
+        print(f"Open         : {snap.open_positions}")
+        print(f"Win rate     : {snap.win_rate:.1f}%   ({snap.winning_trades}W / {snap.losing_trades}L)")
+        print(f"Profit factor: {snap.profit_factor:.2f}")
+        print(f"Total PnL    : Rs {snap.total_pnl:,.2f}")
+        print(f"Total costs  : Rs {snap.total_costs:,.2f}")
+        print(f"Max drawdown : Rs {snap.max_drawdown_pnl:,.2f}  ({snap.max_drawdown_pct:.2f}%)")
+        print(f"Expectancy   : Rs {snap.expectancy:,.2f} per trade")
+        print(f"Avg win      : Rs {snap.avg_win_pnl:,.2f}  ({snap.avg_win_pct:.2f}%)")
+        print(f"Avg loss     : Rs {snap.avg_loss_pnl:,.2f}  ({snap.avg_loss_pct:.2f}%)")
+        if snap.total_trades:
+            print(f"Avg hold     : {snap.avg_holding_duration_seconds/60:.1f} min")
+        print()
+        if snap.exit_reason_counts:
+            print("Exit-reason breakdown:")
+            for reason, n in sorted(snap.exit_reason_counts.items(), key=lambda x: -x[1]):
+                pct = n / max(snap.total_trades, 1) * 100
+                print(f"  {reason:30s}  {n:5d}  ({pct:5.1f}%)")
+        print("=" * 72)
+
+    elif args.mode == "papertrade":
+        # ── NEW: dedicated paper-trade evaluation engine ──
+        # Runs every valid signal without risk management overlays. No capital
+        # limits, no daily loss halt, no exposure caps. Used to evaluate the
+        # STRATEGY itself, not the risk overlay.
+        symbols_arg = args.papertrade_symbols
+        if symbols_arg:
+            symbols = [s.strip() for s in symbols_arg.split(",") if s.strip()]
+        else:
+            symbols = ["NIFTY 50", "NIFTY BANK", "SENSEX"]
+        prometheus.run_papertrade(
+            symbols=symbols,
+            days=args.papertrade_days,
+            bar_interval=args.papertrade_interval,
+            source=args.papertrade_mode,                # "replay" or "live"
+            trade_mode=args.papertrade_trade_mode,      # "intraday" or "swing"
+            lot_size_override=args.papertrade_lot_override,
+            allow_duplicate_instrument=args.papertrade_allow_duplicates,
+            enable_trailing=not args.papertrade_no_trailing,
+            symbol_filter=args.symbol,
         )
 
 

@@ -515,3 +515,37 @@ system:
   name: PROMETHEUS
   timezone: Asia/Kolkata
   version: 1.0.0
+
+# ─────────────────────────────────────────────────────────────────────
+# Paper Capture — live paper signal tracking (no risk gates)
+#
+# Purpose: Capture EVERY valid signal that passes the strategy quality
+# filters and run it as a paper trade from entry to exit, bypassing the
+# production risk gates (max_daily_trades, max_open_positions,
+# drawdown_halt_pct, consecutive_losses_pause, max_weekly_loss_pct, etc.).
+#
+# Goal: Evaluate the strategy itself, not risk management. The captured
+# trade ledger feeds back into research on WR / PF / DD / exit-reason
+# mix / direction split / session timing.
+#
+# SAFETY: This block is consulted ONLY when system.mode == "paper".
+# In live Kite execution mode this entire block is ignored — the live
+# path never instantiates LivePaperCapture.
+#
+# Output:
+#   reports/papertrade/live_ledger.csv  — append-only trade history
+#   reports/papertrade/live_ledger.sqlite — programmatic / resumability
+#
+# Disable any time with:  paper_capture.enabled: false
+# ─────────────────────────────────────────────────────────────────────
+paper_capture:
+  enabled: true                          # opt-in flag
+  csv_path: reports/papertrade/live_ledger.csv
+  sqlite_path: reports/papertrade/live_ledger.sqlite
+  max_concurrent_positions: 200          # effectively uncapped for evaluation
+  allow_duplicate_instrument: true       # new signal for an open instrument -> new paper position
+  enable_trailing: true                  # 5-stage trailing stop logic
+  default_max_bars_intraday: 16          # 15min bars (matches intraday.v2.time_stop_bars_15min)
+  default_max_bars_swing: 96            # swing time-stop default
+  cost_per_side_bps: 1.0                 # simulated Zerodha-style per-side cost
+  slippage_bps: 15                      # 0.15% (matches backtest engine default)
