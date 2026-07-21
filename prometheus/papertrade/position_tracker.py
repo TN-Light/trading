@@ -230,32 +230,63 @@ class PositionTracker:
                 reached for this bar. Caller decides this (engine enforces
                 its own clock).
         Returns: list of PaperTrades closed this bar, in触发-order.
+
+        Underlying vs. option bar — 2026-07-21 fix:
+
+            The previous matcher was ``p.instrument == snapshot.instrument
+            OR p.symbol == snapshot.symbol``, which meant ANY SENSEX option
+            position matched ANY SENSEX underlying bar. When the caller fed
+            the underlying's OHLC bar (e.g. SENSEX index level ~77,000),
+            the tracker interpreted the index close as the option premium
+            and fired a ``target`` exit at Rs 77,710.66, booking Rs 1.5M of
+            fictional profit on a 20-lot SENSEX PUT position that had a
+            real-world target of Rs 410.
+
+            Now: positions only match a snapshot when their instrument
+            strings are equal (strict match). If ``snapshot.instrument`` is
+            empty (the "underlying bar, no specific option" case), the
+            snapshot is used ONLY to advance ``bars_held`` — never to
+            evaluate SL/target or trail the stop.
         """
         closed: List[PaperTrade] = []
-        # Snapshot is per-instrument; only positions on that instrument are
-        # candidates this bar. Open list copy because we mutate while iterating.
-        candidates = [
-            (tid, p) for tid, p in list(self.open_positions.items())
-            if p.instrument == snapshot.instrument or p.symbol == snapshot.symbol
-        ]
-        for tid, pos in candidates:
-            # Advance bars held for non-zero bars; we trust snapshot frequency
-            # matches the position's max-bars clock (15min bars ↔ 15min max-bars).
-            pos.bars_held += 1
-
-            exit_price, exit_reason = self._evaluate_exit(
-                pos, snapshot, is_session_end=is_session_end,
-                is_square_off=is_square_off,
-            )
-            if exit_reason is None:
-                # Maybe trailing stop should advance (only on no-exit bars)
-                if self.enable_trailing:
-                    self._maybe_advance_trailing_stop(pos, snapshot.close)
+        # Strict instrument-or-symbol match — but only positions on the same
+        # instrument are *evaluated*. Same-symbol different-instrument bars
+        # (the underlying-index bar) advance bars-held only.
+        for tid, p in list(self.open_positions.items()):
+            if p.instrument == snapshot.instrument and snapshot.instrument:
+                # True match: same option contract. Full evaluation.
+                p.bars_held += 1
+                exit_price, exit_reason = self._evaluate_exit(
+                    p, snapshot,
+                    is_session_end=is_session_end,
+                    is_square_off=is_square_off,
+                )
+                if exit_reason is None:
+                    if self.enable_trailing:
+                        self._maybe_advance_trailing_stop(p, snapshot.close)
+                    continue
+                trade = self.close_position(tid, snapshot.timestamp, exit_price, exit_reason)
+                if trade is not None:
+                    closed.append(trade)
                 continue
 
-            trade = self.close_position(tid, snapshot.timestamp, exit_price, exit_reason)
-            if trade is not None:
-                closed.append(trade)
+            if p.symbol == snapshot.symbol and not snapshot.instrument:
+                # Underlying bar (e.g. NIFTY 50 index bar) for an open option
+                # position on the same symbol. Advance bars-held only — DO NOT
+                # evaluate SL/target/trailing against the index price (that
+                # was the 2026-07-21 Rs 1.5M phantom-profit bug).
+                p.bars_held += 1
+                # Force-evaluate session_end / square_off using the LTP feed
+                # (not the snapshot's OHLC, which is the index level).
+                if is_session_end or is_square_off:
+                    exit_price, exit_reason = self._evaluate_exit_via_feed(
+                        p, snapshot, is_session_end=is_session_end,
+                        is_square_off=is_square_off,
+                    )
+                    if exit_reason is not None:
+                        trade = self.close_position(tid, snapshot.timestamp, exit_price, exit_reason)
+                        if trade is not None:
+                            closed.append(trade)
         return closed
 
     def _evaluate_exit(
@@ -311,7 +342,56 @@ class PositionTracker:
 
         return 0.0, None
 
-    def _maybe_advance_trailing_stop(self, pos: Position, current_price: float) -> None:
+    def _evaluate_exit_via_feed(
+        self,
+        pos: Position,
+        snap: TradeSnapshot,
+        is_session_end: bool,
+        is_square_off: bool,
+    ) -> Tuple[float, Optional[ExitReason]]:
+        """Evaluate SL/target/trailing using the live LTP feed instead of the
+        snapshot's OHLC — used when ``on_bar`` received an *underlying* bar
+        (e.g. NIFTY 50 index level) but the position is an *option* on that
+        underlying. Without this guard, the tracker would interpret the
+        index's close (~24000) as the option premium and immediately fire a
+        fictional TARGET exit.
+
+        Only called for ``is_session_end=True`` or ``is_square_off=True`` —
+        i.e. we still want to fire EOD / square-off closes when we get the
+        underlying bar, we just don't want to fabricate a SL/TARGET trigger
+        from the index level.
+
+        Returns ``(exit_price, exit_reason)`` or ``(0.0, None)``.
+        """
+        sl = pos.stop_loss
+        tgt = pos.target
+        # Look up the real option LTP. Failures are non-fatal — we'll fall
+        # through to session_end / square_off below.
+        try:
+            ltp = self.fill_sim.feed.get_ltp(pos.instrument)
+        except Exception:
+            ltp = 0.0
+        ltp = float(ltp or 0.0)
+
+        if ltp > 0:
+            # We have a real LTP for the option. Evaluate SL/target with it.
+            if ltp <= sl:
+                return sl, ExitReason.STOP_LOSS
+            if ltp >= tgt:
+                return ltp, ExitReason.TARGET
+        # Otherwise no LTP — skip SL/target evaluation this bar (don't
+        # fabricate an exit price from the underlying snapshot).
+
+        # Square-off and end-of-day force-closes still fire (the LTP we
+        # recovered — or fall back to ``fill_sim`` at fill time — supplies
+        # the exit price).
+        if is_square_off and pos.trade_mode == "intraday":
+            # Fill price will be resolved by ``close_position`` via fill_sim
+            # using the option LTP (caller-hint = entry_price if LTP missing).
+            return max(ltp, 0.0), ExitReason.SQUARE_OFF
+        if is_session_end and pos.trade_mode == "swing":
+            return max(ltp, 0.0), ExitReason.END_OF_DAY
+        return 0.0, None
         """5-stage trailing stop — see CLAUDE.md.
 
         Stage transitions:
