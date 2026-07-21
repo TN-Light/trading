@@ -24,14 +24,19 @@ from prometheus.utils.logger import logger
 class AngelOneOptionChain:
     """Fetches live option chain and real premiums via Angel One SmartAPI."""
 
-    # Map Prometheus symbol names to NFO underlying names
+    # Map Prometheus symbol names to NFO underlying names.
+    # `searchScrip` queries by *tradingsymbol prefix*, not the long-form NSE name.
+    # Earlier versions sent "NIFTY MIDCAP SELECT" verbatim, which returned no data —
+    # Angel One's search requires the actual tradingsymbol root ("MIDCPNIFTY").
+    # Similarly for FINNIFTY and NIFTY IT (sent as "NIFTY IT" before — also returned nothing).
+    # SENSEX is the one exception: Angel One does index it under the long name.
     UNDERLYING_MAP = {
         "NIFTY 50": "NIFTY",
         "NIFTY BANK": "BANKNIFTY",
         "NIFTY FIN SERVICE": "FINNIFTY",
         "SENSEX": "SENSEX",
-        "NIFTY IT": "NIFTY IT",
-        "NIFTY MIDCAP SELECT": "NIFTY MIDCAP SELECT",
+        "NIFTY IT": "NIFTYIT",
+        "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
     }
 
     def __init__(self, fetcher):

@@ -982,19 +982,36 @@ class Prometheus:
         paper-capture adapter), even when the live multi-account dispatch
         short-circuits via ``return`` (e.g. no priced strikes, gamma ambush
         block, multi_account disabled). The wrapped try/finally guarantees
-        the PaperCapture hook runs — that's how we ensure EVERY valid
-        signal is recorded end-to-end regardless of the live path's risk
-        gates rejecting it.
+        the PaperCapture hook runs — that's how we ensure EVERY valid signal
+        is recorded end-to-end regardless of the live path's risk gates
+        rejecting it.
+
+        DUAL-PATH SUPPRESSION (2026-07-21 fix): when LivePaperCapture is
+        enabled, the legacy ``_dispatch_multi_account_live`` OrderManager
+        path is NOT called. This is the single most important behavioral fix
+        in this session — previously both paths opened positions on the
+        same signal, but with different strikes (the live path rebuilt the
+        tradingsymbol from a separately-ranked candidate, while PaperCapture
+        used the strategy's chosen strike). The result was two parallel
+        positions on different option contracts, only one of which got
+        closed by square-off (the OrderManager one) while the other stayed
+        open as a ghost (the PaperCapture one) — or vice-versa. Now
+        PaperCapture is the ONLY position opener in paper mode.
         """
+        if self._paper_capture is not None:
+            # Paper mode: LivePaperCapture is the single source of truth. The
+            # legacy OrderManager path is bypassed to prevent duplicate
+            # positions on divergent strike selections.
+            try:
+                self._paper_capture.on_signal(refined_signal)
+            except Exception as e:
+                logger.debug(f"[PaperCapture] on_signal failed: {e}")
+            return
+
         try:
             self._dispatch_multi_account_live(refined_signal, is_intraday=is_intraday, bar_interval=bar_interval)
-        finally:
-            # ─── Live Paper Capture (always runs unless None) ────
-            if self._paper_capture is not None:
-                try:
-                    self._paper_capture.on_signal(refined_signal)
-                except Exception as e:
-                    logger.debug(f"[PaperCapture] on_signal forward failed: {e}")
+        except Exception as e:
+            logger.error(f"Multi-account dispatch error: {e}")
 
     def _dispatch_multi_account_live(self, refined_signal, is_intraday: bool = False,
                                      bar_interval: str = "15minute"):
@@ -2969,8 +2986,15 @@ class Prometheus:
         return False, backoff
 
     def _persist_equity_state(self):
-        """Save current equity/capital to SQLite for crash recovery."""
+        """Save current equity/capital to SQLite for crash recovery.
+
+        Also persists today's realized P&L (``risk._daily_pnl``) and the
+        trading-date stamp so a same-day restart can restore the daily
+        counter. Cross-day restarts intentionally reset the daily counter
+        (handled in ``_restore_equity_state``).
+        """
         try:
+            today = datetime.now().strftime("%Y-%m-%d")
             if isinstance(self.broker, PaperTrader):
                 margins = self.broker.get_margins()
                 self.store.save_equity_snapshot(
@@ -2979,6 +3003,8 @@ class Prometheus:
                     peak=self.risk.peak_capital,
                     total_costs=self.broker.total_costs,
                     realized_pnl=margins.get("realized_pnl", 0),
+                    daily_pnl=self.risk._daily_pnl,     # NEW
+                    pnl_date=today,                    # NEW
                 )
             # Multi-account stacks
             if self.multi_account:
@@ -2990,13 +3016,22 @@ class Prometheus:
                         peak=stack.risk.peak_capital,
                         total_costs=stack.trader.total_costs,
                         realized_pnl=m.get("realized_pnl", 0),
+                        daily_pnl=stack.risk._daily_pnl,   # NEW
+                        pnl_date=today,                    # NEW
                     )
         except Exception as e:
             logger.debug(f"Equity persist error: {e}")
 
     def _restore_equity_state(self):
-        """Restore equity/capital from SQLite after crash/restart."""
+        """Restore equity/capital from SQLite after crash/restart.
+
+        Also restores today's realized-P&L counter (``risk._daily_pnl``) IF
+        the persisted snapshot's ``pnl_date`` matches the current date —
+        so an intra-day restart preserves the daily summary accuracy. Older
+        snapshots are ignored for the daily counter (start fresh today).
+        """
         try:
+            today = datetime.now().strftime("%Y-%m-%d")
             snap = self.store.load_equity_snapshot("primary")
             if snap and isinstance(self.broker, PaperTrader):
                 saved_equity = snap.get("equity", 0)
@@ -3010,10 +3045,18 @@ class Prometheus:
                     self.risk.current_capital = saved_equity
                     if saved_peak > 0:
                         self.risk.peak_capital = saved_peak
+                    # Restore today's realized P&L counter if the snapshot is from today.
+                    # This is what makes ``_send_daily_summary`` show the right number
+                    # after an intra-day restart (the bug that produced "Gross/Net P&L
+                    # Rs +0" on 2026-07-20 — the risk manager reset _daily_pnl to 0
+                    # on restart and nobody restored it).
+                    if snap.get("pnl_date") == today:
+                        self.risk._daily_pnl = float(snap.get("daily_pnl", 0) or 0)
                     logger.info(
                         f"Equity restored: Rs {saved_equity:,.0f} "
                         f"(peak: Rs {saved_peak:,.0f}, "
-                        f"P&L since start: Rs {pnl_since_start:+,.0f})"
+                        f"P&L since start: Rs {pnl_since_start:+,.0f}, "
+                        f"today's realized: Rs {self.risk._daily_pnl:+,.0f})"
                     )
             # Multi-account stacks
             if self.multi_account:
@@ -3026,7 +3069,11 @@ class Prometheus:
                         stack.risk.current_capital = ms["equity"]
                         if ms.get("peak", 0) > 0:
                             stack.risk.peak_capital = ms["peak"]
-                        logger.info(f"[{label}] Equity restored: Rs {ms['equity']:,.0f}")
+                        # Same-day realized-P&L restoration for the sub-account stack.
+                        if ms.get("pnl_date") == today:
+                            stack.risk._daily_pnl = float(ms.get("daily_pnl", 0) or 0)
+                        logger.info(f"[{label}] Equity restored: Rs {ms['equity']:,.0f} "
+                                     f"(today's realized: Rs {stack.risk._daily_pnl:+,.0f})")
         except Exception as e:
             logger.debug(f"Equity restore error: {e}")
 
@@ -4223,6 +4270,17 @@ class Prometheus:
 
                 logger.info(f"{mode_label}: Scanning ({bar_interval}, next in {scan_interval}s)...")
 
+                # ── Forward closed bars to PaperCapture (no-op if disabled) ──
+                # So the PaperTradeEngine sees the same bar the signal
+                # generator consumed, enabling mark-to-market and exit
+                # evaluation per bar across every open paper position.
+                # This was the 2026-07-21 ghost-trade root cause: LivePaperCapture
+                # opened positions but never received exit-evaluation bars in
+                # run_intraday_mode, so its positions stayed open forever and never
+                # hit SL/target/square-off — generating phantom P&L when finally
+                # force-closed on a stray late quote.
+                self._paper_capture_feed_bars(intraday_instruments, bar_interval)
+
                 allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", False))
                 for symbol in intraday_instruments:
                     if symbol in _today_traded_symbols and not allow_mult:
@@ -5275,12 +5333,18 @@ class Prometheus:
                 greeks = calculate_greeks(current, strike, T, r, sigma, opt_type)
                 delta = max(abs(greeks.get("delta", 0.5)), 0.20)
 
-            # ── LIVE LTP ANCHORING ──
-            # Fetch the real LTP/bid/ask for the selected strike. When available,
-            # re-base `premium` on the live LTP so subsequent SL/target math and the
-            # PaperTrader/KiteExecutor fill prices stay consistent. Backtest path
-            # has no `angelone_options` client and silently falls back to BS.
-            premium = premium_bs
+            # ── LIVE LTP REQUIRED ──
+            # Fetch the real LTP/bid/ask for the selected strike. The live LTP is
+            # the ONLY price used downstream — we no longer fall back to the BS
+            # theoretical estimate when Angel One returns no quote. The BS value
+            # was systematically under-pricing options (e.g. MIDCPNIFTY26JUL14750CE
+            # estimated at Rs 127.71 while the real market was Rs 180), which made
+            # the strategy enter at fictional prices, compute fictional R:R, and
+            # book fictional profit. If no live LTP is available, we reject the
+            # signal outright — better to skip than to trade on a fake price.
+            # (The backtest path has no `angelone_options` client and must opt in
+            # to BS via the `allow_bs_fallback` override, set only by backtest.)
+            allow_bs_fallback = bool(overrides.get("allow_bs_fallback", False))
             live_ltp = 0.0
             live_source = "BS"
             try:
@@ -5295,10 +5359,30 @@ class Prometheus:
                     )
                     if live_quote and float(live_quote.get("ltp", 0) or 0) > 0:
                         live_ltp = float(live_quote["ltp"])
-                        premium = live_ltp  # anchor on live LTP
                         live_source = "LIVE"
             except Exception as e:
                 logger.debug(f"_price_options: live LTP fetch failed for {symbol} {strike}{opt_type_str}: {e}")
+
+            if live_source == "LIVE":
+                premium = live_ltp  # anchor on live LTP
+            elif allow_bs_fallback:
+                # Only the backtest path reaches this branch.
+                premium = premium_bs
+                logger.info(
+                    f"_price_options: {symbol} {direction} strike={strike} — no live LTP; "
+                    f"using BS fallback (allow_bs_fallback=True)"
+                )
+            else:
+                # Live/paper path: REFUSE to ship a fake-price signal. The user
+                # explicitly requires real market prices; BS-theoretical entries
+                # were producing 30-50% mispricing and paper P&L fiction.
+                logger.warning(
+                    f"_price_options: REJECTED {symbol} {direction} strike={strike} "
+                    f"dte={dte} — no live LTP from Angel One (searchScrip returned no "
+                    f"data or ltp=0). BS theoretical estimate (Rs {premium_bs:.2f}) is "
+                    f"NOT used for live/paper trading. Signal dropped."
+                )
+                return None
 
             # Diagnostic log — records which strike rule fired, the resulting delta,
             # and the live-vs-theoretical spread so future audits can verify anchoring.
@@ -5308,8 +5392,6 @@ class Prometheus:
                 f"bs_premium={premium_bs:.2f} live_ltp={live_ltp:.2f} "
                 f"final={premium:.2f} source={live_source}"
             )
-
-            return premium, delta, lot_size, strike, sigma, expiry_date_str, int(dte)
 
             return premium, delta, lot_size, strike, sigma, expiry_date_str, int(dte)
 

@@ -5,8 +5,14 @@ Responsible for translating an entry/exit decision into a realistic fill
 price. Honors:
 
 * Live LTP from Angel One when available (most realistic).
-* Black-Scholes theoretical premium as a fallback.
-* Caller-supplied price hint as a final safety net.
+* Caller-supplied price hint (strategy-computed trailing SL, BE trigger, etc.).
+
+Strict rule as of 2026-07-21 — Black-Scholes theoretical price is NO LONGER
+used as a fill fallback. The BS estimate systematically mispriced options by
+30-50% (e.g. MIDCPNIFTY26JUL14750CE estimated Rs 127.71 while the real market
+was Rs 180), producing fictional P&L on the paper ledger. If no live LTP and
+no caller hint are available, the fill is REJECTED — never fabricated from
+a theoretical price.
 
 CRITICAL behavior — the 2026-07-17 paper bug:
 
@@ -140,7 +146,11 @@ class FillSimulator:
             fp = ltp + slip if side == "BUY" else ltp - slip
             return FillResult(fp, "ltp_with_slippage")
 
-        # Priority 3: explicit caller hint (e.g. breakeven SL precomputed)
+        # Priority 3: explicit caller hint (e.g. breakeven SL precomputed).
+        # NOTE: the caller hint is a *strategy-computed* value (trailing SL, BE
+        # trigger price), NOT a fake market price. It's specifically safe to
+        # use as a fill floor because it was derived from the same price the
+        # position was entered at.
         if price_hint > 0:
             logger.warning(
                 f"FillSimulator: no live quote for {instrument}; using "
@@ -148,22 +158,32 @@ class FillSimulator:
             )
             return FillResult(price_hint, "hint")
 
-        # Priority 4: theoretical BS price (already computed upstream)
+        # Priority 4 — Black-Scholes theoretical price — is DISABLED for
+        # live/paper trading (2026-07-21 fix).
+        #
+        # The user explicitly requires real market prices only. The BS fallback
+        # systematically mispriced options by 30-50% (e.g. MIDCPNIFTY26JUL14750CE
+        # estimated Rs 127.71 while the real market was Rs 180). Worse, when
+        # combined with the multi-million-percent profit reported by the
+        # position tracker (PNL of Rs +1,548,885.75 on SENSEX2672377800PE —
+        # pulled from a BsToMarket comparison against a hint exit), it produced
+        # a fictional ledger that the daily summary cannot meaningfully read.
+        #
+        # FillSimulator does NOT do that anymore. If no live LTP and no caller
+        # hint, we REJECT the order outright. Better to skip than to trade on
+        # a fabricated price.
         if theoretical_price > 0:
-            slip = theoretical_price * self.slippage_bps / 10000.0
-            fp = theoretical_price + slip if side == "BUY" else theoretical_price - slip
             logger.warning(
-                f"FillSimulator: no live quote for {instrument}; using "
-                f"theoretical BS price Rs {theoretical_price:.2f} + {self.slippage_bps}bps "
-                f"slippage = Rs {fp:.2f}"
+                f"FillSimulator: live_quote=0, hint=0, theoretical_price=Rs {theoretical_price:.2f} "
+                f"for {instrument} — REFUSING to fill at BS estimate (live-only mode). "
+                f"Rejecting the order."
             )
-            return FillResult(fp, "theoretical")
 
         # Final: refuse to fill at 0.0. The 2026-07-17 paper bug filled at
         # 0.0 here, booking the entire premium as a phantom loss.
         logger.error(
             f"FillSimulator: refusing to fill {side} {instrument} {direction.value} "
-            f"at 0.0 — no live quote, no caller hint, no theoretical price. "
+            f"at 0.0 — no live quote, no caller hint, theoretical fallback disabled. "
             f"Rejecting the order instead of fabricating a price."
         )
         return FillResult(0.0, "rejected", message="no quote available, refusing to fill at 0.0")

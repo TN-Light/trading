@@ -516,14 +516,24 @@ class DataStore:
             return row[0] if row else default
 
     def save_equity_snapshot(self, label: str, equity: float, peak: float,
-                             total_costs: float = 0, realized_pnl: float = 0):
-        """Save equity state for crash recovery."""
+                             total_costs: float = 0, realized_pnl: float = 0,
+                             daily_pnl: float = 0, pnl_date: str = ""):
+        """Save equity state for crash recovery.
+
+        Extended fields (2026-07-21 fix):
+            daily_pnl: today's realized P&L counter (so the daily summary
+                works after a same-day restart)
+            pnl_date: ISO date (YYYY-MM-DD) the daily_pnl was recorded on.
+                Cross-day restores reset the counter; same-day restores it.
+        """
         import json
         data = json.dumps({
             "equity": equity,
             "peak": peak,
             "total_costs": total_costs,
             "realized_pnl": realized_pnl,
+            "daily_pnl": daily_pnl,
+            "pnl_date": pnl_date,
         })
         self.save_state(f"equity_{label}", data)
 
