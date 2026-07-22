@@ -4385,7 +4385,24 @@ class Prometheus:
                 state = positions[pid]
                 ltp = self.broker.get_ltp(state.tradingsymbol, exchange="NFO")
                 if ltp <= 0:
-                    ltp = state.current_sl  # fallback
+                    # Fallback chain 2026-07-21: previously fell back to
+                    # ``state.current_sl``, which is 0 when no trailing stop
+                    # ever advanced — that made square-off exit fill at 0 and
+                    # book "P&L Rs +0" (logged today at 15:15:11 /
+                    # 15:15:12). Now: prefer current_sl only if non-zero;
+                    # otherwise fall back to entry_premium (the safe floor).
+                    ltp = state.current_sl or state.entry_premium or 0
+                    if ltp == 0:
+                        logger.warning(
+                            f"Square-off: cannot resolve exit price for {pid} "
+                            f"({state.tradingsymbol}) — LTP=0, SL=0, no entry premium. "
+                            f"Skipping close (leaving for next session)."
+                        )
+                        continue
+                    logger.warning(
+                        f"Square-off: no live LTP for {state.tradingsymbol}; "
+                        f"falling back to SL/entry_premium=Rs {ltp:.2f} for {pid}"
+                    )
                 self._handle_position_exit(pid, ltp, "intraday_square_off")
             except Exception as e:
                 logger.error(f"Square-off error for {pid}: {e}")

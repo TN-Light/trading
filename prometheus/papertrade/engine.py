@@ -214,7 +214,21 @@ class PaperTradeEngine:
             direction=signal.direction,
             quantity=qty,
             entry_price=fill.fill_price,
-            entry_time=signal.bar_timestamp or datetime.now(IST),
+            # Live entries use wall-clock time; replay/test paths use
+            # the signal's bar_timestamp. We distinguish by bar age:
+            # if the bar's timestamp is older than 1 day, the signal is
+            # being driven off stale data (e.g. HistoricalDataBridge fed
+            # yesterday's 15:15 bar today), and using it as the entry
+            # time would produce negative holding_duration (the bug
+            # observed 2026-07-21: -1095 min). In that case fall back to
+            # datetime.now(). Test/replay bars (same-day or future-day
+            # timestamps) are honored as before.
+            entry_time=(
+                signal.bar_timestamp
+                if signal.bar_timestamp is not None
+                and (datetime.now(IST) - signal.bar_timestamp).total_seconds() < 86_400
+                else datetime.now(IST)
+            ),
             stop_loss=signal.stop_loss,
             target=signal.target,
             max_bars=max_bars,

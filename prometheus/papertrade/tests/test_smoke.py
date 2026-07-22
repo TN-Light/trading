@@ -84,6 +84,11 @@ class MockSignalSource:
 def make_signal(symbol, instrument, direction, entry, sl, target,
                 strike, expiry="2026-07-17", trade_mode="intraday",
                 strategy="test"):
+    # Use "now - 5 min" so the entry timestamp is always recent (within the
+    # 24h freshness guard added to PaperTradeEngine.process_new_signal on
+    # 2026-07-21). Hard-coded historical dates (2026-07-17) would be rejected
+    # as stale when the test runs later, breaking holding-duration math.
+    _recent_bar_ts = datetime.now(IST) - timedelta(minutes=5)
     return SignalNotification(
         symbol=symbol,
         instrument=instrument,
@@ -100,8 +105,8 @@ def make_signal(symbol, instrument, direction, entry, sl, target,
         max_bars=16,
         trade_mode=trade_mode,
         strategy=strategy,
-        # Timestamp deliberately set BEFORE the test bars so durations are non-negative.
-        bar_timestamp=datetime(2026, 7, 17, 9, 45, 0, tzinfo=IST),
+        # Bar timestamp 5 min before the exit bars below so durations are positive.
+        bar_timestamp=_recent_bar_ts,
         metadata={},
     )
 
@@ -323,13 +328,16 @@ def test_metrics_calculation(tmp_path):
     assert engine.open_positions_count() == 2
 
     # Bar 1: inst1 hits target (175 -> 180 = +5/lot), inst2 hits SL (200 -> 195)
+    # Exit bars ~1 min after the signal's bar_timestamp (which is now-5min)
+    # so holding_duration_seconds is positive and small.
+    _exit_bar_ts = datetime.now(IST) - timedelta(minutes=4)
     bar1 = TradeSnapshot(
-        timestamp=datetime(2026, 7, 17, 12, 0, 0, tzinfo=IST),
+        timestamp=_exit_bar_ts,
         symbol="NIFTY 50", instrument=inst1,
         open=176, high=181, low=175, close=180.5, bar_interval="15minute",
     )
     bar2 = TradeSnapshot(
-        timestamp=datetime(2026, 7, 17, 12, 0, 0, tzinfo=IST),
+        timestamp=_exit_bar_ts,
         symbol="NIFTY BANK", instrument=inst2,
         open=199, high=200, low=194, close=195.5, bar_interval="15minute",
     )
