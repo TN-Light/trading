@@ -3221,6 +3221,16 @@ class Prometheus:
                 bar_interval=row.get("bar_interval", "day"),
                 trade_mode=row.get("trade_mode", "swing"),
                 entry_orders_json=orders_json,
+                # Bug C (2026-07-25 audit): restore the persisted phase so
+                # restored positions don't silently reset to Phase 1 (which
+                # would re-apply the Phase 1+2 immunity that was already
+                # passed before the crash, and re-run the phase 1→2 / 2→3
+                # transitions + their ``_modify_broker_sl_manual`` side
+                # effects). The save side (store.save_position_state)
+                # already writes this column as ``current_phase`` (no
+                # underscore) — we just plumb it back through the
+                # dataclass field here.
+                _current_phase=int(row.get("current_phase", 1)),
             )
             if ma_label:
                 ts._multi_account_label = ma_label
@@ -3677,7 +3687,32 @@ class Prometheus:
         confirm: bool = False,
         context: str = "",
     ):
-        """Execute signal and publish rejection reason (throttled) when not executed."""
+        """Execute signal and publish rejection reason (throttled) when not executed.
+
+        Bug #2 (2026-07-22): when LivePaperCapture is active (paper mode +
+        paper_capture.enabled), every signal must be routed exclusively
+        through LivePaperCapture — the legacy OrderManager runs against
+        a 15K-capital RiskManager whose `max_correlated_pct: 50.0%` and
+        "Duplicate instrument" gates were never bypassed in paper mode.
+        Allowing OrderManager to run alongside LivePaperCapture caused:
+          - "Correlated exposure too high: 129%/155%/..." rejections on
+            nearly every signal.
+          - "Duplicate instrument" rejections despite
+            `paper_capture.allow_duplicate_instrument: true`.
+          - The dual-path that commits 6deda3f / 21bfc7f intended to kill.
+
+        Fix: when `self._paper_capture` is non-None *and* enabled, route
+        every refined_signal to LivePaperCapture only; never invoke
+        `order_manager.execute_signal` (which gates through the legacy
+        15K RiskManager). Return None — caller code already handles the
+        None case (PositionMonitor setup, dashboard, etc.).
+        """
+        # LivePaperCapture bypass — only capture path active in paper mode.
+        paper_capture = getattr(self, "_paper_capture", None)
+        if paper_capture is not None and getattr(paper_capture, "enabled", False):
+            paper_capture.on_signal(refined_signal)
+            return None
+
         position = self.order_manager.execute_signal(refined_signal, confirm=confirm)
         if position:
             return position
@@ -4360,52 +4395,118 @@ class Prometheus:
                 time.sleep(30)
 
     def _square_off_intraday_positions(self):
-        """Force close all intraday positions at 3:15 PM."""
-        if not self.position_monitor:
-            return
+        """Force close all intraday positions at 3:15 PM.
 
-        positions = self.position_monitor.get_positions()
-        intraday_pids = [
-            pid for pid, state in positions.items()
-            if getattr(state, "trade_mode", "swing") == "intraday"
-        ]
+        Closes both legacy broker-managed positions (via ``position_monitor``
+        + ``order_manager``) and LivePaperCapture-tracked paper positions.
+        Bug #8 (2026-07-22): previously this method only closed broker
+        positions; the PaperTradeEngine's intraday square-off exit branch
+        (``PositionTracker._evaluate_exit_via_feed`` →
+        ``if is_square_off and pos.trade_mode == "intraday"``) was dead
+        code because no caller ever propagated ``is_square_off=True``
+        through ``LivePaperCapture.on_bar``. As a result, paper_capture
+        intraday positions never force-closed at 15:15 — they stayed open
+        across the session boundary, accumulating overnight phantom P&L.
+        Fix: drive the paper engine here with ``is_square_off=True`` for
+        every instrument that has an open paper position (we feed a
+        synthetic underlying-bar so ``PositionTracker.on_bar`` enters the
+        ™underlying-barî path and resolves the exit LTP via the live feed).
+        """
+        if self.position_monitor:
+            positions = self.position_monitor.get_positions()
+            intraday_pids = [
+                pid for pid, state in positions.items()
+                if getattr(state, "trade_mode", "swing") == "intraday"
+            ]
 
-        if not intraday_pids:
-            logger.info("Square-off: no intraday positions to close.")
-            return
+            if not intraday_pids:
+                logger.info("Square-off: no broker intraday positions to close.")
+            else:
+                logger.info(f"Square-off: closing {len(intraday_pids)} broker intraday position(s)")
+                self.telegram.send_message(
+                    f"\u23f0 <b>INTRADAY SQUARE-OFF (3:15 PM)</b>\n"
+                    f"Closing {len(intraday_pids)} position(s)..."
+                )
 
-        logger.info(f"Square-off: closing {len(intraday_pids)} intraday position(s)")
-        self.telegram.send_message(
-            f"\u23f0 <b>INTRADAY SQUARE-OFF (3:15 PM)</b>\n"
-            f"Closing {len(intraday_pids)} position(s)..."
-        )
+                for pid in intraday_pids:
+                    try:
+                        state = positions[pid]
+                        ltp = self.broker.get_ltp(state.tradingsymbol, exchange="NFO")
+                        if ltp <= 0:
+                            # Fallback chain 2026-07-21: previously fell back to
+                            # ``state.current_sl``, which is 0 when no trailing stop
+                            # ever advanced — that made square-off exit fill at 0 and
+                            # book "P&L Rs +0" (logged today at 15:15:11 /
+                            # 15:15:12). Now: prefer current_sl only if non-zero;
+                            # otherwise fall back to entry_premium (the safe floor).
+                            ltp = state.current_sl or state.entry_premium or 0
+                            if ltp == 0:
+                                logger.warning(
+                                    f"Square-off: cannot resolve exit price for {pid} "
+                                    f"({state.tradingsymbol}) — LTP=0, SL=0, no entry premium. "
+                                    f"Skipping close (leaving for next session)."
+                                )
+                                continue
+                            logger.warning(
+                                f"Square-off: no live LTP for {state.tradingsymbol}; "
+                                f"falling back to SL/entry_premium=Rs {ltp:.2f} for {pid}"
+                            )
+                        self._handle_position_exit(pid, ltp, "intraday_square_off")
+                    except Exception as e:
+                        logger.error(f"Square-off error for {pid}: {e}")
 
-        for pid in intraday_pids:
+        # Bug #8 fix: also drive the PaperCapture engine with
+        # ``is_square_off=True`` so its intraday positions force-close at
+        # 15:15 IST. We feed one synthetic "underlying bar" per instrument
+        # that has an open paper position. ``PositionTracker.on_bar`` will
+        # route to ``_evaluate_exit_via_feed`` (because the snapshot
+        # ``instrument`` is empty), which honors ``is_square_off=True`` to
+        # force-close intraday positions (position_tracker.py:388).
+        paper_capture = getattr(self, "_paper_capture", None)
+        if paper_capture is not None and getattr(paper_capture, "enabled", False):
             try:
-                state = positions[pid]
-                ltp = self.broker.get_ltp(state.tradingsymbol, exchange="NFO")
-                if ltp <= 0:
-                    # Fallback chain 2026-07-21: previously fell back to
-                    # ``state.current_sl``, which is 0 when no trailing stop
-                    # ever advanced — that made square-off exit fill at 0 and
-                    # book "P&L Rs +0" (logged today at 15:15:11 /
-                    # 15:15:12). Now: prefer current_sl only if non-zero;
-                    # otherwise fall back to entry_premium (the safe floor).
-                    ltp = state.current_sl or state.entry_premium or 0
-                    if ltp == 0:
-                        logger.warning(
-                            f"Square-off: cannot resolve exit price for {pid} "
-                            f"({state.tradingsymbol}) — LTP=0, SL=0, no entry premium. "
-                            f"Skipping close (leaving for next session)."
+                open_view = paper_capture.open_positions_view() or []
+                # Group by symbol so we emit one bar per instrument that has
+                # at least one open paper position.
+                symbols_to_sq_off = []
+                for p in open_view:
+                    sym = p.get("symbol") or ""
+                    if sym and sym not in symbols_to_sq_off:
+                        symbols_to_sq_off.append(sym)
+                if not symbols_to_sq_off:
+                    return
+                logger.info(
+                    f"Square-off: driving paper_capture square-off for "
+                    f"{len(symbols_to_sq_off)} symbol(s) "
+                    f"({sum(1 for _ in open_view)} position(s))"
+                )
+                now_full = datetime.now()
+                last_ts = now_full.replace(second=0, microsecond=0)
+                for sym in symbols_to_sq_off:
+                    # Synthetic underlying bar. ``PositionTracker.on_bar``
+                    # treats ``instrument=""`` as the "underlying-bar" path
+                    # (advances bars_held + evaluates exit via the LTP feed,
+                    # never against the snapshot OHLC). That delegates the
+                    # exit fill price resolution to ``FillSimulator`` /
+                    # ``LivePriceFeed`` which queries the real broker LTP.
+                    bar = {
+                        "timestamp": last_ts,
+                        "open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0,
+                        "volume": 0.0,
+                        "interval": "15minute", "instrument": "",
+                    }
+                    try:
+                        paper_capture.on_bar(
+                            sym, bar,
+                            is_session_end=True, is_square_off=True,
                         )
-                        continue
-                    logger.warning(
-                        f"Square-off: no live LTP for {state.tradingsymbol}; "
-                        f"falling back to SL/entry_premium=Rs {ltp:.2f} for {pid}"
-                    )
-                self._handle_position_exit(pid, ltp, "intraday_square_off")
+                    except Exception as e:
+                        logger.error(
+                            f"Square-off: paper_capture.on_bar failed for "
+                            f"{sym}: {e}"
+                        )
             except Exception as e:
-                logger.error(f"Square-off error for {pid}: {e}")
+                logger.error(f"Square-off: paper_capture square-off failed: {e}")
 
     def run_combined_mode(self, interval_seconds: int = 180):
         """
@@ -8912,11 +9013,91 @@ class Prometheus:
             text += f"\n<b>Open Positions</b>\n"
             for p in positions:
                 pnl = getattr(p, "unrealized_pnl", 0)
+                # Bug #6 (2026-07-22): ``unrealized_pnl`` is a *method* on
+                # ``papertrade.Position`` (it requires a current_price
+                # argument), so callers that swap in paper_capture positions
+                # would crash here. Defensive: if we got a method instead of
+                # a number, treat as unrealized=0 (paper-capture's own
+                # section below carries the real MTM).
+                if callable(pnl):
+                    pnl = 0
                 pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
                 text += (
                     f"  {pnl_emoji} {p.tradingsymbol}  "
                     f"<code>{p.quantity}x</code>  "
                     f"<code>Rs {pnl:+,.0f}</code>\n"
+                )
+
+        # Bug #6 (2026-07-22): when LivePaperCapture is enabled, also surface
+        # paper-mode positions and their mark-to-market P&L. Previously this
+        # command only queried ``self.broker.get_positions()`` — which is
+        # the live Kite prospect, returning [] in paper mode — so paper_capture
+        # positions were invisible to the operator. We compute MTM here from
+        # the live LTP feed (paper_capture's own LivePriceFeed), surfacing the
+        # same number the engine's FillSimulator would exit at.
+        paper_capture = getattr(self, "_paper_capture", None)
+        if paper_capture is not None and getattr(paper_capture, "enabled", False):
+            try:
+                open_view = paper_capture.open_positions_view() or []
+            except Exception as e:
+                logger.debug(f"_tg_cmd_status: open_positions_view failed: {e}")
+                open_view = []
+
+            if open_view:
+                # Net realized PnL from the metrics engine (closed trades).
+                try:
+                    pstats = paper_capture.stats()
+                    realized_net = float(getattr(pstats, "total_pnl", 0) or 0)
+                except Exception:
+                    pstats = None
+                    realized_net = 0.0
+
+                # Unrealized MTM for the open paper positions. Use the live
+                # LTP feed via paper_capture's engine tracker. Defensive
+                # against both BoundMethod (papertrade.Position.unrealized_pnl
+                # is a method) and missing feed.
+                unreal_total = 0.0
+                rows_text = []
+                for p in open_view:
+                    sym = p.get("symbol", "")
+                    instr = p.get("instrument", "")
+                    qty = float(p.get("quantity", 0) or 0)
+                    entry_px = float(p.get("entry_price", 0) or 0)
+                    trade_id = p.get("trade_id", "")
+                    ltp = 0.0
+                    # Try the live feed first — most realistic MTM.
+                    try:
+                        feed = getattr(paper_capture._feed, "get_ltp", None)
+                        if feed is not None and instr:
+                            ltp = float(feed(instr) or 0.0)
+                    except Exception:
+                        ltp = 0.0
+                    if ltp <= 0:
+                        # Fall back to entry price (neutrality on no LTP)
+                        # rather than 0, which would report a 100% paper loss.
+                        ltp = entry_px
+                    mtm = (ltp - entry_px) * qty
+                    if p.get("direction") == "SHORT":
+                        # Both LONG-direction (bullish CE) and SHORT-direction
+                        # (bearish PE) positions are LONG the option premium
+                        # in this subsystem (we always BUY options). MTM is
+                        # symmetric in premium movement; no sign flip needed
+                        # for SHORT. (Fix 2026-07-18 reference.)
+                        pass
+                    unreal_total += mtm
+                    em = "\U0001f7e2" if mtm >= 0 else "\U0001f534"
+                    rows_text.append(
+                        f"  {em} {instr or trade_id}  "
+                        f"<code>{int(qty)}x</code>  "
+                        f"Mkt <code>Rs {ltp:.2f}</code>  "
+                        f"MTM <code>Rs {mtm:+,.0f}</code>"
+                    )
+
+                text += f"\n<b>Paper Capture \u2014 Open ({len(open_view)})</b>\n"
+                text += "\n".join(rows_text) + "\n"
+                text += (
+                    f"Realized: <code>Rs {realized_net:+,.0f}</code>  "
+                    f"\u2502  Unreal MTM: <code>Rs {unreal_total:+,.0f}</code>\n"
                 )
 
         return text

@@ -392,6 +392,10 @@ class PositionTracker:
         if is_session_end and pos.trade_mode == "swing":
             return max(ltp, 0.0), ExitReason.END_OF_DAY
         return 0.0, None
+
+    def _maybe_advance_trailing_stop(
+        self, pos: Position, current_price: float,
+    ) -> None:
         """5-stage trailing stop — see CLAUDE.md.
 
         Stage transitions:
@@ -411,6 +415,17 @@ class PositionTracker:
         UP on premium rallies in either case. The old `is_long` branching
         that flipped signs for SHORT was bogus (SHORT here = underlying view,
         not position side). Fixes 2026-07-18.
+
+        Bug #5 (2026-07-22): this method's ``def`` line was accidentally
+        dropped during an earlier edit. The body (with the docstring above)
+        was left dangling as dead code immediately after the
+        ``_evaluate_exit_via_feed`` method's closing ``return 0.0, None`` —
+        unreachable because Python treats it as a string expression
+        statement followed by ``if`` statements operating on out-of-scope
+        locals. The caller in ``on_bar`` (``self._maybe_advance_trailing_stop``)
+        therefore raised ``AttributeError`` on every bar whose position
+        survived SL/target/time-stop evaluation. Added the ``def`` signature
+        line back to restore the trailing-stop code path.
         """
         progress = (current_price - pos.entry_price) / max(
             (pos.entry_price - pos.stop_loss), 1e-9

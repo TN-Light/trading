@@ -423,13 +423,34 @@ class LivePaperCapture:
         """Register an additional callback invoked after every close."""
         self._on_close_listeners.append(callback)
 
-    def on_bar(self, symbol: str, bar: Dict[str, Any], is_session_end: bool = False):
+    def on_bar(self, symbol: str, bar: Dict[str, Any],
+               is_session_end: bool = False, is_square_off: bool = False):
         """Feed a closed OHLC bar to the engine for exit evaluation.
 
         Args:
             symbol: display symbol ("NIFTY 50" etc).
             bar: dict with at least {timestamp, open, high, low, close, volume?}.
             is_session_end: True if this is the last bar of the trading day.
+            is_square_off: True if intraday square-off window (>= 15:15 IST)
+                has been reached. Caller decides this (prometheus.main drives
+                the clock and computes the trigger). Propagated unmodified to
+                ``PaperTradeEngine.process_bar`` so the tracker's square-off
+                exit branch (otherwise dead code) fires for intraday positions.
+
+        Bug #8 (2026-07-22): previously ``on_bar`` accepted only
+        ``is_session_end`` — the live caller at ``main.py:520`` always
+        passed ``is_session_end=False`` and never passed
+        ``is_square_off=True`` even when the 15:15 IST square-off fired
+        (the live-loop branch at main.py:4619 only invokes
+        ``_square_off_intraday_positions`` against the legacy broker,
+        NOT the paper engine). Result: intraday paper positions never
+        force-closed at 15:15, leaving them open across session boundary
+        and accumulating phantom P&L. Fix: extend the signature to
+        accept ``is_square_off`` and forward it through to the engine,
+        so upstream callers (``_paper_capture_feed_bars``, the
+        ``_square_off_intraday_positions`` path, etc.) can drive
+        square-off semantics for paper_capture just like they do for
+        legacy broker positions.
         """
         if not self.enabled:
             return
@@ -450,7 +471,11 @@ class LivePaperCapture:
                 volume=float(bar.get("volume", 0.0) or 0.0),
                 bar_interval=str(bar.get("interval", "15minute")),
             )
-            self._engine.process_bar(snap, is_session_end=is_session_end)
+            self._engine.process_bar(
+                snap,
+                is_session_end=is_session_end,
+                is_square_off=is_square_off,
+            )
         except Exception as e:
             logger.error(f"[PaperCapture] on_bar error for {symbol}: {e}")
 

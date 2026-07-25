@@ -98,6 +98,24 @@ class RiskManager:
         self.max_daily_loss_pct = config.get("max_daily_loss_pct", 3.0)
         self.max_daily_trades = config.get("max_daily_trades", 6)
 
+        # Intraday-only trade limit (separate counter from max_daily_trades).
+        # Bug A (2026-07-25 audit): pre_trade_check at line 218 reads
+        # ``self.max_intraday_trades`` but __init__ never set the attribute,
+        # so every intraday-mode pre_trade_check raised
+        # ``AttributeError: 'RiskManager' object has no attribute 'max_intraday_trades'``
+        # and every risk-check for an intraday trade crashed before any
+        # violations could be collected — the trade failed open (caller
+        # saw the exception bubble, no RiskCheckResult returned).
+        # In paper mode the live path bypasses OrderManager (Bug #2 fix
+        # routes through LivePaperCapture), so the crash was silent in the
+        # default config; but any direct call into OrderManager with
+        # ``trade_mode="intraday"`` (live Kite path, semi-auto, tests,
+        # multi-account dispatch) hit this immediately.
+        # Fix: read the limit from config (default 8 — generous enough to
+        # allow the configured intraday scan window but bounded to prevent
+        # runaway churn) and expose it as a real attribute.
+        self.max_intraday_trades = int(config.get("max_intraday_trades", 8))
+
         # Weekly limits
         self.max_weekly_loss = config.get("max_weekly_loss", 10000)
         self.max_weekly_loss_pct = config.get("max_weekly_loss_pct", 6.0)

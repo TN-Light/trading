@@ -85,7 +85,16 @@ def _make_mock_prometheus(symbols=None, signal_map=None):
     # Telegram
     mock.telegram = MagicMock()
     mock.telegram.send_message = MagicMock(return_value=True)
-    
+
+    # Bug #2 fix (2026-07-22): LivePaperCapture bypass guard reads
+    # `_paper_capture` and `.enabled` from the prometheus instance. The
+    # scanner integration tests exercise the legacy OrderManager path
+    # (paper_capture is disabled), so explicitly mark the mock as
+    # bypass-disabled. Without this, MagicMock auto-creates a child
+    # mock for the missing attribute and the bypass guard kicks in
+    # incorrectly.
+    mock._paper_capture = None
+
     return mock
 
 

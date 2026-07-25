@@ -21,6 +21,7 @@ class DataStore:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
+        self._migrate_schema()  # Bug #3 follow-up: lightweight ALTERs
 
     @contextmanager
     def _connection(self):
@@ -190,6 +191,10 @@ class DataStore:
                     trade_mode TEXT DEFAULT 'swing',
                     bar_interval TEXT DEFAULT 'day',
                     product_type TEXT DEFAULT 'MIS',
+                    -- Bug #3 (2026-07-22): persist 3-phase premium-floor
+                    -- state so restart recovery doesn't re-fire the
+                    -- Phase 1→2 transition and wrongly lower broker SL.
+                    current_phase INTEGER DEFAULT 1,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -201,6 +206,29 @@ class DataStore:
                     updated_at TEXT NOT NULL
                 );
             """)
+
+    def _migrate_schema(self):
+        """Lightweight idempotent ALTER TABLE migrations for existing DBs.
+
+        Bug #3 (2026-07-22): managed_positions gained a `current_phase`
+        column. Existing prometheus.db files won't have it because
+        CREATE TABLE IF NOT EXISTS skips re-creation.
+        """
+        try:
+            with self._connection() as conn:
+                cols = [r[1] for r in conn.execute(
+                    "PRAGMA table_info(managed_positions)"
+                ).fetchall()]
+                if cols and "current_phase" not in cols:
+                    conn.execute(
+                        "ALTER TABLE managed_positions "
+                        "ADD COLUMN current_phase INTEGER DEFAULT 1"
+                    )
+                    print("[Store] Schema migration: added managed_positions.current_phase column (Bug #3 fix)")
+        except Exception:
+            # Best-effort — if managed_positions doesn't exist yet,
+            # _init_db will create it with the correct schema on next start.
+            pass
 
     # -----------------------------------------------------------------------
     # OHLCV Data
@@ -427,9 +455,11 @@ class DataStore:
                  trailing_stage3, premium_hwm,
                  entry_bar_count, max_bars, breakeven_ratio, risk_distance,
                  entry_orders_json, trade_mode, bar_interval, product_type,
+                 current_phase,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?,
                         COALESCE((SELECT created_at FROM managed_positions WHERE position_id = ?), ?),
                         ?)
             """, (
@@ -451,6 +481,10 @@ class DataStore:
                 state.get("trade_mode", "swing"),
                 state.get("bar_interval", "day"),
                 state.get("product_type", "MIS"),
+                # Bug #3 (2026-07-22): persist current_phase so restart
+                # recovery doesn't reset to Phase 1 and re-fire the
+                # Phase 1→2 broker-SL-lower transition.
+                int(state.get("current_phase", state.get("_current_phase", 1))),
                 state["position_id"], now,
                 now,
             ))

@@ -191,11 +191,28 @@ class AngelOneOptionChain:
     def _parse_tradingsymbol(self, ts: str, underlying: str) -> Optional[Dict]:
         """
         Parse Angel One tradingsymbol to extract strike, option_type, expiry.
-        E.g. "NIFTY25MAR22500CE" -> {"strike": 22500, "option_type": "CE", "expiry_str": "2025-03-27"}
+
+        Bug #4 (2026-07-22) fix: the previous implementation assumed a
+        ``DDMMMYY+strike`` convention, but ``kite_executor.generate_tradingsymbol``
+        actually emits two formats with NO field separators (see
+        ``kite_executor.py:321-363``):
+
+            Monthly: {SYMBOL}{YY}{MON}{STRIKE}{CE/PE}
+                     e.g. BANKNIFTY26JUL56900PE  -> 2026-07-28 (last Thursday), 56900, PE
+                     e.g. SENSEX26JUN74300PE     -> 2026-06-30 (last Tuesday),  74300, PE
+
+            Weekly:  {SYMBOL}{YY}{M}{DD}{STRIKE}{CE/PE}
+                     e.g. NIFTY2640722650PE      -> 2026-04-07, 22650, PE
+                     e.g. SENSEX2661874300PE     -> 2026-06-18, 74300, PE
+
+        The 3-letter month form (e.g. ``JUL``) is monthly; the
+        single-char month form (e.g. ``O`` for Oct, ``N`` for Nov,
+        ``D`` for Dec, ``1``..``9`` for Jan..Sep) is weekly.
         """
         try:
-            # Pattern: UNDERLYING + DDMMMYY + STRIKE + CE/PE
-            # or: UNDERLYING + DDMMMYYYY + STRIKE + CE/PE
+            from prometheus.utils.indian_market import (
+                get_monthly_expiry, _resolve_weekly_expiry_day_name,
+            )
             suffix = ts[len(underlying):]
             if not suffix:
                 return None
@@ -210,32 +227,47 @@ class AngelOneOptionChain:
             else:
                 return None  # futures or unknown
 
-            # Parse with explicit DDMMMYY pattern first (most common)
-            # e.g. "07APR2623500" -> date="07APR26", strike="23500"
-            m = re.match(r'^(\d{2}[A-Z]{3}\d{2})(\d+)$', suffix)
+            # Monthly format: YY + 3-letter MON + strike
+            # e.g. "26JUL56900" → YY=26, MON=JUL, strike=56900
+            m = re.match(r'^(\d{2})([A-Z]{3})(\d+)$', suffix)
             if m:
-                date_part, strike_str = m.groups()
+                yy_str, mon_str, strike_str = m.groups()
                 strike = float(strike_str)
                 expiry_str = ""
                 try:
-                    dt = datetime.strptime(date_part, "%d%b%y")
-                    expiry_str = dt.strftime("%Y-%m-%d")
-                except ValueError:
+                    year = 2000 + int(yy_str)
+                    month = datetime.strptime(mon_str, "%b").month
+                    expiry_weekday = _resolve_weekly_expiry_day_name(
+                        underlying, on_date=date(year, month, 15),
+                    )
+                    monthly_dt = get_monthly_expiry(year, month, expiry_weekday)
+                    expiry_str = monthly_dt.strftime("%Y-%m-%d")
+                except Exception:
                     pass
-                return {"strike": strike, "option_type": option_type, "expiry_str": expiry_str}
+                return {"strike": strike, "option_type": option_type,
+                        "expiry_str": expiry_str}
 
-            # Fallback: DDMMMYYYY pattern (e.g. "07APR202623500")
-            m = re.match(r'^(\d{2}[A-Z]{3}\d{4})(\d+)$', suffix)
+            # Weekly format: YY + single-char M + DD + strike
+            # M is 1-9 (Jan-Sep), O (Oct), N (Nov), D (Dec) — per Kite convention.
+            month_map = {
+                "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
+                "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12,
+            }
+            m = re.match(r'^(\d{2})([1-9OND])(\d{2})(\d+)$', suffix)
             if m:
-                date_part, strike_str = m.groups()
+                yy_str, m_char, dd_str, strike_str = m.groups()
                 strike = float(strike_str)
                 expiry_str = ""
                 try:
-                    dt = datetime.strptime(date_part, "%d%b%Y")
-                    expiry_str = dt.strftime("%Y-%m-%d")
-                except ValueError:
+                    year = 2000 + int(yy_str)
+                    month = month_map[m_char]
+                    day = int(dd_str)
+                    expiry_dt = date(year, month, day)
+                    expiry_str = expiry_dt.strftime("%Y-%m-%d")
+                except Exception:
                     pass
-                return {"strike": strike, "option_type": option_type, "expiry_str": expiry_str}
+                return {"strike": strike, "option_type": option_type,
+                        "expiry_str": expiry_str}
 
             return None
         except Exception:

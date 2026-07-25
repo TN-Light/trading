@@ -206,6 +206,15 @@ class PaperTradeEngine:
             self.signals_skipped_other += 1
             return None
 
+        # Bug #1 (2026-07-22): the live path builds bar_timestamp as a tz-NAIVE
+        # string (main.py:1834 str(.iloc[-1])) and _parse_bar_timestamp returns
+        # a tz-naive datetime. Subtracting it from tz-aware datetime.now(IST)
+        # raised TypeError and silently killed every LivePaperCapture signal.
+        # Fix: normalize naive bar_timestamps to IST-aware before any arithmetic.
+        _bar_ts = signal.bar_timestamp
+        if _bar_ts is not None and _bar_ts.tzinfo is None:
+            _bar_ts = IST.localize(_bar_ts)
+
         position = Position(
             trade_id=trade_id,
             symbol=signal.symbol,
@@ -223,10 +232,19 @@ class PaperTradeEngine:
             # observed 2026-07-21: -1095 min). In that case fall back to
             # datetime.now(). Test/replay bars (same-day or future-day
             # timestamps) are honored as before.
+            #
+            # Bug #1 (2026-07-22): the live path builds bar_timestamp
+            # as a tz-NAIVE string (main.py:1834 str(.iloc[-1])), which
+            # _parse_bar_timestamp parses back into a tz-naive datetime.
+            # Subtracting it from tz-aware datetime.now(IST) raised
+            # TypeError and silently killed every LivePaperCapture
+            # signal. Fix: localize the naive bar_timestamp to IST
+            # before the arithmetic (treats naive as local IST, which
+            # is correct for this system — engine always stores IST).
             entry_time=(
-                signal.bar_timestamp
-                if signal.bar_timestamp is not None
-                and (datetime.now(IST) - signal.bar_timestamp).total_seconds() < 86_400
+                _bar_ts
+                if _bar_ts is not None
+                and (datetime.now(IST) - _bar_ts).total_seconds() < 86_400
                 else datetime.now(IST)
             ),
             stop_loss=signal.stop_loss,

@@ -264,7 +264,50 @@ class PositionMonitor:
         #   Phase 1 (≤3 bars): Total immunity — ignore premium noise
         #   Phase 2 (4-5 bars): Moderate buffer — SL at 80% of original
         #   Phase 3 (>5 bars): Full enforcement — trust options pricing
+        #
+        # Bug #3 (2026-07-22): The original implementation only consulted
+        # `state.current_sl` (the ratcheted trailing-stop SL) in the
+        # Phase 3 `else` branch. In Phase 1/2 it only checked the
+        # catastrophic floor (entry×0.2) and `initial_sl×0.8`. As the
+        # trailing-stop ratchet quickly advanced `state.current_sl` above
+        # entry (Stage 0 BREAKEVEN → Stage 4 RUNNER) within minutes, any
+        # subsequent drop below the ratcheted SL was SILENTLY IGNORED for
+        # the ~5 bars of Phase 1+2 immunity — observed today as a 60+
+        # minute uncovered breach on POS-20260722-0001 (57000PE).
+        #
+        # A compounding bug at line 296 (now fixed below) pushed the
+        # broker SL order DOWN to `initial_sl×0.8` (often below entry)
+        # on the Phase 1→2 transition, even when `state.current_sl` had
+        # already ratcheted well above entry — disarming the broker-side
+        # stop too.
+        #
+        # Fix: insert a UNIVERSAL SL check that ALWAYS honors the
+        # ratcheted `state.current_sl` regardless of phase. Phase gating
+        # now only adds catastrophic-floor protection on top, never
+        # relaxes the ratcheted SL.
         bars_held = state.entry_bar_count
+        if state.current_sl > 0 and state.current_sl > state.initial_sl and current_price <= state.current_sl:
+            # The trailing-stop ratchet has advanced current_sl above the
+            # initial SL (i.e., breakeven trap or higher has engaged).
+            # Honor that ratcheted SL on every tick — do NOT let Phase 1/2
+            # immunity silently disarm it.
+            phase_label = (
+                "phase1_sl_breach" if bars_held <= 3
+                else "phase2_sl_breach" if bars_held <= 5
+                else "stop_loss_premium_phase3"
+            )
+            logger.warning(
+                f"[MONITOR] {phase_label}: {state.position_id} "
+                f"LTP={current_price:.2f} <= current_sl={state.current_sl:.2f} "
+                f"(initial_sl={state.initial_sl:.2f}, bars_held={bars_held})"
+            )
+            # Sync broker SL up to the ratcheted value before exiting
+            # (in case the broker order was lagging — never lower it).
+            self._modify_broker_sl_manual(state, state.current_sl)
+            if self._on_exit:
+                self._on_exit(state.position_id, current_price, phase_label)
+            return
+
         if bars_held <= 3:
             # Phase 1: Immunity to IV crush / spread widening / stop hunts
             # But add a catastrophic circuit breaker — if premium drops > 80%,
@@ -289,11 +332,23 @@ class PositionMonitor:
                 if self._on_exit:
                     self._on_exit(state.position_id, current_price, "stop_loss_premium_phase2")
                 return
-            
-            # Sync broker SL to Phase 2 buffered limit if we just transitioned out of Phase 1
+
+            # Sync broker SL to Phase 2 buffered limit if we just transitioned
+            # out of Phase 1. Bug #3 fix: NEVER lower the broker SL below the
+            # ratcheted `state.current_sl`. Previously this path pushed the
+            # broker SL order DOWN to `initial_sl×0.8` (e.g. 332.64 → 233.76
+            # today), silently disarming the broker-side stop.
             if getattr(state, "_current_phase", 1) < 2:
                 state._current_phase = 2
-                self._modify_broker_sl_manual(state, buffered_sl)
+                # Only lower broker SL if the trailing ratchet never engaged
+                # (current_sl still == initial_sl). If it ratcheted, keep it
+                # at the ratcheted value — never give back profit-lock.
+                broker_sl_target = (
+                    state.current_sl
+                    if state.current_sl > state.initial_sl
+                    else buffered_sl
+                )
+                self._modify_broker_sl_manual(state, broker_sl_target)
         else:
             # Phase 3: Full enforcement — normal SL check
             if current_price <= state.current_sl:
@@ -417,10 +472,30 @@ class PositionMonitor:
         self._modify_broker_sl_manual(state, state.current_sl)
 
     def _modify_broker_sl_manual(self, state: TrailingState, manual_trigger: float):
-        """Internal helper to modify broker SL to a specific trigger price."""
+        """Internal helper to modify broker SL to a specific trigger price.
+
+        Bug #3 (2026-07-22) defense-in-depth: NEVER lower the broker SL-M
+        order below the ratcheted ``state.current_sl`` — once the trailing
+        stop has locked in profit (Stage 0+ engaged), giving back that
+        protection by lowering the broker order is a logical error. The
+        only legitimate transitions are upward (ratchet advances, or
+        phase 3 sync). If a caller passes a trigger below current_sl,
+        clamp upward to current_sl.
+        """
         if not state.sl_order_id:
             logger.debug(f"No SL order ID for {state.position_id}, skip modify")
             return
+        # Defensive: never lower broker SL below the ratcheted current_sl.
+        # (Prevents the Phase 1→2 transition from pushing broker order
+        # DOWN to `initial_sl×0.8` while `state.current_sl` has ratcheted
+        # well above entry — observed today at 10:31:39.)
+        if state.current_sl > 0 and manual_trigger < state.current_sl:
+            logger.warning(
+                f"[MONITOR] Refusing to LOWER broker SL below ratcheted value: "
+                f"{state.position_id} requested={manual_trigger:.2f} "
+                f"< current_sl={state.current_sl:.2f} — clamping up"
+            )
+            manual_trigger = state.current_sl
         try:
             # Check if order is still pending/open
             order = self.broker.get_order_status(state.sl_order_id)

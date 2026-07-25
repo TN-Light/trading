@@ -131,7 +131,29 @@ class LiveScanner:
                 logger.info("LiveScanner: no oi_analyzer found, OI cache disabled")
         except Exception as e:
             logger.warning(f"LiveScanner: OI cache init failed: {e}")
-    
+
+    def _route_paper_capture_or_legacy(self, exec_dict: dict, confirm: bool = False):
+        """Bug #2 (2026-07-22): Unified routing — when LivePaperCapture is
+        active, paper-mode signals must NEVER enter the legacy
+        OrderManager path (which gates through the 15K-capital RiskManager
+        whose max_correlated_pct=50% and Duplicate-instrument checks fire
+        on every signal after the first, silently dropping 11/14 signals
+        today). The 6deda3f dual-path kill was incomplete because
+        scanner.py retained two direct order_manager.execute_signal calls.
+
+        Returns the position object (legacy path) or None (paper_capture
+        path or rejection).
+        """
+        paper_capture = getattr(self._prometheus, "_paper_capture", None)
+        if paper_capture is not None and getattr(paper_capture, "enabled", False):
+            # Paper mode — route exclusively through LivePaperCapture;
+            # the legacy 15K RiskManager is not consulted.
+            paper_capture.on_signal(exec_dict)
+            return None
+        return self._prometheus.order_manager.execute_signal(
+            exec_dict, confirm=confirm
+        )
+
     def _ensure_evaluators(self):
         """Create evaluators for any new symbols."""
         for symbol in self._symbols:
@@ -470,7 +492,8 @@ class LiveScanner:
                     continue
                 
                 # No ATR data → immediate execution (fallback)
-                position = self._prometheus.order_manager.execute_signal(
+                # Bug #2 (2026-07-22): route via paper_capture helper when active.
+                position = self._route_paper_capture_or_legacy(
                     exec_dict, confirm=False
                 )
                 
@@ -604,8 +627,9 @@ class LiveScanner:
                 try:
                     live_premium = pending.get('live_premium')
                     self._feed_real_premium_to_broker(executable, live_premium)
-                    
-                    position = self._prometheus.order_manager.execute_signal(
+
+                    # Bug #2 (2026-07-22): route via paper_capture helper when active.
+                    position = self._route_paper_capture_or_legacy(
                         exec_dict, confirm=False
                     )
                     

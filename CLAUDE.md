@@ -326,3 +326,46 @@ The following changes have been made since Session 30:
 - AI features cleanly disabled
 - Backtest CAGR numbers should NOT be used for forward planning (strategy design hill-climbing caveat)
 
+## Session 31 Updates (July 25, 2026)
+
+Closed the 2026-07-22 paper-trading bug cluster. Six bugs identified; five source fixes + one test-fixture fix landed in this session. All 16 regression tests in `prometheus/tests/test_2026_07_22_bugs.py` pass; cross-suite sweep is 100/100 green (16 + 84 pipeline).
+
+### Bugs fixed in source this session
+
+- **Bug #5 — `_maybe_advance_trailing_stop` orphaned body, never a method** (`papertrade/position_tracker.py`)
+  - The 5-stage trailing-stop method had its `def` signature line deleted in an earlier edit. Its docstring + body sat as dead string-blob and unreachable `if` expressions immediately after `_evaluate_exit_via_feed`'s closing `return 0.0, None`. The caller in `on_bar` (line 266) therefore raised `AttributeError: 'PositionTracker' object has no attribute '_maybe_advance_trailing_stop'` on **every bar** a paper position survived SL/target/time-stop checks AND `enable_trailing=True` (the engine default). Result: trailing-stop was effectively disabled in paper mode + `process_bar` crashed on every surviving bar after entry. Verified the bug also existed in `HEAD` (git show) — not introduced during this investigation. Fix: restored `def _maybe_advance_trailing_stop(self, pos, current_price) -> None:` line; the existing body now attaches to a reachable method.
+
+- **Bug #8 — `is_square_off=True` never reached the paper engine** (`paper_executor/live_bridge.py:426-469` + `main.py:4387-4470`)
+  - `LivePaperCapture.on_bar` accepted only `is_session_end` and forwarded nothing else. `feed_bars_to_paper_capture` (main.py:520) always passed `is_session_end=False`. The 15:15 IST intraday square-off trigger at main.py:4619 only invoked `_square_off_intraday_positions` — which closed legacy broker positions but **never touched** the paper engine. Result: `PositionTracker._evaluate_exit_via_feed`'s intraday square-off branch (line 388) was dead code — intraday paper_capture positions never force-closed at 15:15, leaving them open across the session boundary and accumulating phantom P&L overnight.
+  - Fix: (1) `on_bar` now accepts an `is_square_off` argument and forwards it to `engine.process_bar` (backward-compatible default `False`). (2) `_square_off_intraday_positions` now ALSO iterates `paper_capture.open_positions_view()`, groups open paper positions per-symbol, and emits a synthetic underlying-bar with `is_square_off=True`, entering the underlying-bar path that resolves exit fills via `LivePriceFeed`.
+
+- **Bug #6 — paper_capture MTM invisible in `/status`** (`main.py:8959-9130`)
+  - `_tg_cmd_status` queried only `self.broker.get_positions()` (returns `[]` in paper mode) → paper_capture positions and marks were invisible to the operator. Additionally `papertrade.Position.unrealized_pnl` is a *method* requiring `current_price`, not a float attribute — so any future caller that swaps paper_capture positions into the live dashboard path would crash with `TypeError: '>=' not supported between 'method' and 'int'`.
+  - Fix: when `self._paper_capture` is enabled, append a dedicated "Paper Capture — Open" section to the /status response: lists each open position (instrument, qty, mkt LTP, MTM), plus aggregate Realized + Unrealized MTM totals. MTM uses `paper_capture._feed.get_ltp` to fetch live premiums, falls back to entry price on no LTP (neutrality, not the 100% paper-loss artifact the old buggy path would produce). Also defensively guards the legacy call site against the method-vs-attribute swap (`if callable(pnl): pnl = 0`).
+
+- **Bug #1 — test-fixture accessor** (`prometheus/tests/test_2026_07_22_bugs.py`)
+  - Two `test_tz_*` tests used `engine.tracker.open_positions[0]` (integer index), but `PositionTracker.open_positions` is `Dict[trade_id -> Position]`. They raised `KeyError: 0`. Fixed both call sites to `next(iter(...))` plus a `len(...) == 1` assert. The **source** fix for Bug #1 itself (`IST.localize` on naive bar_timestamps in `engine.py:215-216`) was already present in HEAD.
+
+### Bugs verified already source-fixed in HEAD (no new work needed)
+
+These were confirmed wired into the live execution path, not just into test mocks:
+
+- **Bug #2 — LivePaperCapture bypass not actually applied in scan path**:scanner.py:135 (`_route_paper_capture_or_legacy`) + main.py:3700 (`_execute_signal`'s bypass guard). Verified both scanner call sites (scanner.py:496 and scanner.py:632) route through it. (Tests pass.)
+- **Bug #3 — phase-breach gating disarms trailing stop**: `position_monitor.py:289-309` (universal SL check honoring ratcheted `current_sl` regardless of phase) + L474-498 (never-lower clamp in `_modify_broker_sl_manual`). Original symptoms: today's 60+ min uncovered breach + 10:31:39 broker SL pushed DOWN to `initial_sl*0.8` while `current_sl` ratcheted higher. Both tests pass.
+- **Bug #4 — tradingsymbol regex mis-parse**: `angelone_options.py:191-274` dual-monthly/weekly regex with `month_map` (`1-9OND`), uses `_resolve_weekly_expiry_day_name` for the weekday-of-month-15 lookup. All 4 parser tests pass (monthly, SENSEX monthly, weekly, weekly Oct/Nov/Dec, bogus-year guard).
+
+### Files touched
+
+- `prometheus/papertrade/position_tracker.py` — Bug #5 fix (restored `def _maybe_advance_trailing_stop` line)
+- `prometheus/paper_executor/live_bridge.py` — Bug #8 fix (`on_bar` accepts + propagates `is_square_off`)
+- `prometheus/main.py` — Bug #8 fix (drive paper_capture square-off) + Bug #6 fix (`_tg_cmd_status` Paper Capture section + MTM)
+- `prometheus/tests/test_2026_07_22_bugs.py` — Bug #1 test fixture key fix + new regression tests for Bug #5, Bug #6, Bug #8
+
+### Test results
+
+- `python -m pytest -q prometheus/tests/ prometheus/pipeline_tests/` → **100 passed**
+- `python -m py_compile` on all modified files → clean
+- Bug #5 regression test reproduced the `AttributeError` before the fix; passes after.
+- Bug #6 regression test reproduced the empty `/status` body before the fix; passes after.
+- Bug #8 regression test reproduced `TypeError: unexpected kwarg 'is_square_off'` before the fix; passes after.
+
