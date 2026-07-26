@@ -126,6 +126,10 @@ class TradeRecorder:
                 snapshot_json TEXT
             )
         """)
+        # Bug C.2 (2026-25-07 audit): open-position persistence table.
+        # Mirrored by a separate method so it can be re-run idempotently
+        # (e.g. when ``load_open_positions`` is called on an old DB).
+        self._create_open_positions_schema()
         self._db.commit()
 
     # ------------------------------------------------------------------
@@ -239,3 +243,154 @@ class TradeRecorder:
         if self._db is not None:
             self._db.close()
             self._db = None
+
+    # ------------------------------------------------------------------
+    # Bug C.2 (2026-07-25 audit): open-position persistence
+    # ------------------------------------------------------------------
+    # Before this patch, ``TradeRecorder`` only persisted CLOSED trades
+    # (``record_trade``) — open positions lived solely in
+    # ``PositionTracker.open_positions`` (in-memory dict). On any restart
+    # (process crash, daily service bounce, configuration reload) every
+    # open paper_capture position was silently abandoned: no exit was
+    # ever booked, no telegram alert fired, and ``process_bar`` had no
+    # idea the position existed. Production paper-mode P&L silently lost
+    # every entry that survived past a restart boundary — exactly the
+    # "ghost position" failure mode the LivePaperCapture rewrite was
+    # supposed to eliminate.
+    #
+    # Fix: add a ``paper_open_positions`` table mirroring the open
+    # ``Position`` dataclass fields. The tracker's ``open_position``
+    # inserts a row; ``close_position`` deletes it. On startup, the
+    # ``LivePaperCapture`` adapter calls ``load_open_positions`` to
+    # rehydrate the in-memory dict from disk. Closed rows still flow
+    # to ``paper_trades`` (the existing table) via the immutable
+    # ``record_trade`` path — so historical reporting is unchanged.
+    def _create_open_positions_schema(self) -> None:
+        """Idempotent migration: create ``paper_open_positions`` if missing.
+
+        Existing databases (pre-patch) won't have the table; the
+        ``CREATE TABLE IF NOT EXISTS`` makes the migration safe on every
+        startup without a separate ``ALTER TABLE`` step.
+        """
+        assert self._db is not None
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS paper_open_positions (
+                trade_id TEXT PRIMARY KEY,
+                symbol TEXT,
+                instrument TEXT,
+                underlying TEXT,
+                direction TEXT,
+                quantity INTEGER,
+                entry_price REAL,
+                entry_time TEXT,
+                stop_loss REAL,
+                target REAL,
+                max_bars INTEGER,
+                bars_held INTEGER DEFAULT 0,
+                max_bars_allowed TEXT,
+                breakeven_set INTEGER DEFAULT 0,
+                trailing_floor REAL DEFAULT 0,
+                high_water_mark REAL DEFAULT 0,
+                strategy TEXT DEFAULT '',
+                signal_score REAL DEFAULT 0,
+                signal_confidence REAL DEFAULT 0,
+                trade_mode TEXT DEFAULT 'intraday',
+                recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        self._db.commit()
+
+    def record_open_position(self, position_dict: dict) -> None:
+        """Upsert one row into ``paper_open_positions``.
+
+        Called by ``PositionTracker.open_position`` immediately after a
+        duplicate-rejected insert succeeds.
+        ``position_dict`` should be the output of ``Position.to_dict``
+        (already JSON-serializable — datetime fields as ISO strings,
+        enums as their values).
+        """
+        if self._db is None:
+            return
+        cols = [
+            "trade_id", "symbol", "instrument", "underlying", "direction",
+            "quantity", "entry_price", "entry_time", "stop_loss", "target",
+            "max_bars", "bars_held", "max_bars_allowed", "breakeven_set",
+            "trailing_floor", "high_water_mark", "strategy",
+            "signal_score", "signal_confidence", "trade_mode",
+        ]
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO paper_open_positions ({cols}) VALUES ({ph})".format(
+                    cols=",".join(cols),
+                    ph=",".join(["?"] * len(cols)),
+                ),
+                [
+                    position_dict.get("trade_id"),
+                    position_dict.get("symbol"),
+                    position_dict.get("instrument"),
+                    position_dict.get("underlying"),
+                    position_dict.get("direction"),
+                    int(position_dict.get("quantity") or 0),
+                    float(position_dict.get("entry_price") or 0),
+                    position_dict.get("entry_time"),
+                    float(position_dict.get("stop_loss") or 0),
+                    float(position_dict.get("target") or 0),
+                    int(position_dict.get("max_bars") or 0),
+                    int(position_dict.get("bars_held") or 0),
+                    str(position_dict.get("max_bars_allowed") or ""),
+                    int(bool(position_dict.get("breakeven_set"))),
+                    float(position_dict.get("trailing_floor") or 0),
+                    float(position_dict.get("high_water_mark") or 0),
+                    position_dict.get("strategy") or "",
+                    float(position_dict.get("signal_score") or 0),
+                    float(position_dict.get("signal_confidence") or 0),
+                    position_dict.get("trade_mode") or "intraday",
+                ],
+            )
+            self._db.commit()
+        except Exception as e:
+            logger.error(
+                f"TradeRecorder: open-position insert failed for "
+                f"{position_dict.get('trade_id')}: {e}"
+            )
+
+    def delete_open_position(self, trade_id: str) -> None:
+        """Remove a row from ``paper_open_positions`` on close.
+
+        Called by ``PositionTracker.close_position`` after the trade is
+        deleted from the in-memory dict (and the closed PaperTrade has
+        been recorded to ``paper_trades`` via the existing path).
+        """
+        if self._db is None:
+            return
+        try:
+            self._db.execute(
+                "DELETE FROM paper_open_positions WHERE trade_id = ?",
+                (trade_id,),
+            )
+            self._db.commit()
+        except Exception as e:
+            logger.error(
+                f"TradeRecorder: open-position delete failed for {trade_id}: {e}"
+            )
+
+    def load_open_positions(self) -> List[dict]:
+        """Read every row from ``paper_open_positions``.
+
+        Returns a list of dicts (one per open position at last shutdown).
+        The ``LivePaperCapture`` adapter rehydrates these into
+        ``engine.tracker.open_positions`` on init — see
+        ``paper_executor/live_bridge.py``.
+        """
+        if self._db is None:
+            return []
+        try:
+            self._create_open_positions_schema()
+            rows = self._db.execute(
+                "SELECT * FROM paper_open_positions"
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"TradeRecorder: load_open_positions failed: {e}")
+            return []
+

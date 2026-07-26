@@ -154,6 +154,20 @@ class LiveScanner:
             exec_dict, confirm=confirm
         )
 
+    def _is_paper_capture_active(self) -> bool:
+        """Bug D.4 (2026-07-25 audit dispatch): paper-mode ingestion gate.
+
+        ``True`` when LivePaperCapture is enabled — meaning every signal
+        must be routed through ``paper_capture.on_signal`` exactly once,
+        and the legacy ``_dispatch_multi_account`` / OrderManager paths
+        must NOT be invoked at all (the wrapper at
+        ``main.py:_dispatch_multi_account`` forwards to paper_capture
+        when ``self._paper_capture`` is enabled, so calling it would
+        re-feed the signal a second time).
+        """
+        pc = getattr(self._prometheus, "_paper_capture", None)
+        return pc is not None and bool(getattr(pc, "enabled", False))
+
     def _ensure_evaluators(self):
         """Create evaluators for any new symbols."""
         for symbol in self._symbols:
@@ -496,9 +510,25 @@ class LiveScanner:
                 position = self._route_paper_capture_or_legacy(
                     exec_dict, confirm=False
                 )
-                
-                # Dispatch to multi-account stacks (e.g. paper_100k)
-                if hasattr(self._prometheus, "_dispatch_multi_account"):
+
+                # Bug D.4 (2026-07-25 audit dispatch): when LivePaperCapture is
+                # active, ``_route_paper_capture_or_legacy`` already opened a
+                # paper position. Calling ``self._prometheus._dispatch_multi_account``
+                # here would RE-ENTER ``paper_capture.on_signal`` via
+                # ``main.py:_dispatch_multi_account`` (which also forwards to
+                # paper_capture when ``self._paper_capture`` is enabled — it's
+                # the *production paper-mode ingestion point*). That opened a
+                # SECOND paper_capture position per signal — silently doubling
+                # every paper-trade entry in production paper mode. Same bug
+                # existed in the pullback path (next patch below).
+                # Fix: skip the multi-account dispatch entirely when paper_capture
+                # is active. The legacy ``_dispatch_multi_account_live`` path
+                # is already disabled in paper mode (the wrapper returns early
+                # at main.py:1009), so there's nothing left to dispatch — the
+                # only role ``_dispatch_multi_account`` used to play was
+                # re-feeding signals to paper_capture (the duplicate call).
+                paper_capture_active = self._is_paper_capture_active()
+                if not paper_capture_active and hasattr(self._prometheus, "_dispatch_multi_account"):
                     try:
                         self._prometheus._dispatch_multi_account(
                             exec_dict,
@@ -507,11 +537,11 @@ class LiveScanner:
                         )
                     except Exception as mae:
                         logger.error(f"LiveScanner: multi-account dispatch failed: {mae}")
-                
+
                 if position:
                     result.executed = True
                     self._notifier.notify_execution_result(executable, position)
-                    
+
                     # Set up trailing stop
                     try:
                         from prometheus.config import get as cfg_get
@@ -528,9 +558,12 @@ class LiveScanner:
                                 self._prometheus.position_monitor.add_position(ts)
                     except Exception as e:
                         logger.warning(f"LiveScanner: trailing setup failed: {e}")
-                    
-                    # Dispatch to multi-account traders
-                    self._dispatch_multi_account(exec_dict, executable)
+
+                    # Dispatch to multi-account traders (only when paper_capture
+                    # is NOT active — see ``paper_capture_active`` comment above
+                    # for the duplicate-ingestion rationale).
+                    if not paper_capture_active:
+                        self._dispatch_multi_account(exec_dict, executable)
                 else:
                     error = getattr(
                         self._prometheus.order_manager, 'last_execution_error', ''
@@ -632,9 +665,21 @@ class LiveScanner:
                     position = self._route_paper_capture_or_legacy(
                         exec_dict, confirm=False
                     )
-                    
-                    # Dispatch to multi-account stacks (e.g. paper_100k)
-                    if hasattr(self._prometheus, "_dispatch_multi_account"):
+
+                    # Bug D.4 (2026-07-25 audit dispatch): same guard as the
+                    # immediate-execution path above — when paper_capture is
+                    # active, ``_route_paper_capture_or_legacy`` already opened
+                    # a paper position via ``on_signal``. Calling
+                    # ``self._prometheus._dispatch_multi_account`` here would
+                    # re-enter ``paper_capture.on_signal`` (the wrapper at
+                    # ``main.py:_dispatch_multi_account`` forwards to paper_capture
+                    # when ``self._paper_capture`` is enabled). The earlier
+                    # comment at line ~668 only suppressed the local
+                    # ``self._dispatch_multi_account(exec_dict, executable)`` call,
+                    # missing the upstream wrapper call below that ALSO hits
+                    # paper_capture. Both must be suppressed.
+                    paper_capture_active = self._is_paper_capture_active()
+                    if not paper_capture_active and hasattr(self._prometheus, "_dispatch_multi_account"):
                         try:
                             self._prometheus._dispatch_multi_account(
                                 exec_dict,
@@ -643,12 +688,12 @@ class LiveScanner:
                             )
                         except Exception as mae:
                             logger.error(f"LiveScanner: multi-account dispatch failed: {mae}")
-                    
+
                     result = pending.get('result', SymbolScanResult(symbol=symbol))
                     if position:
                         result.executed = True
                         self._notifier.notify_execution_result(executable, position)
-                        
+
                         # Set up trailing stop
                         try:
                             from prometheus.config import get as cfg_get
@@ -665,9 +710,9 @@ class LiveScanner:
                                     self._prometheus.position_monitor.add_position(ts)
                         except Exception as e:
                             logger.warning(f"LiveScanner: trailing setup failed: {e}")
-                        # NOTE: multi-account dispatch already occurred at line 615
-                        # (self._prometheus._dispatch_multi_account). Do NOT re-dispatch
-                        # here — the duplicate-instrument risk gate would reject anyway.
+                        # NOTE: multi-account dispatch already occurred above
+                        # (self._prometheus._dispatch_multi_account) when
+                        # paper_capture is NOT active. Do NOT re-dispatch here.
                     else:
                         self._gate.undo_pass(symbol, executable.direction)
                 except Exception as e:
@@ -836,19 +881,37 @@ class LiveScanner:
     
     def _update_position_prices_bs(self):
         """Last-resort BS pricing when Angel One is unavailable."""
+        # Bug B.3 (2026-07-25 audit): the import below referenced
+        # ``prometheus.signals.option_pricing`` which doesn't exist in the
+        # source tree (only ``prometheus.utils.options_math`` does). The
+        # ``except Exception: pass`` swallow at the outer try-block (line
+        # below) caught the ``ModuleNotFoundError`` every scan cycle and
+        # silently no-op'd this whole method. Net effect: when Angel One
+        # option-chain polling failed (auth cooldown, network outage, API
+        # outage), the live scanner's BS-theoretical fallback path was
+        # dead code — ``broker.update_prices`` never received fresh
+        # estimates, ``PositionMonitor`` polled stale LTPs, and trailing
+        # stops went into a "blind window" until Angel One recovered (or
+        # were left at the last-known price indefinitely). Fix: import
+        # from the correct path; also surface import/evaluate failures
+        # with a warning instead of swallowing them so any future
+        # dead-import regressions are noisy.
         try:
             pm = getattr(self._prometheus, 'position_monitor', None)
             broker = getattr(self._prometheus, 'broker', None)
             if not pm or not broker or pm.active_count == 0:
                 return
-            
-            from prometheus.signals.option_pricing import black_scholes_price
+
+            from prometheus.utils.options_math import black_scholes_price
             from prometheus.utils.indian_market import days_to_expiry
             
             positions = pm.get_positions()
             price_updates = {}
             
             for pid, state in positions.items():
+                # Bug B.3 (continued): don't swallow per-position exceptions
+                # either — log them so future parsing / BS-evaluation
+                # regressions surface in the operator's logs.
                 try:
                     spot = self._get_underlying_spot(state.symbol)
                     strike = self._parse_strike(state.tradingsymbol)
@@ -860,8 +923,11 @@ class LiveScanner:
                     premium = black_scholes_price(spot, strike, T, 0.065, 0.15, opt_type)
                     if premium and premium > 0 and premium == premium:
                         price_updates[state.tradingsymbol] = float(premium)
-                except Exception:
-                    pass
+                except Exception as inner:
+                    logger.warning(
+                        f"LiveScanner: BS-fallback update failed for "
+                        f"pid={pid} sym={state.symbol} tm={state.tradingsymbol}: {inner}"
+                    )
             
             if price_updates and hasattr(broker, 'update_prices'):
                 broker.update_prices(price_updates)
@@ -869,8 +935,13 @@ class LiveScanner:
                     f"LiveScanner: updated {len(price_updates)} prices "
                     f"via BS fallback (Angel One unavailable)"
                 )
-        except Exception:
-            pass
+        # Bug B.3 (continued): the original ``except: pass`` swallowed
+        # every failure silently — including the ``ModuleNotFoundError``
+        # that masked the broken import path for weeks. Promote to a
+        # warning-level log so any future dead-import / API outage
+        # regression is operator-visible.
+        except Exception as e:
+            logger.warning(f"LiveScanner: BS fallback pricing failed: {e}")
     
     def _get_underlying_spot(self, symbol: str) -> float:
         """Get latest spot price for a symbol."""

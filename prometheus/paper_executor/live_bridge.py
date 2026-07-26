@@ -18,7 +18,10 @@ from prometheus.papertrade.position_tracker import PositionTracker, CostModel
 from prometheus.papertrade.metrics import MetricsEngine
 from prometheus.papertrade.recorder import TradeRecorder
 from prometheus.papertrade.signal_source import from_signal_dict
-from prometheus.papertrade.types import PaperTrade, TradeStats, TradeSnapshot
+from prometheus.papertrade.types import (
+    PaperTrade, TradeStats, TradeSnapshot,
+    Position, Direction,
+)
 from prometheus.utils.logger import logger
 from prometheus.utils.indian_market import IST
 
@@ -143,6 +146,13 @@ class LivePaperCapture:
             csv_path=config.csv_path,
         )
         # Build the tracker with the requested cost model.
+        # Bug C.2 (2026-07-25 audit): pass the recorder reference so
+        # ``PositionTracker.open_position`` / ``close_position`` write to
+        # the ``paper_open_positions`` SQLite table. That keeps open
+        # position state durable across process restarts (the previous
+        # failure mode was that open paper_capture positions were silently
+        # abandoned on every restart — the trade simply vanished from the
+        # in-memory dict and never got a recorded exit).
         tracker = PositionTracker(
             fill_sim=FillSimulator(
                 feed=self._feed,
@@ -151,6 +161,7 @@ class LivePaperCapture:
             ),
             cost_model=CostModel(cost_per_side_bps=config.cost_per_side_bps),
             enable_trailing=config.enable_trailing,
+            recorder=self._recorder,
         )
         # PaperTradeEngine with high cap + allow_duplicate_instrument=True
         # so EVERY valid signal becomes a paper position (the user's stated
@@ -171,6 +182,29 @@ class LivePaperCapture:
         self._engine.tracker = tracker
         # MetricsEngine is the metrics aggregator.
         self._metrics: MetricsEngine = self._engine.metrics
+
+        # Bug C.2 (2026-07-25 audit): re-hydrate any open paper positions
+        # left in the SQLite table from the previous run. Each row is a
+        # ``Position`` snapshot captured when the position was first opened
+        # (and kept in step on every bar via the tracker hooks above —
+        # well, almost: today we only persist at OPEN and DELETE at CLOSE,
+        # which is enough to survive a sudden crash but doesn't keep
+        # ``bars_held`` / ``breakeven_set`` / ``high_water_mark`` in step
+        # across a restart). The recovered positions lose any in-flight
+        # trailing/progress state — they re-enter the exit logic at "fresh
+        # entry" status the next bar, which is a conservative behavior:
+        # the SL/target/time-stop all still apply; only the BE/trailing
+        # progress resets. Acceptable for paper-mode integrity (the goal
+        # is to NOT LOSE the position entirely).
+        try:
+            recovered = self._load_and_rehydrate_open_positions()
+            if recovered:
+                logger.info(
+                    f"[PaperCapture] recovered {recovered} open position(s) "
+                    f"from SQLite (Bug C.2 persistence)"
+                )
+        except Exception as e:
+            logger.warning(f"[PaperCapture] open-position rehydrate failed: {e}")
 
         # Wrap ``self._engine.process_bar`` so we receive a callback every
         # time the engine closes a paper position (SL/target/trailing/time-stop/
@@ -492,6 +526,92 @@ class LivePaperCapture:
         if not self.enabled:
             return []
         return [p.to_dict() for p in self._engine.tracker.open_positions.values()]
+
+    def _load_and_rehydrate_open_positions(self) -> int:
+        """Bug C.2 (2026-07-25 audit): rehydrate open paper positions from
+        the SQLite ``paper_open_positions`` table into the in-memory
+        ``PositionTracker.open_positions`` dict.
+
+        Returns the count of rows successfully re-hydrated. Skips rows
+        whose schema doesn't match the current ``Position`` dataclass
+        (logged at WARNING).
+
+        Re-hydrated positions re-enter the exit logic on the next bar
+        with their saved ``stop_loss`` / ``target`` / ``max_bars``
+        intact — but their trailing-stop progress (``breakeven_set``,
+        ``high_water_mark``, ``trailing_floor``) is whichever value we
+        persisted at OPEN time (since the tracker doesn't currently
+        update those on every bar). Conservative: positions lose any
+        in-flight trailing progress across the restart, but they DO get
+        evaluated against SL/target/time-stop on the next bar — that's
+        the intended paper-integrity guarantee (no silent ghost-loss).
+        """
+        if not self.enabled:
+            return 0
+        rows = self._recorder.load_open_positions()
+        if not rows:
+            return 0
+        count = 0
+        for r in rows:
+            try:
+                from prometheus.papertrade.types import ExitReason  # noqa: F401
+                # Parse entry_time (ISO string) back to tz-aware datetime.
+                # The recorder stores whatever ``Position.to_dict`` emits
+                # (which is ``self.entry_time.isoformat()``). If the entry
+                # was IST-aware, the isoformat string preserves the tz.
+                entry_time_str = r.get("entry_time") or ""
+                entry_time = datetime.fromisoformat(entry_time_str)
+                # ``Position.to_dict`` strips the tz from datetimes that
+                # were stored tz-naive (Python's isoformat omits tzinfo if
+                # it's None). Re-localize to IST to match the live path
+                # (consistent with the bug #1 fix at engine.py:215-216).
+                if entry_time.tzinfo is None:
+                    entry_time = IST.localize(entry_time)
+                pos = Position(
+                    trade_id=r["trade_id"],
+                    symbol=r.get("symbol", ""),
+                    instrument=r.get("instrument", ""),
+                    underlying=r.get("underlying", ""),
+                    direction=Direction(r.get("direction", "LONG")),
+                    quantity=int(r.get("quantity") or 0),
+                    entry_price=float(r.get("entry_price") or 0),
+                    entry_time=entry_time,
+                    stop_loss=float(r.get("stop_loss") or 0),
+                    target=float(r.get("target") or 0),
+                    max_bars=int(r.get("max_bars") or 0),
+                    bars_held=int(r.get("bars_held") or 0),
+                    max_bars_allowed=None,
+                    breakeven_set=bool(int(r.get("breakeven_set") or 0)),
+                    trailing_floor=float(r.get("trailing_floor") or 0),
+                    high_water_mark=float(r.get("high_water_mark") or 0),
+                    strategy=r.get("strategy", "") or "",
+                    signal_score=float(r.get("signal_score") or 0),
+                    signal_confidence=float(r.get("signal_confidence") or 0),
+                    trade_mode=r.get("trade_mode", "intraday") or "intraday",
+                )
+                # Inject into the tracker's in-memory dict ONLY if not
+                # already present (defensive — should never happen, but
+                # the engine re-runs ``open_position`` for duplicate IDs
+                # and we don't want that to mask a re-hydrated row).
+                if pos.trade_id in self._engine.tracker.open_positions:
+                    logger.warning(
+                        f"[PaperCapture] rehydrate skip existing "
+                        f"{pos.trade_id}"
+                    )
+                    continue
+                self._engine.tracker.open_positions[pos.trade_id] = pos
+                count += 1
+                logger.info(
+                    f"[PaperCapture] rehydrated {pos.trade_id} "
+                    f"{pos.direction.value} {pos.instrument} @ "
+                    f"Rs {pos.entry_price:.2f} from SQLite"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[PaperCapture] rehydrate skip invalid row "
+                    f"{r.get('trade_id')}: {e}"
+                )
+        return count
 
     def recent_trades(self, n: int = 20):
         """Return the N most-recently closed paper trades as dicts (newest last).

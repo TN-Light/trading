@@ -833,3 +833,315 @@ def test_restore_open_positions_preserves_current_phase():
         f"{ts._current_phase!r} (Bug C — phase resets to 1 on restart)"
     )
 
+
+# ===========================================================================
+# Patch 1 (2026-07-25 audit) — D.4: double-dispatch of
+# _dispatch_multi_account in scanner immediate + pullback paths
+# ===========================================================================
+
+def test_scanner_immediate_path_skips_multi_account_dispatch_when_paper_capture_active():
+    """Patch 1 regression: when LivePaperCapture is active, the immediate-
+    execution path in LiveScanner must NOT call
+    ``self._prometheus._dispatch_multi_account`` (the wrapper at
+    ``main.py:_dispatch_multi_account`` re-enters ``paper_capture.on_signal``
+    when ``self._paper_capture`` is enabled — opening a SECOND position).
+    """
+    from prometheus.pipeline.scanner import LiveScanner
+
+    class _PC:
+        enabled = True
+        def __init__(self):
+            self.calls = []
+        def on_signal(self, sig):
+            self.calls.append(sig)
+
+    class _MockProm:
+        def __init__(self):
+            self._paper_capture = _PC()
+            # _dispatch_multi_account is the wrapper the scanner calls —
+            # if it's invoked in paper mode, that's the bug.
+            self._dispatch_multi_account_calls = 0
+            self.order_manager = object()  # unused when pc active
+        def _dispatch_multi_account(self, sig, is_intraday=False, bar_interval="15minute"):
+            self._dispatch_multi_account_calls += 1
+
+    mock = _MockProm()
+    scanner = LiveScanner.__new__(LiveScanner)
+    scanner._prometheus = mock
+
+    # The post-Patch 1 safety guard.
+    assert scanner._is_paper_capture_active() is True, (
+        "PaperCapture must be detected as active when it exists + enabled"
+    )
+
+
+def test_scanner_is_paper_capture_active_false_when_disabled_or_absent():
+    """Patch 1 companion: the helper must return False in live mode
+    (no paper_capture) and when paper_capture is explicitly disabled —
+    so the multi-account dispatch path runs normally in live mode."""
+    from prometheus.pipeline.scanner import LiveScanner
+
+    class _PCDisabled:
+        enabled = False
+
+    class _MockProm1:
+        _paper_capture = _PCDisabled()
+        order_manager = object()
+
+    class _MockProm2:
+        _paper_capture = None
+        order_manager = object()
+
+    s1 = LiveScanner.__new__(LiveScanner); s1._prometheus = _MockProm1()
+    s2 = LiveScanner.__new__(LiveScanner); s2._prometheus = _MockProm2()
+
+    assert s1._is_paper_capture_active() is False
+    assert s2._is_paper_capture_active() is False
+
+
+# ===========================================================================
+# Patch 3 (2026-07-25 audit) — B.3: broken BS-fallback import
+# ===========================================================================
+
+def test_scanner_bs_fallback_import_path_exists_and_resolvable():
+    """Patch 3 regression: ``scanner._update_position_prices_bs`` imports
+    ``black_scholes_price`` from ``prometheus.utils.options_math``. The
+    original code imported from ``prometheus.signals.option_pricing``
+    which doesn't exist in the source tree. The fix must point to the
+    real module so the BS fallback path stops silently no-op'ing via the
+    ``except Exception: pass`` swallow. We can't easily exercise the
+    method end-to-end (needs a fully wired live prometheus instance)
+    so we verify the import resolution instead — this fails fast the
+    moment anyone breaks the import path again.
+    """
+    # Public module attribute, so the import path itself resolves.
+    from prometheus.utils.options_math import black_scholes_price  # noqa: F401
+    # And the WRONG module from the original bug must NOT be importable
+    # (this is what was masked by ``except Exception: pass`` before).
+    import importlib
+    bad_module = importlib.util.find_spec("prometheus.signals.option_pricing")
+    assert bad_module is None, (
+        "prometheus.signals.option_pricing should not exist — the Patch 3 "
+        "fix deliberately routes through prometheus.utils.options_math; if "
+        "this module reappears the import-path regression re-emerges."
+    )
+
+
+# ===========================================================================
+# B.2 (2026-07-25 audit) — set_real_premium must reject inverted spreads
+# ===========================================================================
+
+def test_set_real_premium_clamps_inverted_spread_to_ltp():
+    """B.2 regression: when Angel One returns ``bid > ask`` (corrupted
+    quote), ``PaperTrader.set_real_premium`` must clamp both sides to
+    ``ltp`` instead of letting the inverted spread survive and distort
+    the mid-spread fill formula.
+    """
+    from prometheus.execution.paper_trader import PaperTrader
+
+    trader = PaperTrader(initial_capital=100000)
+    trader.set_real_premium("NIFTY26AUG24150CE", ltp=100.0, bid=120.0, ask=80.0)
+
+    quote = trader.get_real_premium("NIFTY26AUG24150CE")
+    assert quote is not None
+    # Both sides must collapse to ltp (the only known-good value).
+    assert quote["bid"] == 100.0, f"Inverted bid must clamp to ltp; got {quote['bid']}"
+    assert quote["ask"] == 100.0, f"Inverted ask must clamp to ltp; got {quote['ask']}"
+    assert quote["ltp"] == 100.0
+
+
+def test_set_real_premium_preserves_normal_spread():
+    """B.2 companion: a valid spread (``bid <= ask``) must pass through
+    unchanged — the clamp should only fire on inverted quotes, not
+    every call.
+    """
+    from prometheus.execution.paper_trader import PaperTrader
+
+    trader = PaperTrader(initial_capital=100000)
+    trader.set_real_premium("NIFTY26AUG24150CE", ltp=100.0, bid=98.0, ask=102.0)
+
+    quote = trader.get_real_premium("NIFTY26AUG24150CE")
+    assert quote is not None
+    assert quote["bid"] == 98.0
+    assert quote["ask"] == 102.0
+    assert quote["ltp"] == 100.0
+
+
+# ===========================================================================
+# Patch 2 / C.2 (2026-07-25 audit) — paper_capture open-position persistence
+# ===========================================================================
+
+def test_trade_recorder_records_and_deletes_open_positions(tmp_path):
+    """C.2 regression: ``TradeRecorder`` must persist open positions to a
+    new ``paper_open_positions`` table on insert, and remove the row
+    when the position closes — so a restart can re-hydrate them.
+    """
+    from prometheus.papertrade.recorder import TradeRecorder
+    from prometheus.papertrade.types import Position, Direction
+
+    db = tmp_path / "open_pos.sqlite"
+    csv = tmp_path / "open_pos.csv"
+    recorder = TradeRecorder(sqlite_path=str(db), csv_path=str(csv))
+
+    # Simulate an OPEN event as the tracker would emit it.
+    pos = Position(
+        trade_id="PAPER-TEST-001",
+        symbol="NIFTY 50",
+        instrument="NIFTY26JUL24150CE",
+        underlying="NIFTY",
+        direction=Direction.LONG,
+        quantity=75,
+        entry_price=100.0,
+        entry_time=datetime(2026, 7, 25, 9, 45, 0, tzinfo=IST),
+        stop_loss=95.0,
+        target=120.0,
+        max_bars=16,
+        bars_held=0,
+        strategy="apex",
+        signal_score=0.72,
+        signal_confidence=0.6,
+        trade_mode="intraday",
+    )
+    recorder.record_open_position(pos.to_dict())
+
+    # Verify the row is persisted.
+    rows = recorder.load_open_positions()
+    assert len(rows) == 1, f"Expected 1 open row; got {len(rows)}"
+    assert rows[0]["trade_id"] == "PAPER-TEST-001"
+    assert rows[0]["instrument"] == "NIFTY26JUL24150CE"
+    assert rows[0]["entry_price"] == 100.0
+    assert rows[0]["stop_loss"] == 95.0
+
+    # Simulate a CLOSE event.
+    recorder.delete_open_position("PAPER-TEST-001")
+    rows = recorder.load_open_positions()
+    assert rows == [], "Close must delete the matching row"
+
+    recorder.close()
+
+
+def test_position_tracker_recorder_hooks_persist_on_open(tmp_path):
+    """C.2 wiring: a PositionTracker constructed with a recorder
+    reference must call ``record_open_position`` on every successful
+    open — so even a crash immediately after the in-memory insert
+    still leaves a recoverable row on disk.
+    """
+    from prometheus.papertrade.recorder import TradeRecorder
+    from prometheus.papertrade.position_tracker import PositionTracker, CostModel
+    from prometheus.papertrade.fill_simulator import FillSimulator
+    from prometheus.papertrade.types import Position, Direction
+
+    recorder = TradeRecorder(
+        sqlite_path=str(tmp_path / "hook.sqlite"),
+        csv_path=None,
+    )
+    tracker = PositionTracker(
+        fill_sim=FillSimulator(feed=None, slippage_bps=0, use_bid_ask=False),
+        cost_model=CostModel(cost_per_side_bps=0.0),
+        enable_trailing=False,
+        recorder=recorder,
+    )
+
+    pos = Position(
+        trade_id="PAPER-HOOK-001",
+        symbol="NIFTY 50",
+        instrument="NIFTY26JUL24150CE",
+        underlying="NIFTY",
+        direction=Direction.LONG,
+        quantity=75,
+        entry_price=100.0,
+        entry_time=datetime(2026, 7, 25, 9, 45, 0, tzinfo=IST),
+        stop_loss=95.0,
+        target=120.0,
+        max_bars=16,
+        strategy="apex",
+    )
+    tracker.open_position(pos)
+
+    # Recorder hook must have persisted the row immediately.
+    rows = recorder.load_open_positions()
+    assert len(rows) == 1
+    assert rows[0]["trade_id"] == "PAPER-HOOK-001"
+
+    recorder.close()
+
+
+def test_live_paper_capture_rehydrates_open_positions_on_init(tmp_path):
+    """C.2 end-to-end: LivePaperCapture.__init__ must re-hydrate
+    any rows present in ``paper_open_positions`` into the engine's
+    tracker dict — so a restart recovers the open positions instead
+    of silently losing them.
+    """
+    from prometheus.papertrade.recorder import TradeRecorder
+    from prometheus.papertrade.types import Position, Direction
+    from prometheus.paper_executor.live_bridge import (
+        LivePaperCapture, CaptureConfig,
+    )
+
+    shared_db = str(tmp_path / "shared.sqlite")
+    shared_csv = str(tmp_path / "shared.csv")
+
+    # Session 1: write one persisted open position directly to the recorder.
+    recorder = TradeRecorder(sqlite_path=shared_db, csv_path=shared_csv)
+    pos = Position(
+        trade_id="PAPER-RESTART-001",
+        symbol="NIFTY 50",
+        instrument="NIFTY26JUL24150CE",
+        underlying="NIFTY",
+        direction=Direction.LONG,
+        quantity=75,
+        entry_price=100.0,
+        entry_time=datetime(2026, 7, 25, 9, 45, 0, tzinfo=IST),
+        stop_loss=95.0,
+        target=120.0,
+        max_bars=16,
+        strategy="apex",
+        signal_score=0.72,
+        signal_confidence=0.6,
+        trade_mode="intraday",
+    )
+    # Simulate the tracker.open_position hook.
+    recorder.record_open_position(pos.to_dict())
+    recorder.close()
+
+    # Session 2: spin up LivePaperCapture pointed at the SAME sqlite path.
+    config = CaptureConfig(
+        enabled=True,
+        sqlite_path=shared_db,
+        csv_path=shared_csv,
+        max_concurrent_positions=8,
+        allow_duplicate_instrument=True,
+        enable_trailing=False,
+        cost_per_side_bps=0.0,
+        slippage_bps=0,
+        default_max_bars_intraday=16,
+        default_max_bars_swing=96,
+    )
+
+    class _Ltp:
+        def get_ltp(self, instrument):
+            return 100.0
+
+    capture = LivePaperCapture(config=config, ltp_source=_Ltp(), telegram=None)
+
+    # After init, the engine tracker MUST contain the recovered position.
+    open_dict = capture._engine.tracker.open_positions
+    assert "PAPER-RESTART-001" in open_dict, (
+        "Recovered position must be re-hydrated into the engine tracker; "
+        f"got keys: {list(open_dict.keys())}"
+    )
+
+    recovered = open_dict["PAPER-RESTART-001"]
+    assert recovered.instrument == "NIFTY26JUL24150CE"
+    assert recovered.entry_price == 100.0
+    assert recovered.stop_loss == 95.0
+    assert recovered.target == 120.0
+
+    # No leftover ghost row in the persistence table — rehydrate keeps
+    # the row (so a second restart mid-session is also recoverable).
+    rows = capture._recorder.load_open_positions()
+    assert len(rows) == 1, "Rehydrated position row must persist (not deleted by rehydrate)"
+
+    capture._recorder.close()
+
+

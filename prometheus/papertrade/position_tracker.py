@@ -31,7 +31,7 @@ inside the same bar's range — conservative}});
 from __future__ import annotations
 
 from datetime import datetime, time
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple, Callable, Any
 
 from prometheus.papertrade.types import (
     Position, Direction, ExitReason, PaperTrade, TradeSnapshot,
@@ -85,12 +85,20 @@ class PositionTracker:
         enable_trailing: bool = True,
         square_off_time: time = DEFAULT_SQUARE_OFF_TIME,
         session_close_time: time = DEFAULT_SESSION_CLOSE_TIME,
+        recorder: Any = None,
     ):
         self.fill_sim = fill_sim
         self.cost_model = cost_model or CostModel()
         self.enable_trailing = bool(enable_trailing)
         self.square_off_time = square_off_time
         self.session_close_time = session_close_time
+        # Bug C.2 (2026-07-25 audit): optional TradeRecorder reference
+        # used to persist open-position state to SQLite so a restart can
+        # re-hydrate ``self.open_positions`` from disk. ``None`` keeps
+        # the legacy test/standalone behavior (paper positions live only
+        # in memory — fine for unit tests and the backtest path, neither
+        # of which survives process restarts).
+        self.recorder = recorder
 
         self.open_positions: Dict[str, Position] = {}
         self.closed_trades: List[PaperTrade] = []
@@ -110,6 +118,18 @@ class PositionTracker:
             )
             return
         self.open_positions[position.trade_id] = position
+        # Bug C.2 (2026-07-25 audit): persist immediately so a crash/restart
+        # between this insert and the eventual close still leaves a recoverable
+        # row on disk. ``recorder`` may be None (legacy/test path) — only call
+        # when set.
+        if self.recorder is not None:
+            try:
+                self.recorder.record_open_position(position.to_dict())
+            except Exception as e:
+                logger.warning(
+                    f"PositionTracker: record_open_position failed for "
+                    f"{position.trade_id}: {e}"
+                )
         logger.info(
             f"[PAPER-OPEN] {position.trade_id} {position.direction.value} "
             f"{position.quantity} {position.instrument} @ Rs {position.entry_price:.2f} "
@@ -205,6 +225,22 @@ class PositionTracker:
             target=pos.target,
         )
         self.closed_trades.append(trade)
+        # Bug C.2 (2026-07-25 audit): the position has been popped from
+        # ``self.open_positions`` above, the closed trade has been booked;
+        # delete the matching row from the persistence table so the next
+        # restart doesn't re-hydrate a ghost. The trade itself was already
+        # recorded to the immutable ``paper_trades`` table by the engine
+        # via ``recorder.record_trade`` (existing path), so the historical
+        # record is preserved — only the transient "still-open" row goes
+        # away.
+        if self.recorder is not None:
+            try:
+                self.recorder.delete_open_position(trade.trade_id)
+            except Exception as e:
+                logger.warning(
+                    f"PositionTracker: delete_open_position failed for "
+                    f"{trade.trade_id}: {e}"
+                )
         logger.info(
             f"[PAPER-CLOSE] {trade.trade_id} {trade.exit_reason.value} "
             f"exit={trade.exit_price:.2f} pnl=Rs {trade.net_pnl:+.2f} "

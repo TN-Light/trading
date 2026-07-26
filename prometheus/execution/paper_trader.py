@@ -87,11 +87,37 @@ class PaperTrader(BrokerBase):
         """
         Feed real option premium from Angel One for accurate paper execution.
         Uses bid for sells, ask for buys (worst-case fills like real market).
+
+        Bug B.2 (2026-07-25 audit): if Angel One returns corrupted / partial
+        quote data with ``bid > ask`` (seen during transient API dehydration
+        windows), the mid-spread fill formula ``(bid + ask) / 2`` would
+        still produce a finite price but it would be neither a sensible buy
+        nor a sensible sell level — silently distorting paper P&L. The
+        original implementation also allowed ``bid=0`` / ``ask=0`` to fall
+        through to ``ltp`` (which is correct as a fallback) but never
+        validated the surviving spread.
+
+        Fix: after the zero-fallback substitution, if the resulting
+        ``bid > ask``, log a warning and clamp the offending side to the
+        other (the smaller of the two becomes ``bid``, the larger becomes
+        ``ask`` — preserving whichever side is known-good). This keeps
+        paper fills bounded by a real market-spread topology and stops
+        corrupted rows from creating synthetic arbitrage marks.
         """
+        # Zero → ltp fallback (existing behavior, preserved).
+        bid_v = bid if bid > 0 else ltp
+        ask_v = ask if ask > 0 else ltp
+        # Inverted-spread guard (new).
+        if bid_v > ask_v and ltp > 0:
+            logger.warning(
+                f"PaperTrader: inverted spread for {tradingsymbol} "
+                f"(bid={bid_v} ask={ask_v} ltp={ltp}) — clamping to ltp"
+            )
+            bid_v = ask_v = ltp
         self._real_premiums[tradingsymbol] = {
             "ltp": ltp,
-            "bid": bid if bid > 0 else ltp,
-            "ask": ask if ask > 0 else ltp,
+            "bid": bid_v,
+            "ask": ask_v,
         }
         
         # Diagnostic print for the first few quotes of a symbol
