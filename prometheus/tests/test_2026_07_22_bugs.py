@@ -1145,3 +1145,91 @@ def test_live_paper_capture_rehydrates_open_positions_on_init(tmp_path):
     capture._recorder.close()
 
 
+# ===========================================================================
+# Item 2 (2026-07-25 audit follow-up) — per-unit MTM display in /status
+# ===========================================================================
+
+def test_tg_cmd_status_paper_capture_mtm_includes_per_unit_breakdown():
+    """Item 2 regression: when LivePaperCapture is enabled, the
+    ``_tg_cmd_status`` Paper-Capture section must surface a per-unit
+    MTM breakdown so an operator can disambiguate, e.g. "MTM -6.60"
+    between (qty=1 x -6.60/unit) and (qty=75 x -0.09/unit).
+
+    We monkey-patch the bare-minimum attributes on a Prometheus
+    instance and call the same string-building code the
+    ``/checkpapertrade`` callback uses, so the rendered text lands
+    in the test output. We assert: (1) the per-unit fragment is
+    present when qty * (ltp - entry) != 0 (clarity), and (2) it
+    formats the correct sign+magnitude.
+    """
+    from prometheus.main import Prometheus
+
+    class _PC:
+        enabled = True
+        stats_calls = 0
+        def __init__(self):
+            self._feed = _Feed()
+        def open_positions_view(self):
+            # Position that would look ambiguous as gross-only:
+            # qty=75, entry=100.0, ltp=99.978 → MTM -1.65 =
+            # (75 × -0.022). Without the per-unit line the operator
+            # might read "MTM -1.65" as "single contract lost Rs 1.65".
+            return [{
+                "trade_id": "PAPER-AMBIG-001",
+                "instrument": "NIFTY26JUL24150PE",
+                "symbol": "NIFTY 50",
+                "quantity": 75,
+                "entry_price": 100.0,
+                "direction": "LONG",
+            }]
+        def stats(self):
+            # pstats.total_pnl
+            class _S:
+                total_pnl = 0.0
+            return _S()
+
+    class _Feed:
+        def get_ltp(self, instr):
+            return 99.978
+        def __call__(self, instr):
+            # Some code paths treat feed as callable; mirror that surface.
+            return self.get_ltp(instr)
+
+    class _Risk:
+        def __init__(self):
+            self.capital = 15000.0
+            self.trades_today = 0
+            self._halted = False  # required by _tg_cmd_status:9002
+        def get_portfolio_state(self):
+            class _PS:
+                capital = 15000.0
+                trades_today = 0
+            return _PS()
+
+    class _Broker:
+        def get_positions(self):
+            return []
+
+    prom = Prometheus.__new__(Prometheus)
+    prom._paper_capture = _PC()
+    prom.broker = _Broker()
+    prom.risk = _Risk()
+    prom.multi_account = None
+    prom.telegram = None
+    prom.mode = "paper"
+
+    text = prom._tg_cmd_status()
+
+    # Per-unit fragment format: (qty × delta/u)
+    # qty=75 → int is 75; delta = 99.978 - 100.0 = -0.022 → "+.2f" → "-0.02"
+    assert "(75 \u00d7 -0.02/u)" in text, (
+        f"Per-unit MTM fragment missing or wrong; got:\n"
+        f"{text}"
+    )
+    # Sanity: total is also surfaced (with 2 decimals to match per-unit).
+    assert "MTM <code>Rs -1.65</code>" in text, (
+        f"Aggregate MTM line missing or wrong; got:\n{text}"
+    )
+
+
+

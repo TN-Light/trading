@@ -9086,11 +9086,21 @@ class Prometheus:
                         pass
                     unreal_total += mtm
                     em = "\U0001f7e2" if mtm >= 0 else "\U0001f534"
+                    # Item 2 (2026-07-25 audit follow-up): per-unit
+                    # breakdown so an operator reading the dashboard
+                    # quickly can disambiguate "MTM -6.60" between
+                    # (qty=1 × -6.60/unit) and (qty=75 × -0.09/unit).
+                    # Skipping the per-unit line when |delta| < 0.005 to
+                    # avoid cluttering neutral rows with tiny float noise.
+                    per_unit = (ltp - entry_px) if (ltp != 0 and entry_px != 0) else 0.0
+                    per_unit_str = ""
+                    if abs(per_unit) >= 0.005:
+                        per_unit_str = f"  ({int(qty)} \u00d7 {per_unit:+.2f}/u)"
                     rows_text.append(
                         f"  {em} {instr or trade_id}  "
                         f"<code>{int(qty)}x</code>  "
                         f"Mkt <code>Rs {ltp:.2f}</code>  "
-                        f"MTM <code>Rs {mtm:+,.0f}</code>"
+                        f"MTM <code>Rs {mtm:+,.2f}</code>{per_unit_str}"
                     )
 
                 text += f"\n<b>Paper Capture \u2014 Open ({len(open_view)})</b>\n"

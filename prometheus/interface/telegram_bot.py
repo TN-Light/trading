@@ -414,6 +414,20 @@ class TelegramBot:
                     if response.status_code == 200:
                         self._send_fail_streak = 0
                         self._last_send_ok_ts = time.time()
+                        # Item 3 (2026-07-25 audit follow-up): one-site
+                        # DEBUG log per successful send so future
+                        # instrumented audits can rely on a stable
+                        # success-trace without grep-ing through call
+                        # sites. DEBUG level (not INFO) — a paper bot
+                        # sends hundreds of fills/skips/stats per
+                        # session; promoting to INFO would drown the
+                        # log. Operators who need it visible can set
+                        # ``logger.setLevel("DEBUG")`` on the
+                        # ``prometheus.interface.telegram_bot`` logger.
+                        logger.debug(
+                            f"Telegram send ok chat_id={self.chat_id} "
+                            f"len={len(text)} base={base_url}"
+                        )
                         return True
 
                     if response.status_code == 400 and parse_mode == "HTML":
