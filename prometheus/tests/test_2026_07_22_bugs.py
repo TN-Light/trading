@@ -1232,4 +1232,94 @@ def test_tg_cmd_status_paper_capture_mtm_includes_per_unit_breakdown():
     )
 
 
+# ===========================================================================
+# Sensit-Bug (2026-07-28 audit) — SENSEX options routed on BFO, not NFO
+# ===========================================================================
+
+def test_angelone_options_exchange_segment_sensex_routes_to_bfo():
+    """Regression: ``AngelOneOptionChain._exchange_for`` must return
+    "BFO" for SENSEX and "NFO" for every other known underlying
+    (NIFTY/BANKNIFTY/FINNIFTY/NIFTYIT/MIDCPNIFTY). Pre-fix all five
+    Angel One API call sites hardcoded "NFO" — so ``searchScrip("NFO",
+    "SENSEX")`` returned empty (correctly: no SENSEX contracts on
+    NSE F&O) and every SENSEX signal was silently dropped by
+    ``main.py:_price_options`` at the "BS theoretical estimate is NOT
+    used for live/paper trading — signal dropped" branch. On 2026-07-28
+    this wasted 8 of 8 generated signals for the entire session.
+    """
+    from prometheus.data.angelone_options import AngelOneOptionChain
+
+    assert AngelOneOptionChain._exchange_for("SENSEX") == "BFO", (
+        "SENSEX options trade on BSE F&O (segment code 'BFO'); Angel One "
+        "searchScrip('NFO', 'SENSEX') returns empty because NSE doesn't "
+        "list SENSEX contracts."
+    )
+    for sym in ("NIFTY", "BANKNIFTY", "FINNIFTY", "NIFTYIT", "MIDCPNIFTY"):
+        assert AngelOneOptionChain._exchange_for(sym) == "NFO", (
+            f"{sym} should route on NFO (NSE F&O); got "
+            f"{AngelOneOptionChain._exchange_for(sym)!r}"
+        )
+
+
+def test_angelone_options_searchScrip_uses_resolved_segment_per_underlying():
+    """Regression: ``searchScrip`` (line ~162) must dispatch on the
+    resolved segment, NOT a hardcoded ``"NFO"``. Easiest end-to-end
+    surface to pin: monkey-patch the SmartConnect object's
+    ``searchScrip`` to record the segment string passed, then call
+    ``discover_contracts`` and verify SENSEX routed on BFO and NIFTY
+    on NFO. Failure = silent SENSEX signal drop (the 2026-07-28 bug).
+    """
+    from prometheus.data.angelone_options import AngelOneOptionChain
+
+    class _FakeObj:
+        def __init__(self):
+            self.calls = []  # list of (segment, underlying)
+        def searchScrip(self, seg, underlying):
+            self.calls.append((seg, underlying))
+            # Simulate one contract returned per underlying.
+            return {
+                "data": [{
+                    "tradingsymbol": f"{underlying}DUMMY",
+                    "symboltoken": "1",
+                    "name": underlying,
+                    "expiry": "2026-08-06",
+                    "instrumenttype": "OPTIDX",
+                }],
+            }
+
+    class _FakeFetcher:
+        def __init__(self, obj):
+            self._obj = obj
+        def _ensure_connected(self):
+            return True
+        @property
+        def obj(self):
+            return self._obj
+
+    fake_obj = _FakeObj()
+    chain = AngelOneOptionChain.__new__(AngelOneOptionChain)
+    chain._fetcher = _FakeFetcher(fake_obj)
+    chain._cache_date = ""  # force network path
+    chain._token_cache = {}
+    chain._last_call = 0.0
+    chain._min_interval = 0.0  # skip rate-limit sleep in test
+    chain._disabled_until = 0.0
+    chain._auth_cooldown_sec = 300
+
+    # SENSEX must dispatch via BFO.
+    chain.discover_contracts("SENSEX", strikes_around_atm=2, spot_price=77000.0)
+    assert any(seg == "BFO" and und == "SENSEX" for (seg, und) in fake_obj.calls), (
+        f"SENSEX must route searchScrip to BFO; got calls={fake_obj.calls}"
+    )
+
+    # NIFTY 50 (underlying 'NIFTY') must still route via NFO.
+    fake_obj.calls.clear()
+    chain._cache_date = ""  # bypass cache so searchScrip runs again
+    chain.discover_contracts("NIFTY 50", strikes_around_atm=2, spot_price=22000.0)
+    assert any(seg == "NFO" and und == "NIFTY" for (seg, und) in fake_obj.calls), (
+        f"NIFTY 50 must route searchScrip to NFO; got calls={fake_obj.calls}"
+    )
+
+
+
 

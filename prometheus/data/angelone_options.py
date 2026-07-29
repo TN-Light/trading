@@ -39,6 +39,45 @@ class AngelOneOptionChain:
         "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
     }
 
+    # Per-underlying options-exchange segment.
+    #
+    # Bug (2026-07-28 audit): all five Angel One API calls in this file
+    # hardcoded ``"NFO"`` (NSE F&O) as the exchange segment. SENSEX
+    # options don't trade on NSE — they trade on BSE F&O (segment code
+    # "BFO"). ``searchScrip("NFO", "SENSEX")`` therefore correctly
+    # returned empty (the BSE-listed contracts weren't there), and
+    # every SENSEX signal generated in production was silently dropped
+    # by ``main.py:_price_options`` at line 5493-5503 ("no live LTP
+    # from Angel One — signal dropped"). On 2026-07-28 alone, 8 of 8
+    # generated signals were SENSEX, and 100% of them were dropped —
+    # so the operator got zero paper-trade entries for the entire
+    # session despite a working signal engine and a logged-in Angel
+    # One account.
+    #
+    # Fix: per-underlying exchange-segment lookup. ``_exchange_for``
+    # returns "BFO" for SENSEX (and any future BSE-listed contract)
+    # and "NFO" for everything else (NIFTY 50, NIFTY BANK, FINNIFTY,
+    # NIFTY IT, NIFTY MIDCAP SELECT, NIFTY MIDCAP, etc.). The same
+    # lookup is applied at every API call site that previously
+    # hardcoded "NFO": ``searchScrip``, two ``getMarketData``, two
+    # ``ltpData``.
+    OPTIONS_EXCHANGE_SEGMENTS = {
+        "NIFTY": "NFO",
+        "BANKNIFTY": "NFO",
+        "FINNIFTY": "NFO",
+        "NIFTYIT": "NFO",
+        "MIDCPNIFTY": "NFO",
+        "SENSEX": "BFO",  # BSE F&O options
+    }
+
+    @classmethod
+    def _exchange_for(cls, underlying: str) -> str:
+        """Resolve the Angel One exchange segment (NFO vs BFO) for an
+        underlying root name (``UNDERLYING_MAP`` value). Defaults to NFO
+        for unknown underlyings so future NSE-listed contracts don't
+        have to update the map."""
+        return cls.OPTIONS_EXCHANGE_SEGMENTS.get(underlying, "NFO")
+
     def __init__(self, fetcher):
         """
         Reuses existing AngelOneFetcher's SmartConnect session.
@@ -115,19 +154,24 @@ class AngelOneOptionChain:
 
             self._rate_limit()
             try:
-                result = obj.searchScrip("NFO", underlying)
+                # Bug (2026-07-28 audit): use the per-underlying exchange
+                # segment (NFO vs BFO) instead of hardcoded "NFO" — SENSEX
+                # options trade on BFO, so searchScrip("NFO", "SENSEX")
+                # returned empty and every SENSEX signal was dropped.
+                seg = self._exchange_for(underlying)
+                result = obj.searchScrip(seg, underlying)
                 if not result or not result.get("data"):
                     msg = str(result.get("message", "")) if isinstance(result, dict) else ""
                     code = str(result.get("errorCode", "")) if isinstance(result, dict) else ""
                     if code == "AG8001" or "invalid token" in msg.lower():
                         self._mark_auth_failure(msg or code or "Invalid Token")
-                    logger.warning(f"searchScrip returned no data for {underlying}")
+                    logger.warning(f"searchScrip returned no data for {underlying} on {seg}")
                     return []
 
                 contracts = result["data"]
                 self._token_cache[cache_key] = contracts
                 self._cache_date = today_str
-                logger.info(f"Angel One: discovered {len(contracts)} NFO contracts for {underlying}")
+                logger.info(f"Angel One: discovered {len(contracts)} {seg} contracts for {underlying}")
             except Exception as e:
                 if "invalid token" in str(e).lower() or "AG8001" in str(e):
                     self._mark_auth_failure(str(e))
@@ -277,16 +321,24 @@ class AngelOneOptionChain:
     # Market data (LTP, OI, bid/ask)
     # ------------------------------------------------------------------
 
-    def fetch_market_data(self, contracts: List[Dict]) -> pd.DataFrame:
+    def fetch_market_data(self, contracts: List[Dict], underlying: str = None) -> pd.DataFrame:
         """
         Batch-fetch market data for a list of contracts.
 
         Uses getMarketData("FULL", ...) in batches of 50.
         Returns DataFrame with: tradingsymbol, ltp, bid, ask, volume, oi, oi_change
+
+        Bug (2026-07-28 audit): ``underlying`` resolves the exchange segment
+        (NFO vs BFO). When omitted, falls back to "NFO" (legacy behavior) —
+        but callers passing SENSEX contracts MUST set ``underlying="SENSEX"``
+        so the request ships on BFO and not the wrong NSE F&O segment.
         """
         obj = self._get_obj()
         if not obj or not contracts:
             return pd.DataFrame()
+
+        # Bug (2026-07-28 audit): resolve segment from underlying, default NFO.
+        seg = self._exchange_for(underlying) if underlying else "NFO"
 
         tokens = [c["symboltoken"] for c in contracts]
         token_map = {c["symboltoken"]: c for c in contracts}
@@ -298,7 +350,9 @@ class AngelOneOptionChain:
             batch = tokens[i:i + batch_size]
             self._rate_limit()
             try:
-                response = obj.getMarketData("FULL", {"NFO": batch})
+                # Bug (2026-07-28 audit): route BSE-listed contracts
+                # (SENSEX) on BFO instead of hardcoding "NFO".
+                response = obj.getMarketData("FULL", {seg: batch})
                 if response and response.get("status") and response.get("data"):
                     fetched = response["data"].get("fetched", [])
                     for item in fetched:
@@ -403,7 +457,12 @@ class AngelOneOptionChain:
             return pd.DataFrame()
 
         # Fetch market data
-        df = self.fetch_market_data(contracts)
+        # Bug (2026-07-28 audit): pass the underlying so the exchange
+        # segment (NFO vs BFO) is routed correctly — SENSEX contracts
+        # ship on BFO, others on NFO. Without this, every SENSEX option
+        # chain fetch went to NFO and returned empty.
+        underlying = self.UNDERLYING_MAP.get(symbol, "NIFTY")
+        df = self.fetch_market_data(contracts, underlying=underlying)
         if df.empty:
             return df
 
@@ -489,7 +548,11 @@ class AngelOneOptionChain:
 
         self._rate_limit()
         try:
-            result = obj.ltpData("NFO", target["tradingsymbol"], target["symboltoken"])
+            # Bug (2026-07-28 audit): resolve segment (NFO vs BFO) from
+            # the symbol's underlying so SENSEX contracts route on BFO.
+            underlying = self.UNDERLYING_MAP.get(symbol, "NIFTY")
+            seg = self._exchange_for(underlying)
+            result = obj.ltpData(seg, target["tradingsymbol"], target["symboltoken"])
             if result and result.get("status") and result.get("data"):
                 data = result["data"]
                 ltp = float(data.get("ltp", 0) or 0)
@@ -508,7 +571,9 @@ class AngelOneOptionChain:
                 # Try to get bid/ask via full market data
                 self._rate_limit()
                 try:
-                    full = obj.getMarketData("FULL", {"NFO": [target["symboltoken"]]})
+                    # Bug (2026-07-28 audit): same segment routing as the
+                    # ltpData call above — SENSEX ships on BFO.
+                    full = obj.getMarketData("FULL", {seg: [target["symboltoken"]]})
                     if full and full.get("data", {}).get("fetched"):
                         f = full["data"]["fetched"][0]
                         premium["bid"] = float(f.get("bestBidPrice", 0) or 0)
@@ -544,9 +609,16 @@ class AngelOneOptionChain:
             return None
 
     def get_ltp_by_token(self, tradingsymbol: str) -> Optional[float]:
-        """Quick LTP lookup for position monitoring."""
+        """Quick LTP lookup for position monitoring.
+
+        Bug (2026-07-28 audit): the ``ltpData`` call below hardcoded
+        ``"NFO"``. Since ``_token_cache`` is keyed by underlying root
+        (e.g. ``"NIFTY"``, ``"SENSEX"``), iterating ``items()`` lets
+        us resolve the correct exchange segment per cache bucket —
+        so SENSEX contracts route on BFO and NIFTY routes on NFO.
+        """
         # Search all cached contracts for this tradingsymbol
-        for contracts in self._token_cache.values():
+        for underlying, contracts in self._token_cache.items():
             for c in contracts:
                 if c.get("tradingsymbol") == tradingsymbol:
                     token = c.get("symboltoken", "")
@@ -556,7 +628,11 @@ class AngelOneOptionChain:
                             return None
                         self._rate_limit()
                         try:
-                            result = obj.ltpData("NFO", tradingsymbol, token)
+                            # Bug (2026-07-28 audit): route via the
+                            # correct segment (NFO vs BFO) keyed by the
+                            # underlying cache key.
+                            seg = self._exchange_for(underlying)
+                            result = obj.ltpData(seg, tradingsymbol, token)
                             if result and result.get("data"):
                                 return float(result["data"].get("ltp", 0) or 0)
                         except Exception:
