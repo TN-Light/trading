@@ -1003,10 +1003,19 @@ class Prometheus:
             # legacy OrderManager path is bypassed to prevent duplicate
             # positions on divergent strike selections.
             try:
-                self._paper_capture.on_signal(refined_signal)
+                # Return the trade_id so callers (run_intraday_mode swing-15m
+                # loop) can do post-dispatch bookkeeping — registering the
+                # symbol in ``_today_traded_symbols`` and incrementing
+                # ``_intraday_trades_today``. Without this, the intraday
+                # ``if position:`` block was skipped in paper mode (since
+                # ``_execute_signal_with_feedback`` returns None when pc is
+                # active) → the same symbol was re-scanned & re-dispatched
+                # every cycle until ``max_trades`` was hit;
+                # ``_today_traded_symbols`` was never populated.
+                return self._paper_capture.on_signal(refined_signal)
             except Exception as e:
                 logger.debug(f"[PaperCapture] on_signal failed: {e}")
-            return
+            return None
 
         try:
             self._dispatch_multi_account_live(refined_signal, is_intraday=is_intraday, bar_interval=bar_interval)
@@ -2361,11 +2370,15 @@ class Prometheus:
                                     position = self._execute_signal_with_feedback(
                                         refined, confirm=False, context="mid-day"
                                     )
-                                    self._dispatch_multi_account(refined)
+                                    if position is None:
+                                        position = self._dispatch_multi_account(refined)
+                                    else:
+                                        self._dispatch_multi_account(refined)
                                     if position:
                                         _today_traded_symbols.add(symbol)
+                                        trade_label = position if isinstance(position, str) else position.position_id
                                         self.dashboard.show_status_line(
-                                            f"Paper trade opened (early): {position.position_id}"
+                                            f"Paper trade opened (early): {trade_label}"
                                         )
 
                     _did_midday_scan = True
@@ -2397,11 +2410,15 @@ class Prometheus:
                                 position = self._execute_signal_with_feedback(
                                     refined, confirm=False, context="post-close"
                                 )
-                                self._dispatch_multi_account(refined)
+                                if position is None:
+                                    position = self._dispatch_multi_account(refined)
+                                else:
+                                    self._dispatch_multi_account(refined)
                                 if position:
                                     _today_traded_symbols.add(symbol)
+                                    trade_label = position if isinstance(position, str) else position.position_id
                                     self.dashboard.show_status_line(
-                                        f"Paper trade opened: {position.position_id}"
+                                        f"Paper trade opened: {trade_label}"
                                     )
 
                             # Show regime
@@ -2615,19 +2632,33 @@ class Prometheus:
                             position = self._execute_signal_with_feedback(
                                 refined, confirm=False, context="swing-15m"
                             )
-                            self._dispatch_multi_account(refined)
+                            if position is None:
+                                position = self._dispatch_multi_account(refined)
+                            else:
+                                self._dispatch_multi_account(refined)
                             if position:
                                 _today_traded_symbols.add(symbol)
-                                ts = self.order_manager.create_trailing_state(position.position_id)
-                                if ts:
-                                    ts.trade_mode = "swing"
-                                    ts.bar_interval = "15minute"
-                                    ts.max_bars = time_stop_bars
-                                    self.position_monitor.add_position(ts)
-                                    self._handle_state_persist(ts)
-                                self.dashboard.show_status_line(
-                                    f"Paper trade opened: {position.position_id}"
-                                )
+                                # Paper mode: ``position`` is the trade_id
+                                # string from ``paper_capture.on_signal``;
+                                # LivePaperCapture owns its own
+                                # PositionTracker (driven by
+                                # ``_paper_capture_feed_bars``). Skip legacy
+                                # monitor registration in that case.
+                                if isinstance(position, str):
+                                    self.dashboard.show_status_line(
+                                        f"Paper trade opened: {position}"
+                                    )
+                                else:
+                                    ts = self.order_manager.create_trailing_state(position.position_id)
+                                    if ts:
+                                        ts.trade_mode = "swing"
+                                        ts.bar_interval = "15minute"
+                                        ts.max_bars = time_stop_bars
+                                        self.position_monitor.add_position(ts)
+                                        self._handle_state_persist(ts)
+                                    self.dashboard.show_status_line(
+                                        f"Paper trade opened: {position.position_id}"
+                                    )
 
                     summary_ts = now.strftime("%d %b %Y %H:%M")
                     if cycle_signals == 0:
@@ -3708,9 +3739,20 @@ class Prometheus:
         None case (PositionMonitor setup, dashboard, etc.).
         """
         # LivePaperCapture bypass — only capture path active in paper mode.
+        # NOTE (2026-07-31 fix): do NOT call ``paper_capture.on_signal`` here.
+        # Every intraday/swing scan loop calls BOTH ``_execute_signal_with_feedback``
+        # AND ``_dispatch_multi_account`` back-to-back (e.g. main.py:4330-4336,
+        # 2361-2364, 2397-2400, 2615-2618, 3872-3875); ``_dispatch_multi_account``
+        # is the documented PaperCapture wrapper that fires ``on_signal`` (see
+        # its docstring at lines 981-1009). If we ALSO fire ``on_signal`` here,
+        # every SENSEX/NIFTY signal opens TWO identical paper positions 2-4
+        # seconds apart (observed in 2026-07-31 logs: PAPER-...42911-3ACE44
+        # + PAPER-...42913-08A545 on the same strike). Returning None is
+        # safe — every caller already guards ``if position:`` so the trade
+        # bookkeeping (monitor registration, _today_traded_symbols) is skipped
+        # in paper mode, and `_dispatch_multi_account` performs the capture.
         paper_capture = getattr(self, "_paper_capture", None)
         if paper_capture is not None and getattr(paper_capture, "enabled", False):
-            paper_capture.on_signal(refined_signal)
             return None
 
         position = self.order_manager.execute_signal(refined_signal, confirm=confirm)
@@ -3872,7 +3914,10 @@ class Prometheus:
                                     position = self._execute_signal_with_feedback(
                                         refined, confirm=False, context=mode_label
                                     )
-                                    self._dispatch_multi_account(refined)
+                                    if position is None:
+                                        position = self._dispatch_multi_account(refined)
+                                    else:
+                                        self._dispatch_multi_account(refined)
                                     if position:
                                         _today_traded_symbols.add(symbol)
                                         self._register_position_with_monitor(position)
@@ -3895,10 +3940,18 @@ class Prometheus:
                             position = self._execute_signal_with_feedback(
                                 refined, confirm=False, context=mode_label
                             )
-                            self._dispatch_multi_account(refined)
+                            if position is None:
+                                position = self._dispatch_multi_account(refined)
+                            else:
+                                self._dispatch_multi_account(refined)
                             if position:
                                 _today_traded_symbols.add(symbol)
-                                self._register_position_with_monitor(position)
+                                # Paper mode returns trade_id string;
+                                # LivePaperCapture manages its own
+                                # trailing-stop tracker — skip legacy
+                                # monitor registration in that case.
+                                if not isinstance(position, str):
+                                    self._register_position_with_monitor(position)
 
                     _did_post_close_scan = True
                     n_pos = self.position_monitor.active_count if self.position_monitor else 0
@@ -4327,37 +4380,66 @@ class Prometheus:
                     if refined and refined.get("action") != "HOLD":
                         self._alert_signal(refined)
 
+                        # Paper mode: `_execute_signal_with_feedback` returns
+                        # None when LivePaperCapture is active (it deliberately
+                        # does NOT call paper_capture.on_signal — that would
+                        # open a duplicate position via `_dispatch_multi_account`
+                        # below). `_dispatch_multi_account` IS the paper
+                        # position opener in paper mode and returns the
+                        # ``trade_id`` from ``paper_capture.on_signal`` — so the
+                        # post-dispatch bookkeeping (`_today_traded_symbols`,
+                        # ``_intraday_trades_today``, monitor registration,
+                        # Telegram trade alert) runs correctly.
                         position = self._execute_signal_with_feedback(
                             refined, confirm=False, context=mode_label
                         )
-                        self._dispatch_multi_account(
-                            refined, is_intraday=True,
-                            bar_interval=bar_interval
-                        )
+                        if position is None:
+                            position = self._dispatch_multi_account(
+                                refined, is_intraday=True,
+                                bar_interval=bar_interval
+                            )
+                        else:
+                            self._dispatch_multi_account(
+                                refined, is_intraday=True,
+                                bar_interval=bar_interval
+                            )
                         if position:
                             _today_traded_symbols.add(symbol)
                             self._set_daily_state("dry_today_traded_symbols", _today_traded_symbols)
                             _intraday_trades_today += 1
                             self._set_daily_state("dry_intraday_trades_today", _intraday_trades_today)
-                            # Register with monitor (intraday-tagged)
-                            ts = self.order_manager.create_trailing_state(
-                                position.position_id
-                            )
-                            if ts:
-                                ts.trade_mode = "intraday"
-                                ts.bar_interval = bar_interval
-                                ts.breakeven_ratio = be_ratio
-                                intraday_ts_cfg = intraday_cfg.get(
-                                    f"time_stop_bars_{bar_interval.replace('minute', 'min')}",
-                                    intraday_cfg.get("time_stop_bars_15min", 20)
+                            # Paper mode returns the trade_id string from
+                            # ``paper_capture.on_signal``. LivePaperCapture
+                            # owns its own PositionTracker/5-stage trailing
+                            # stop (advanced by ``_paper_capture_feed_bars``
+                            # below) — DO NOT also register with the legacy
+                            # ``order_manager.create_trailing_state``
+                            # (that path is for broker positions and reads
+                            # ``position.position_id``, which a string lacks).
+                            if isinstance(position, str):
+                                self.telegram.send_message(
+                                    f"\u2705 Intraday paper trade: {position} "
+                                    f"({bar_interval})"
                                 )
-                                ts.max_bars = intraday_ts_cfg
-                                self.position_monitor.add_position(ts)
-                                self._handle_state_persist(ts)
-                            self.telegram.send_message(
-                                f"\u2705 Intraday trade: {position.position_id} "
-                                f"({bar_interval})"
-                            )
+                            else:
+                                ts = self.order_manager.create_trailing_state(
+                                    position.position_id
+                                )
+                                if ts:
+                                    ts.trade_mode = "intraday"
+                                    ts.bar_interval = bar_interval
+                                    ts.breakeven_ratio = be_ratio
+                                    intraday_ts_cfg = intraday_cfg.get(
+                                        f"time_stop_bars_{bar_interval.replace('minute', 'min')}",
+                                        intraday_cfg.get("time_stop_bars_15min", 20)
+                                    )
+                                    ts.max_bars = intraday_ts_cfg
+                                    self.position_monitor.add_position(ts)
+                                    self._handle_state_persist(ts)
+                                self.telegram.send_message(
+                                    f"\u2705 Intraday trade: {position.position_id} "
+                                    f"({bar_interval})"
+                                )
 
                 _last_scan_time = now
 

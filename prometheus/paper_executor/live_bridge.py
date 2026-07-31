@@ -372,20 +372,53 @@ class LivePaperCapture:
                 self._telegram.alert_order_placed(order_info)
             except Exception:
                 pass
+            # Kite-searchable copy-paste contract name (same format as the
+            # legacy ``Notifier.notify_signal_alert`` / ``alert_signal`` path
+            # that NIFTY/stock signals use). Without this, SENSEX paper-capture
+            # alerts were showing the raw API tradingsymbol
+            # (``SENSEX2680678300CE``) instead of the Kite-friendly form
+            # (``SENSEX 6th AUG 78300 CE``), so the user couldn't copy-paste
+            # the alert directly into the Kite mobile search bar like they do
+            # for NIFTY/stock signals. We try ``parse_api_tradingsymbol`` for
+            # the reverse lookup, then fall back to the raw symbol if the
+            # parser can't handle it (e.g. synthetic instruments).
+            kite_name = ""
+            try:
+                from prometheus.utils.symbol_format import (
+                    human_search_name, parse_api_tradingsymbol,
+                )
+                parsed = parse_api_tradingsymbol(notif.instrument or "")
+                if parsed and parsed.get("expiry") and parsed.get("strike"):
+                    kite_name = human_search_name(
+                        notif.symbol,
+                        parsed["expiry"],
+                        parsed["strike"],
+                        parsed.get("option_type", ("CE" if notif.direction.value == "LONG" else "PE")),
+                    )
+            except Exception:
+                pass
             # Custom follow-up line for paper-capture context (since
             # alert_order_placed doesn't mention "paper"):
             try:
-                self._telegram.send_message(
-                    f"\U0001f9ea <b>PAPER CAPTURE opened</b>\n"
-                    f"{notif.symbol} {side} {notif.instrument}\n"
+                lines = [
+                    f"\U0001f9ea <b>PAPER CAPTURE opened</b>",
+                    f"{notif.symbol} {side} {notif.instrument}",
+                ]
+                if kite_name:
+                    lines.append("")
+                    lines.append(f"\U0001f4cb <b>Kite Search:</b>")
+                    lines.append(f"<code>{kite_name}</code>")
+                lines.extend([
+                    "",
                     f"Entry hint: Rs {notif.entry_price_hint:.2f} | "
                     f"SL: Rs {notif.stop_loss:.2f} | "
-                    f"Target: Rs {notif.target:.2f}\n"
+                    f"Target: Rs {notif.target:.2f}",
                     f"Direction: {notif.direction.value} | "
                     f"Score: {notif.signal_score:.2f} | "
-                    f"Strategy: {notif.strategy}\n"
-                    f"ID: <code>{trade_id}</code>"
-                )
+                    f"Strategy: {notif.strategy}",
+                    f"ID: <code>{trade_id}</code>",
+                ])
+                self._telegram.send_message("\n".join(lines))
             except Exception:
                 pass
         except Exception as e:

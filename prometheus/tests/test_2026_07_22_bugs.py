@@ -1321,5 +1321,112 @@ def test_angelone_options_searchScrip_uses_resolved_segment_per_underlying():
     )
 
 
+# ===========================================================================
+# Patch 2 (2026-07-31 audit) — Duplicate paper-trade dispatch in intraday
+# and swing scan loops. The active path (run_intraday_mode main.py:4341)
+# was calling BOTH ``_execute_signal_with_feedback`` AND
+# ``_dispatch_multi_account`` back-to-back. Both helpers routed to
+# ``paper_capture.on_signal`` when LivePaperCapture was active, opening
+# TWO identical paper positions per signal 2-4 seconds apart (verified by
+# 2026-07-31 logs: PAPER-20260731042911-3ACE44 + PAPER-20260731042913-08A545
+# on the same SENSEX2680678300CE strike). This test verifies that
+# ``_execute_signal_with_feedback`` no longer fires ``on_signal`` when
+# paper_capture is active — only ``_dispatch_multi_account`` does, so
+# only one position opens per signal.
+# ===========================================================================
+
+def test_execute_signal_with_feedback_skips_paper_capture_when_active():
+    """Patch 2 regression: in paper mode, ``_execute_signal_with_feedback``
+    must NOT call ``paper_capture.on_signal`` — that responsibility moved
+    to ``_dispatch_multi_account`` (the documented PaperCapture wrapper).
+    Calling both is what opened duplicate SENSEX paper positions today.
+    """
+    import prometheus.main as main_mod
+
+    class _PC:
+        enabled = True
+        def __init__(self):
+            self.on_signal_calls = []
+        def on_signal(self, sig):
+            self.on_signal_calls.append(sig)
+
+    class _PrometheusStub:
+        def __init__(self):
+            self._paper_capture = _PC()
+            # Live-mode order_manager must NEVER be touched in paper mode.
+            class _OM:
+                def __init__(self):
+                    self.execute_calls = []
+                def execute_signal(self, sig, confirm=False):
+                    self.execute_calls.append(sig)
+                    return None
+                last_execution_error = ""
+            self.order_manager = _OM()
+            self.telegram = type("T", (), {"send_message": staticmethod(lambda *a, **k: None)})()
+            self._last_trade_reject_alerts = {}
+
+    # Instantiate the bound method directly on the stub.
+    prom = _PrometheusStub()
+    bound = main_mod.Prometheus._execute_signal_with_feedback.__get__(prom, _PrometheusStub)
+    sig = {"symbol": "SENSEX", "action": "BUY"}
+    result = bound(sig, confirm=False, context="INTRADAY DRY")
+
+    assert result is None, (
+        "Paper-mode _execute_signal_with_feedback must return None "
+        "(paper_capture handles the actual capture)"
+    )
+    assert prom._paper_capture.on_signal_calls == [], (
+        f"paper_capture.on_signal must NOT fire from _execute_signal_with_feedback; "
+        f"got {prom._paper_capture.on_signal_calls}"
+    )
+    assert prom.order_manager.execute_calls == [], (
+        f"order_manager.execute_signal must NOT fire in paper mode; "
+        f"got {prom.order_manager.execute_calls}"
+    )
+
+
+def test_dispatch_multi_account_returns_paper_capture_trade_id_in_paper_mode():
+    """Patch 2 companion: in paper mode, ``_dispatch_multi_account`` must
+    (a) call ``paper_capture.on_signal`` exactly once AND (b) return the
+    trade_id the capture returns — so the caller's ``if position:`` book-
+    keeping block runs (registers the symbol in ``_today_traded_symbols``,
+    increments the trade counter, fires the Telegram alert). Before the
+    fix, it returned None, so callers' post-dispatch blocks were skipped
+    AND the same symbol was re-dispatched on every subsequent scan cycle.
+    """
+    import prometheus.main as main_mod
+
+    class _PC:
+        enabled = True
+        def __init__(self):
+            self.on_signal_calls = []
+        def on_signal(self, sig):
+            self.on_signal_calls.append(sig)
+            return "PAPER-TEST-TRADE-ID"
+
+    class _PrometheusStub:
+        def __init__(self):
+            self._paper_capture = _PC()
+        def _dispatch_multi_account_live(self, *a, **k):
+            raise AssertionError(
+                "Live-mode _dispatch_multi_account_live must NOT fire "
+                "when paper_capture is active"
+            )
+
+    prom = _PrometheusStub()
+    bound = main_mod.Prometheus._dispatch_multi_account.__get__(prom, _PrometheusStub)
+    sig = {"symbol": "SENSEX", "action": "BUY"}
+    result = bound(sig, is_intraday=True, bar_interval="15minute")
+
+    assert result == "PAPER-TEST-TRADE-ID", (
+        f"_dispatch_multi_account must return the paper_capture trade_id; "
+        f"got {result!r}"
+    )
+    assert len(prom._paper_capture.on_signal_calls) == 1, (
+        f"paper_capture.on_signal must fire EXACTLY once "
+        f"(duplicate-dispatch bug); got {len(prom._paper_capture.on_signal_calls)}"
+    )
+
+
 
 
