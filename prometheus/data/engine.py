@@ -746,7 +746,7 @@ class DataEngine:
                     "symboltoken": "99926004",  # INDIA VIX
                     "interval": "ONE_DAY",
                     "fromdate": (now - timedelta(days=5)).strftime("%Y-%m-%d 09:15"),
-                    "todate": now.strftime("%Y-%m-%d 15:30"),
+                    "todate": now.strftime("%Y-%m-%d 15:40"),
                 }
                 if self.angelone._ensure_connected():
                     # Route through the shared rate limiter instead of

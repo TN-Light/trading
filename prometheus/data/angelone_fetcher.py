@@ -261,7 +261,7 @@ class AngelOneFetcher:
                 "symboltoken": token,
                 "interval": ao_interval,
                 "fromdate": chunk_start.strftime("%Y-%m-%d 09:15"),
-                "todate": chunk_end.strftime("%Y-%m-%d 15:30"),
+                "todate": chunk_end.strftime("%Y-%m-%d 15:40"),  # F&O extended
             }
 
             # ── Retry with aggressive backoff for rate limiting ───────
