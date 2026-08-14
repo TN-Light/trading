@@ -20,16 +20,16 @@ MARKET_CLOSE = time(15, 30)       # Kept for backward compat; cash equities
 CASH_CLOSE = time(15, 15)         # F&O stocks regular trading (CAS begins)
 FNO_CLOSE = time(15, 40)          # F&O derivatives extended session
 PRE_OPEN_START = time(9, 0)
-PRE_OPEN_END = time(9, 7)         # Order matching begins 9:07
+PRE_OPEN_END = time(9, 8)         # Random close between 9:07-9:08; 9:08 is conservative
 
 # ---------------------------------------------------------------------------
 # Lot Sizes (updated periodically by NSE — keep current)
 # ---------------------------------------------------------------------------
 LOT_SIZES = {
-    "NIFTY 50": 75,              # Updated Nov 2024 (SEBI ₹15-20L min contract)
+    "NIFTY 50": 65,              # Verified Aug 2026 (NSE/SEBI periodic review)
     "NIFTY BANK": 30,
     "NIFTY FIN SERVICE": 60,
-    "NIFTY": 75,
+    "NIFTY": 65,
     "BANKNIFTY": 30,
     "FINNIFTY": 60,
     "SENSEX": 20,
@@ -40,10 +40,10 @@ LOT_SIZES = {
     "RELIANCE": 250,
     "TCS": 150,
     "INFY": 300,
-    "HDFCBANK": 550,
+    "HDFCBANK": 650,
     "ICICIBANK": 700,
     "SBIN": 750,
-    "TATAMOTORS": 575,
+    "TATAMOTORS": 1600,            # TMPV (Tata Motors PV) — verified Aug 2026
     "ITC": 1600,
     "AXISBANK": 600,
     "BAJFINANCE": 125,
