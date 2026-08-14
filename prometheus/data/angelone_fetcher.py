@@ -5,14 +5,78 @@
 Fetches historical candle data from Angel One SmartAPI.
 Supports 5min/15min intraday data up to ~5 years back.
 Used for intraday backtesting with much larger sample than yfinance (60d).
+
+Rate-limit strategy (Aug 2026):
+  Angel One enforces ~3 req/sec and 180 req/min on getCandleData.
+  The SmartAPI SDK has its own internal urllib3 retry that escalates to
+  131-second waits on HTTP 429.  To prevent that cascade we:
+    1. Gate every API call through a thread-safe SmartAPIRateLimiter
+       (token-bucket style, 1.0s minimum between calls).
+    2. On AB1021 / 429, set a global cooldown timestamp that ALL threads
+       respect before their next attempt.
+    3. Suppress the SDK's internal retry count so control returns to our
+       code quickly on failure.
+    4. Use aggressive backoff (5s / 10s / 20s) and fail after 3 retries
+       per chunk — then fall back to yfinance in the DataEngine layer.
 """
 
 import pandas as pd
 import time
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 
 from prometheus.utils.logger import logger
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Thread-safe rate limiter — enforces minimum interval between API calls
+# ═══════════════════════════════════════════════════════════════════════════
+class SmartAPIRateLimiter:
+    """Centralised sliding-window rate limiter for SmartAPI calls.
+
+    Guarantees a minimum ``delay_between_calls`` gap between successive
+    calls across ALL threads / symbols.  Any thread calling ``wait()``
+    will block until at least ``delay`` seconds have elapsed since the
+    last API call.  Thread-safe via a ``threading.Lock``.
+    """
+
+    def __init__(self, delay_between_calls: float = 1.0):
+        self.delay = delay_between_calls
+        self._last_call: float = 0.0
+        self._lock = threading.Lock()
+        # Global cooldown: when a 429/AB1021 is received, ALL threads
+        # must wait until this monotonic timestamp before retrying.
+        self._cooldown_until: float = 0.0
+
+    def wait(self):
+        """Block until the next API call is safe to make."""
+        with self._lock:
+            now = time.monotonic()
+            # Respect global cooldown first
+            if now < self._cooldown_until:
+                sleep_for = self._cooldown_until - now
+                logger.debug(f"[RateLimiter] global cooldown: sleeping {sleep_for:.1f}s")
+                time.sleep(sleep_for)
+                now = time.monotonic()
+            # Enforce per-call delay
+            elapsed = now - self._last_call
+            if elapsed < self.delay:
+                time.sleep(self.delay - elapsed)
+            self._last_call = time.monotonic()
+
+    def set_cooldown(self, seconds: float):
+        """Set a global cooldown after a rate-limit hit.
+
+        All threads will wait until ``seconds`` from now before making
+        their next API call.
+        """
+        with self._lock:
+            target = time.monotonic() + seconds
+            # Only extend, never shorten, an existing cooldown
+            if target > self._cooldown_until:
+                self._cooldown_until = target
+                logger.info(f"[RateLimiter] global cooldown set: {seconds:.0f}s")
 
 
 class AngelOneFetcher:
@@ -79,8 +143,9 @@ class AngelOneFetcher:
         self._obj = None
         self._auth_token = None
         self._login_time = None
-        import threading
         self._lock = threading.Lock()
+        # Shared rate limiter — 1.0s minimum gap between getCandleData calls
+        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=1.0)
 
     def _login(self) -> bool:
         """Login to Angel One SmartAPI with TOTP."""
@@ -90,6 +155,39 @@ class AngelOneFetcher:
 
             totp = pyotp.TOTP(self.totp_secret).now()
             self._obj = SmartConnect(api_key=self.api_key)
+
+            # ── Suppress SDK internal urllib3 retries ──────────────────
+            # The SDK's HTTP session uses urllib3 Retry with aggressive
+            # escalation (up to 131s waits on 429).  We override it so
+            # control returns to OUR retry loop on the first failure.
+            try:
+                from requests.adapters import HTTPAdapter
+                from urllib3.util.retry import Retry
+
+                low_retry = Retry(
+                    total=1,                    # 1 retry max inside the SDK
+                    backoff_factor=0.5,         # 0.5s between retries
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["GET", "POST"],
+                    raise_on_status=False,
+                )
+                adapter = HTTPAdapter(max_retries=low_retry)
+                # SmartConnect stores its session in self._obj.session
+                if hasattr(self._obj, 'session'):
+                    self._obj.session.mount("https://", adapter)
+                    self._obj.session.mount("http://", adapter)
+                    logger.debug("Angel One: SDK internal retries capped at 1")
+                # Some SDK versions use requestInstance / _session
+                elif hasattr(self._obj, 'requestInstance'):
+                    sess = getattr(self._obj.requestInstance, 'session', None) or \
+                           getattr(self._obj.requestInstance, 's', None)
+                    if sess:
+                        sess.mount("https://", adapter)
+                        sess.mount("http://", adapter)
+                        logger.debug("Angel One: SDK internal retries capped at 1 (requestInstance)")
+            except Exception as e:
+                logger.debug(f"Angel One: could not override SDK retries: {e}")
+
             data = self._obj.generateSession(self.client_code, self.password, totp)
 
             if data.get("status"):
@@ -166,15 +264,14 @@ class AngelOneFetcher:
                 "todate": chunk_end.strftime("%Y-%m-%d 15:30"),
             }
 
-            # Retry with exponential backoff for rate limiting
-            max_retries = 5
+            # ── Retry with aggressive backoff for rate limiting ───────
+            max_retries = 3
             success = False
             for attempt in range(max_retries):
                 try:
-                    # Enforce a small delay before call and use lock to serialize API requests across threads
-                    with self._lock:
-                        time.sleep(0.5)
-                        result = self._obj.getCandleData(params)
+                    # Gate through the centralised rate limiter
+                    self._rate_limiter.wait()
+                    result = self._obj.getCandleData(params)
 
                     if result and result.get("status") and result.get("data"):
                         candles = result["data"]
@@ -191,11 +288,21 @@ class AngelOneFetcher:
                         err_code = str(result.get("errorcode", ""))
                         err_msg = str(result.get("message", ""))
                         if err_code == "AB1021" or "too many requests" in err_msg.lower():
-                            wait = round(2 * (1.5 ** attempt), 1)
-                            logger.warning(f"Angel One rate limited (AB1021) at {chunk_start.strftime('%Y-%m-%d')} (attempt {attempt+1}/{max_retries}), waiting {wait}s...")
+                            # Aggressive backoff: 5s, 10s, 20s
+                            wait = min(5 * (2 ** attempt), 60)
+                            # Set global cooldown so other threads/symbols also back off
+                            self._rate_limiter.set_cooldown(wait)
+                            logger.warning(
+                                f"Angel One rate limited (AB1021) on {symbol} "
+                                f"at {chunk_start.strftime('%Y-%m-%d')} "
+                                f"(attempt {attempt+1}/{max_retries}), waiting {wait}s..."
+                            )
                             time.sleep(wait)
                             if attempt == max_retries - 1:
-                                logger.error(f"Angel One: chunk {chunk_start.strftime('%Y-%m-%d')} failed after {max_retries} retries (AB1021)")
+                                logger.error(
+                                    f"Angel One: chunk {chunk_start.strftime('%Y-%m-%d')} "
+                                    f"failed after {max_retries} retries (AB1021)"
+                                )
                             continue  # Retry!
 
                     # No data but no error, don't retry
@@ -204,16 +311,26 @@ class AngelOneFetcher:
                 except Exception as e:
                     err_msg = str(e)
                     is_rate_limit = (
-                        "exceeding access rate" in err_msg.lower() or 
-                        "access denied" in err_msg.lower() or 
-                        "ab1021" in err_msg.lower()
+                        "exceeding access rate" in err_msg.lower() or
+                        "access denied" in err_msg.lower() or
+                        "ab1021" in err_msg.lower() or
+                        "429" in err_msg or
+                        "too many requests" in err_msg.lower()
                     )
                     if is_rate_limit:
-                        wait = round(2 * (1.5 ** attempt), 1)  # 2s, 3s, 4.5s, 6.8s, 10.1s
-                        logger.warning(f"Angel One rate limited at {chunk_start.strftime('%Y-%m-%d')} (attempt {attempt+1}/{max_retries}), waiting {wait}s...")
+                        wait = min(5 * (2 ** attempt), 60)  # 5s, 10s, 20s (cap 60s)
+                        self._rate_limiter.set_cooldown(wait)
+                        logger.warning(
+                            f"Angel One rate limited on {symbol} "
+                            f"at {chunk_start.strftime('%Y-%m-%d')} "
+                            f"(attempt {attempt+1}/{max_retries}), waiting {wait}s..."
+                        )
                         time.sleep(wait)
                         if attempt == max_retries - 1:
-                            logger.error(f"Angel One: chunk {chunk_start.strftime('%Y-%m-%d')} failed after {max_retries} retries")
+                            logger.error(
+                                f"Angel One: chunk {chunk_start.strftime('%Y-%m-%d')} "
+                                f"failed after {max_retries} retries"
+                            )
                     else:
                         logger.warning(f"Angel One fetch error at {chunk_start.strftime('%Y-%m-%d')}: {e}")
                         time.sleep(1)
@@ -223,8 +340,8 @@ class AngelOneFetcher:
                 chunk_failed = True
                 break
 
-            # Small delay between chunks to avoid rate limits
-            time.sleep(0.4)
+            # Inter-chunk delay — keeps us well under the 180 req/min ceiling
+            time.sleep(1.5)
             chunk_start = chunk_end
 
         if chunk_failed:

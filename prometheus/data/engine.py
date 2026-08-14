@@ -558,6 +558,11 @@ class DataEngine:
             try:
                 df = self._fetch_from_source(source, symbol, start_date, end_date, interval, days)
                 if not df.empty:
+                    # Inter-symbol throttle: after a successful Angel One
+                    # multi-chunk fetch, pause 2s so the next symbol's
+                    # burst doesn't immediately trip the rate limit.
+                    if source == "angelone":
+                        time.sleep(2.0)
                     return df
             except Exception as e:
                 logger.warning(f"{source} fetch attempt {attempt}/{self.fetch_retries} failed: {e}")
@@ -743,10 +748,12 @@ class DataEngine:
                     "todate": now.strftime("%Y-%m-%d 15:30"),
                 }
                 if self.angelone._ensure_connected():
-                    import time
-                    with self.angelone._lock:
-                        time.sleep(0.5)
-                        result = self.angelone._obj.getCandleData(params)
+                    # Route through the shared rate limiter instead of
+                    # the old manual lock+sleep — respects global cooldown
+                    # and prevents this call from stealing a slot from
+                    # a concurrent candle fetch.
+                    self.angelone._rate_limiter.wait()
+                    result = self.angelone._obj.getCandleData(params)
                     if result and result.get("status") and result.get("data"):
                         candles = result["data"]
                         if candles:
