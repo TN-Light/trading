@@ -342,10 +342,10 @@ market:
   - NIFTY MIDCAP SELECT
   - SENSEX
   lot_sizes:
-    NIFTY 50: 65
-    NIFTY BANK: 15
-    NIFTY MIDCAP SELECT: 50
-    SENSEX: 10
+    NIFTY 50: 75
+    NIFTY BANK: 30
+    NIFTY MIDCAP SELECT: 120
+    SENSEX: 20
   stocks:
   - HDFCBANK
   - RELIANCE
@@ -354,8 +354,9 @@ market:
   - INFY
   - ICICIBANK
   trading_hours:
-    end: '15:30'
-    pre_open_end: 09:08
+    end: '15:40'              # F&O derivatives extended to 15:40 (SEBI 2025)
+    cash_end: '15:15'         # F&O stocks regular trading ends 15:15 (CAS begins)
+    pre_open_end: 09:07       # Order entry 9:00-9:07, matching 9:07-9:15
     pre_open_start: 09:00
     start: 09:15
 paper:

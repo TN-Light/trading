@@ -13,21 +13,23 @@ import pytz
 IST = pytz.timezone("Asia/Kolkata")
 
 # ---------------------------------------------------------------------------
-# Trading Hours
+# Trading Hours (updated for SEBI 2025 CAS + F&O extension)
 # ---------------------------------------------------------------------------
 MARKET_OPEN = time(9, 15)
-MARKET_CLOSE = time(15, 30)
+MARKET_CLOSE = time(15, 30)       # Kept for backward compat; cash equities
+CASH_CLOSE = time(15, 15)         # F&O stocks regular trading (CAS begins)
+FNO_CLOSE = time(15, 40)          # F&O derivatives extended session
 PRE_OPEN_START = time(9, 0)
-PRE_OPEN_END = time(9, 8)
+PRE_OPEN_END = time(9, 7)         # Order matching begins 9:07
 
 # ---------------------------------------------------------------------------
 # Lot Sizes (updated periodically by NSE — keep current)
 # ---------------------------------------------------------------------------
 LOT_SIZES = {
-    "NIFTY 50": 65,
+    "NIFTY 50": 75,              # Updated Nov 2024 (SEBI ₹15-20L min contract)
     "NIFTY BANK": 30,
     "NIFTY FIN SERVICE": 60,
-    "NIFTY": 65,
+    "NIFTY": 75,
     "BANKNIFTY": 30,
     "FINNIFTY": 60,
     "SENSEX": 20,
@@ -155,7 +157,11 @@ ALL_HOLIDAYS = set(NSE_HOLIDAYS_2025 + NSE_HOLIDAYS_2026 + NSE_HOLIDAYS_2027)
 
 
 def is_market_open(dt: Optional[datetime] = None) -> bool:
-    """Check if Indian market is currently open."""
+    """Check if Indian market is currently open.
+
+    Uses FNO_CLOSE (15:40) as the upper bound so derivative trades are
+    not blocked during the SEBI-extended F&O session (15:30–15:40).
+    """
     if dt is None:
         dt = datetime.now(IST)
     elif dt.tzinfo is None:
@@ -164,7 +170,7 @@ def is_market_open(dt: Optional[datetime] = None) -> bool:
     if dt.date() in SPECIAL_TRADING_DAYS:
         if dt.date() == date(2026, 11, 8):
             return time(18, 15) <= dt.time() <= time(19, 15)
-        return MARKET_OPEN <= dt.time() <= MARKET_CLOSE
+        return MARKET_OPEN <= dt.time() <= FNO_CLOSE
 
     # Weekend check
     if dt.weekday() >= 5:
@@ -174,9 +180,9 @@ def is_market_open(dt: Optional[datetime] = None) -> bool:
     if dt.date() in ALL_HOLIDAYS:
         return False
 
-    # Time check
+    # Time check — upper bound is F&O extended close (15:40)
     current_time = dt.time()
-    return MARKET_OPEN <= current_time <= MARKET_CLOSE
+    return MARKET_OPEN <= current_time <= FNO_CLOSE
 
 
 def is_trading_day(d: Optional[date] = None) -> bool:
@@ -270,14 +276,21 @@ def get_atm_strike(spot_price: float, symbol: str) -> float:
     return round(spot_price / interval) * interval
 
 
-def minutes_to_close(dt: Optional[datetime] = None) -> int:
-    """Get minutes remaining to market close."""
+def minutes_to_close(dt: Optional[datetime] = None, fno: bool = True) -> int:
+    """Get minutes remaining to market close.
+
+    Args:
+        fno: If True, use F&O derivatives close (15:40).
+             If False, use cash/equity close (15:30).
+    """
     if dt is None:
         dt = datetime.now(IST)
     elif dt.tzinfo is None:
         dt = IST.localize(dt)
 
-    close_dt = dt.replace(hour=15, minute=30, second=0, microsecond=0)
+    close_time = FNO_CLOSE if fno else MARKET_CLOSE
+    close_dt = dt.replace(hour=close_time.hour, minute=close_time.minute,
+                          second=0, microsecond=0)
     if dt >= close_dt:
         return 0
 

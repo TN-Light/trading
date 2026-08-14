@@ -196,7 +196,7 @@ class RiskManager:
         # 2. Trading hours check
         from prometheus.utils.indian_market import is_market_open
         if not is_market_open(current_time):
-            violations.append("Market is closed. No trading outside 9:15-15:30 IST.")
+            violations.append("Market is closed. No trading outside 9:15-15:40 IST.")
 
         # 3. Daily loss limit (only triggers on LOSSES, not profits)
         # Check dynamic max loss limit depending on the current capital bracket

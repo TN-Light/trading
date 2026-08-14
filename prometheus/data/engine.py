@@ -645,7 +645,8 @@ class DataEngine:
         # Intraday guardrail: keep only NSE/BSE regular session bars.
         if str(interval).lower() in {"5minute", "5m", "15minute", "15m", "minute", "1m", "60minute", "1h"}:
             t = pd.to_datetime(df["timestamp"], errors="coerce").dt.time
-            df = df.loc[(t >= datetime.strptime("09:15", "%H:%M").time()) & (t <= datetime.strptime("15:30", "%H:%M").time())]
+            # Upper bound 15:40 covers F&O extended session (SEBI 2025)
+            df = df.loc[(t >= datetime.strptime("09:15", "%H:%M").time()) & (t <= datetime.strptime("15:40", "%H:%M").time())]
             df = df.reset_index(drop=True)
         return df
 
