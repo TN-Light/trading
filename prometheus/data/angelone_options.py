@@ -159,7 +159,31 @@ class AngelOneOptionChain:
                 # options trade on BFO, so searchScrip("NFO", "SENSEX")
                 # returned empty and every SENSEX signal was dropped.
                 seg = self._exchange_for(underlying)
-                result = obj.searchScrip(seg, underlying)
+
+                # Bug (2026-08-14 audit): Angel One tradingsymbols use the
+                # DD-MON-YY format: NIFTY18AUG2624400CE (Aug 18 2026, 24400).
+                # searchScrip does prefix-matching, so "NIFTY" matches both
+                # NIFTY and NIFTYNXT50 (7120 contaminating results).
+                # Fix: build a date-specific query from the expiry date to
+                # narrow the search (e.g. "NIFTY18AUG" for Aug 18 expiry).
+                # Falls back to bare underlying if no expiry is available.
+                search_query = underlying
+                if expiry_date:
+                    try:
+                        from datetime import datetime as _dt
+                        exp_dt = _dt.strptime(expiry_date[:10], "%Y-%m-%d")
+                        dd = f"{exp_dt.day:02d}"
+                        mon = exp_dt.strftime("%b").upper()
+                        search_query = f"{underlying}{dd}{mon}"
+                    except Exception:
+                        pass
+
+                result = obj.searchScrip(seg, search_query)
+                if not result or not result.get("data"):
+                    # Fallback: try bare underlying (original behavior)
+                    if search_query != underlying:
+                        result = obj.searchScrip(seg, underlying)
+
                 if not result or not result.get("data"):
                     msg = str(result.get("message", "")) if isinstance(result, dict) else ""
                     code = str(result.get("errorCode", "")) if isinstance(result, dict) else ""
@@ -168,10 +192,26 @@ class AngelOneOptionChain:
                     logger.warning(f"searchScrip returned no data for {underlying} on {seg}")
                     return []
 
-                contracts = result["data"]
+                raw_contracts = result["data"]
+
+                # Post-filter: keep ONLY contracts whose tradingsymbol
+                # starts with the exact underlying followed by a digit
+                # (the day code). This rejects prefix collisions like
+                # NIFTYNXT50 when searching for NIFTY.
+                contracts = [
+                    c for c in raw_contracts
+                    if c.get("tradingsymbol", "").startswith(underlying)
+                    and len(c.get("tradingsymbol", "")) > len(underlying)
+                    and c["tradingsymbol"][len(underlying)].isdigit()
+                ]
+
                 self._token_cache[cache_key] = contracts
                 self._cache_date = today_str
-                logger.info(f"Angel One: discovered {len(contracts)} {seg} contracts for {underlying}")
+                logger.info(
+                    f"Angel One: discovered {len(contracts)} {seg} contracts "
+                    f"for {underlying} (raw={len(raw_contracts)}, "
+                    f"query={search_query})"
+                )
             except Exception as e:
                 if "invalid token" in str(e).lower() or "AG8001" in str(e):
                     self._mark_auth_failure(str(e))
@@ -236,22 +276,20 @@ class AngelOneOptionChain:
         """
         Parse Angel One tradingsymbol to extract strike, option_type, expiry.
 
-        Bug #4 (2026-07-22) fix: the previous implementation assumed a
-        ``DDMMMYY+strike`` convention, but ``kite_executor.generate_tradingsymbol``
-        actually emits two formats with NO field separators (see
-        ``kite_executor.py:321-363``):
+        Angel One searchScrip returns tradingsymbols in DD-MON-YY format:
+            {SYMBOL}{DD}{MON}{YY}{STRIKE}{CE/PE}
+            e.g. NIFTY18AUG2624400CE  -> Aug 18, 2026, strike 24400
 
-            Monthly: {SYMBOL}{YY}{MON}{STRIKE}{CE/PE}
-                     e.g. BANKNIFTY26JUL56900PE  -> 2026-07-28 (last Thursday), 56900, PE
-                     e.g. SENSEX26JUN74300PE     -> 2026-06-30 (last Tuesday),  74300, PE
+        This is DIFFERENT from Kite's format (YY-MON-strike for monthly,
+        YY-M-DD-strike for weekly). We try the Angel One format first
+        (since this parser only processes searchScrip data), then fall
+        back to the Kite formats for compatibility.
 
-            Weekly:  {SYMBOL}{YY}{M}{DD}{STRIKE}{CE/PE}
-                     e.g. NIFTY2640722650PE      -> 2026-04-07, 22650, PE
-                     e.g. SENSEX2661874300PE     -> 2026-06-18, 74300, PE
-
-        The 3-letter month form (e.g. ``JUL``) is monthly; the
-        single-char month form (e.g. ``O`` for Oct, ``N`` for Nov,
-        ``D`` for Dec, ``1``..``9`` for Jan..Sep) is weekly.
+        Bug (2026-08-14 audit): the previous parser only handled Kite
+        formats, so Angel One's `NIFTY18AUG2624400CE` was parsed as
+        YY=18 MON=AUG strike=2624400 (absurd) -> filtered by ATM range
+        -> get_real_premium returned None -> ALL NIFTY signals dropped
+        since July 28 when the Live LTP Required gate was added.
         """
         try:
             from prometheus.utils.indian_market import (
@@ -271,7 +309,34 @@ class AngelOneOptionChain:
             else:
                 return None  # futures or unknown
 
-            # Monthly format: YY + 3-letter MON + strike
+            # ── Angel One format (primary): DD + 3-letter MON + YY + strike ──
+            # e.g. "18AUG2624400" → DD=18, MON=AUG, YY=26, strike=24400
+            # Plausibility guard: the same regex matches Kite-format symbols
+            # (e.g. BANKNIFTY "26JUL56900" → DD=26, MON=JUL, YY=56, strike=900
+            # which is year 2056, absurd). We accept the Angel One parse ONLY
+            # if the derived year is within ±3 of now, day is 1-31, and strike
+            # is > 100. Otherwise fall through to the Kite parser.
+            m = re.match(r'^(\d{2})([A-Z]{3})(\d{2})(\d+)$', suffix)
+            if m:
+                dd_str, mon_str, yy_str, strike_str = m.groups()
+                ao_year = 2000 + int(yy_str)
+                ao_day = int(dd_str)
+                ao_strike = float(strike_str)
+                now_year = datetime.now().year
+                if (1 <= ao_day <= 31
+                        and abs(ao_year - now_year) <= 3
+                        and ao_strike > 100):
+                    expiry_str = ""
+                    try:
+                        month = datetime.strptime(mon_str, "%b").month
+                        expiry_dt = date(ao_year, month, ao_day)
+                        expiry_str = expiry_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                    return {"strike": ao_strike, "option_type": option_type,
+                            "expiry_str": expiry_str}
+
+            # ── Kite monthly format (fallback): YY + 3-letter MON + strike ──
             # e.g. "26JUL56900" → YY=26, MON=JUL, strike=56900
             m = re.match(r'^(\d{2})([A-Z]{3})(\d+)$', suffix)
             if m:
@@ -291,8 +356,8 @@ class AngelOneOptionChain:
                 return {"strike": strike, "option_type": option_type,
                         "expiry_str": expiry_str}
 
-            # Weekly format: YY + single-char M + DD + strike
-            # M is 1-9 (Jan-Sep), O (Oct), N (Nov), D (Dec) — per Kite convention.
+            # ── Kite weekly format: YY + single-char M + DD + strike ──
+            # M is 1-9 (Jan-Sep), O (Oct), N (Nov), D (Dec)
             month_map = {
                 "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
                 "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12,
