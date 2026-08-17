@@ -5694,6 +5694,28 @@ class Prometheus:
             # Attach signal features for regression training
             if signal_features:
                 sig.update(signal_features)
+                # Bug (2026-08-17 audit): propagate ``signal_strength`` so the
+                # paper tracker shows a meaningful score instead of always 0.00.
+                # ``signal_source.py:215`` and ``recorder.py:232`` both read
+                # ``signal.get("signal_strength")`` and default to 0 when absent.
+                # Pre-fix, ``_build_signal`` merged ``signal_features`` (which
+                # carries ``bull_score`` / ``bear_score``) into the dict but
+                # never wrote the direction-aligned scalar to ``signal_strength``.
+                # Net effect: every paper-tracked position logged
+                # ``score=0.00`` regardless of how many confirming indicators
+                # fired — making entries look like they happened with no signal
+                # at all. Restore the missing field so the paper tracker, the
+                # recorder, and the Telegram trade-open alert all surface a real
+                # confluence score.
+                if "signal_strength" not in sig:
+                    if direction == "bullish":
+                        sig["signal_strength"] = float(signal_features.get("bull_score", 0) or 0)
+                    else:
+                        sig["signal_strength"] = float(signal_features.get("bear_score", 0) or 0)
+            else:
+                # Defensive: ensure the field always exists even when no
+                # features are propagated (e.g. tests with a stripped dict).
+                sig.setdefault("signal_strength", 0.0)
             return sig
 
         # ================================================================

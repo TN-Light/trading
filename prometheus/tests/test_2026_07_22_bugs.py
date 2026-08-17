@@ -1776,3 +1776,140 @@ def test_max_pain_aligned_pivot_is_consistent_with_brute_force():
     )
 
 
+# ===========================================================================
+# Patch (2026-08-17 audit) — ``_build_signal`` must populate
+# ``signal_strength`` so the paper tracker shows the real confluence score
+# instead of always 0.00.
+#
+# Root cause (bug #N+1):
+#   ``_build_signal`` is a nested closure inside ``Prometheus._make_signal_generator``
+#   (main.py:5667). It merged ``signal_features`` (which carries ``bull_score``
+#   and ``bear_score``) into the output dict but never derived or copied a
+#   direction-aligned ``signal_strength`` field. Downstream consumers
+#   (``papertrade/signal_source.py:215``, ``recorder.py:232``) read
+#   ``signal.get("signal_strength") or 0`` and default to 0 when absent. Net
+#   effect: every paper-tracked position logged ``score=0.00`` in
+#   ``[PAPER-OPEN]`` and ``[PAPER-CLOSE]``, and the Telegram "PAPER CAPTURE
+#   opened" alert displayed ``Score: 0.00`` regardless of how many confirming
+#   indicators actually fired — making real entries look indistinguishable
+#   from spontaneous capture events.
+#
+# Fix: After ``sig.update(signal_features)``, derive ``signal_strength``
+# from ``bull_score`` (bullish direction) or ``bear_score`` (bearish). Also
+# set a defensive 0.0 when no features dict is propagated so the field
+# always exists.
+# ===========================================================================
+
+def test_build_signal_propagates_signal_strength_static():
+    """Regression guard: `_make_signal_generator` source must include the
+    new `signal_strength` derivation, so future reverts are caught.
+    """
+    import inspect
+    from prometheus.main import Prometheus
+
+    src = inspect.getsource(Prometheus._make_signal_generator)
+
+    # Field must be written into the signal dict.
+    assert 'sig["signal_strength"]' in src, (
+        "_build_signal must write signal_strength into the output dict"
+    )
+    # Derivation must branch on direction and read bull/bear scores.
+    assert 'direction == "bullish"' in src, (
+        "must branch on direction to pick bull vs bear score"
+    )
+    assert "bull_score" in src and "bear_score" in src, (
+        "must reference both bull_score and bear_score in signal_features"
+    )
+    # Defensive default for the no-features path.
+    assert 'setdefault("signal_strength", 0.0)' in src, (
+        "must set a defensive 0.0 when no signal_features is provided"
+    )
+
+
+def test_from_signal_dict_propagates_signal_strength_to_paper_tracker():
+    """Behavioural check: a raw signal dict mirroring ``_build_signal``
+    post-fix output (with ``signal_strength`` set) flows through
+    ``papertrade.signal_source.from_signal_dict`` to populate
+    ``SignalNotification.signal_score`` — the exact field the paper
+    tracker / recorder / Telegram trade-open alert read.
+
+    Pre-fix, ``signal_strength`` was absent from the dict, so
+    ``from_signal_dict`` defaulted ``signal_score`` to 0 (line 215:
+    ``float(signal.get("signal_strength") or 0)``) and every paper
+    position logged ``score=0.00``.
+    """
+    from prometheus.papertrade.signal_source import from_signal_dict
+
+    # Simulate a signal dict exactly like _build_signal produces TODAY after
+    # the patch — with bull_score=4.5 in signal_features and the now-derived
+    # signal_strength=4.5 for a bullish signal.
+    raw_signal = {
+        "symbol": "NIFTY 50",
+        "direction": "bullish",
+        "entry_price": 200.0,
+        "stop_loss": 180.0,
+        "target": 260.0,
+        "strike": 24500.0,
+        "option_type": "CE",
+        "expiry": "2026-08-28",
+        "instrument": "NIFTY2682824500CE",
+        "quantity": 50,
+        "lot_size": 50,
+        "lots": 1,
+        "strategy": "pro_FVG+VWAP+ST",
+        "bar_timestamp": "2026-08-17 09:30:00",
+        "signal_strength": 4.5,   # what the fix now populates
+        "bull_score": 4.5,        # feature backing the field
+        "bear_score": 0.0,
+        "confidence": 0.529,
+    }
+
+    notif = from_signal_dict(raw_signal, max_bars_default=16)
+
+    assert notif.signal_score == 4.5, (
+        f"expected signal_score=4.5 propagated from signal_strength; "
+        f"got {notif.signal_score}"
+    )
+    assert notif.direction.value in ("LONG", "SHORT"), (
+        f"direction must resolve to LONG/SHORT; got {notif.direction}"
+    )
+
+
+def test_from_signal_dict_defaults_score_to_zero_pre_fix_shape():
+    """Negative control: when ``signal_strength`` is absent (the pre-fix
+    shape _build_signal emitted), ``from_signal_dict`` MUST default to 0.0.
+    This is why the bug appeared as ``score=0.00`` in today's [PAPER-OPEN]
+    log lines. Documenting the regression signature for future audits.
+    """
+    from prometheus.papertrade.signal_source import from_signal_dict
+
+    raw_signal_pre_fix = {
+        "symbol": "NIFTY 50",
+        "direction": "bearish",
+        "entry_price": 200.0,
+        "stop_loss": 180.0,
+        "target": 260.0,
+        "strike": 24500.0,
+        "option_type": "PE",
+        "expiry": "2026-08-28",
+        "instrument": "NIFTY2682824500PE",
+        "quantity": 50,
+        "lot_size": 50,
+        "lots": 1,
+        "strategy": "pro_FVG+VWAP+ST",
+        "bar_timestamp": "2026-08-17 09:30:00",
+        "bull_score": 0.0,        # features still propagated
+        "bear_score": 3.8,
+        # NOTE: signal_strength deliberately absent — pre-fix shape.
+    }
+
+    notif = from_signal_dict(raw_signal_pre_fix, max_bars_default=16)
+
+    # Pre-fix: signal_strength absent -> signal_score falls back to 0.0.
+    # This is the regression signature we just patched away at the producer.
+    assert notif.signal_score == 0.0, (
+        "when signal_strength is missing, downstream must default to 0.0 "
+        "— that is exactly the pre-fix bug"
+    )
+
+
