@@ -1428,5 +1428,198 @@ def test_dispatch_multi_account_returns_paper_capture_trade_id_in_paper_mode():
     )
 
 
+# ===========================================================================
+# Patch (2026-08-17 audit) — Angel One option-chain AB1021 propagation.
+#
+# Root cause: AngelOneOptionChain had its own 0.35s _rate_limit() pacer
+# that was independent of AngelOneFetcher.SmartAPIRateLimiter (1.0s +
+# global cooldown added in commit fbd9ddd). With max_workers=3 + 7
+# instruments (Session 30), option-chain alone pushed ~9 calls/sec while
+# Angel One's limit is ~3 req/sec. discover_contracts only inspected for
+# AG8001 ("invalid token"); AB1021 ("too many requests") silently fell
+# through, and the fallback searchScrip at line 184-185 fired
+# immediately after the first AB1021 — doubling the rate-limit window.
+#
+# Fix:
+#   - _rate_limit() now gates through the fetcher's SmartAPIRateLimiter
+#     (backward-compat: falls back to 0.35s pacer if the fetcher lacks
+#     _rate_limiter, e.g. test fixtures via __new__).
+#   - New _mark_rate_limited() detects AB1021/AB1020/429 in any API
+#     response and propagates a 20s global cooldown to the shared
+#     SmartAPIRateLimiter (so historical fetcher / VIX fetch respect it
+#     too).
+#   - _mark_auth_failure() now also propagates cooldown for
+#     _auth_cooldown_sec seconds.
+#   - discover_contracts() bails on the FIRST AB1021 WITHOUT firing
+#     the fallback searchScrip, halving the rate-limit window.
+#   - fetch_market_data / get_real_premium / get_ltp_by_token all
+#     consult _mark_rate_limited before retrying or returning.
+# ===========================================================================
+
+def test_angelone_options_rate_limit_propagates_to_shared_limiter():
+    """AB1021 on searchScrip must propagate a 20s cooldown to the
+    fetcher's shared SmartAPIRateLimiter AND skip the fallback
+    searchScrip. Pre-fix behaviour was to silently bail on AB1021 and
+    immediately retry with bare underlying — doubling the rate-limit
+    window with no cooldown memory shared across callers.
+    """
+    from prometheus.data.angelone_options import AngelOneOptionChain
+    from prometheus.data.angelone_fetcher import SmartAPIRateLimiter
+
+    class _FakeObj:
+        """Records every searchScrip call and emits AB1021 on the first."""
+        def __init__(self):
+            self.calls = []
+            self._first = True
+        def searchScrip(self, seg, q):
+            self.calls.append((seg, q))
+            if self._first:
+                self._first = False
+                return {"status": False, "errorcode": "AB1021",
+                        "message": "Too Many Requests"}
+            # Fallback call should NEVER happen — test fails if it does.
+            return {"data": [{"tradingsymbol": f"{q}DUMMY",
+                              "symboltoken": "1",
+                              "name": q, "expiry": "2026-08-06",
+                              "instrumenttype": "OPTIDX"}]}
+
+    class _FakeFetcher:
+        def __init__(self, obj):
+            self._obj = obj
+            self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=0.0)
+        def _ensure_connected(self):
+            return True
+
+    fake_obj = _FakeObj()
+    chain = AngelOneOptionChain.__new__(AngelOneOptionChain)
+    chain._fetcher = _FakeFetcher(fake_obj)
+    chain._cache_date = ""
+    chain._token_cache = {}
+    chain._last_call = 0.0
+    chain._min_interval = 0.0
+    chain._disabled_until = 0.0
+    chain._auth_cooldown_sec = 300
+
+    contracts = chain.discover_contracts(
+        "NIFTY 50", expiry_date="2026-08-21",
+        strikes_around_atm=2, spot_price=22000.0,
+    )
+
+    # 1) AB1021 must produce ZERO fallback searchScrip.
+    assert len(fake_obj.calls) == 1, (
+        f"AB1021 on first searchScrip must NOT trigger a fallback call; "
+        f"got calls={fake_obj.calls}"
+    )
+
+    # 2) discover_contracts must bail cleanly (empty list, not None).
+    assert contracts == [], (
+        f"discover_contracts must return [] on AB1021; got {contracts!r}"
+    )
+
+    # 3) 20s global cooldown must be set on the shared limiter.
+    rl = chain._fetcher._rate_limiter
+    import time as _t
+    remaining = rl._cooldown_until - _t.monotonic()
+    assert 18.0 <= remaining <= 20.5, (
+        f"shared limiter must have ~20s cooldown after AB1021; "
+        f"got remaining={remaining:.2f}s"
+    )
+
+
+def test_angelone_options_rate_limit_fallback_falls_back_when_no_data():
+    """When searchScrip returns NO data (not a rate-limit), the fallback
+    to bare underlying must STILL fire — that's the legitimate use case
+    (stale daily-expiry calendar, etc.). This proves the AB1021 bail is
+    rate-limit-specific, not a blanket skip-fallback change.
+    """
+    from prometheus.data.angelone_options import AngelOneOptionChain
+    from prometheus.data.angelone_fetcher import SmartAPIRateLimiter
+
+    class _FakeObj:
+        def __init__(self):
+            self.calls = []
+        def searchScrip(self, seg, q):
+            self.calls.append((seg, q))
+            # First call (date-specific query "NIFTY18AUG"): no data.
+            if "NIFTY" in q and q != "NIFTY":
+                return {"data": None}
+            # Fallback (bare "NIFTY"): returns one contract.
+            return {"data": [{"tradingsymbol": "NIFTY18AUG2624400CE",
+                              "symboltoken": "1", "name": "NIFTY",
+                              "expiry": "2026-08-21",
+                              "instrumenttype": "OPTIDX"}]}
+
+    class _FakeFetcher:
+        def __init__(self, obj):
+            self._obj = obj
+            self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=0.0)
+        def _ensure_connected(self):
+            return True
+
+    fake_obj = _FakeObj()
+    chain = AngelOneOptionChain.__new__(AngelOneOptionChain)
+    chain._fetcher = _FakeFetcher(fake_obj)
+    chain._cache_date = ""
+    chain._token_cache = {}
+    chain._last_call = 0.0
+    chain._min_interval = 0.0
+    chain._disabled_until = 0.0
+    chain._auth_cooldown_sec = 300
+
+    contracts = chain.discover_contracts(
+        "NIFTY 50", expiry_date="2026-08-21",
+        strikes_around_atm=2, spot_price=22000.0,
+    )
+
+    # 1) Both searchScrip calls must fire (normal no-data fallback path).
+    assert len(fake_obj.calls) == 2, (
+        f"two searchScrip calls expected on no-data fallback path; "
+        f"got calls={fake_obj.calls}"
+    )
+
+    # 2) No cooldown set.
+    rl = chain._fetcher._rate_limiter
+    import time as _t
+    assert rl._cooldown_until <= _t.monotonic(), (
+        f"no cooldown should be set when first call returned no data; "
+        f"cooldown_until={rl._cooldown_until}"
+    )
+
+
+def test_angelone_options_mark_auth_failure_propagates_cooldown():
+    """AG8001 (Invalid Token) must also propagate to the shared limiter.
+    Pre-fix: ``_mark_auth_failure`` only set ``_disabled_until`` on the
+    option-chain object, leaving the historical fetcher firing at 1.0s
+    pace against the same broken session.
+    """
+    from prometheus.data.angelone_options import AngelOneOptionChain
+    from prometheus.data.angelone_fetcher import SmartAPIRateLimiter
+
+    class _FakeFetcher:
+        def __init__(self):
+            self._obj = None
+            self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=0.0)
+
+    chain = AngelOneOptionChain.__new__(AngelOneOptionChain)
+    chain._fetcher = _FakeFetcher()
+    chain._auth_cooldown_sec = 300
+    chain._disabled_until = 0.0
+
+    chain._mark_auth_failure("Invalid Token (AG8001)")
+
+    import time as _t
+    # Option-chain disabled for 300s.
+    assert chain._disabled_until > _t.time() + 280, (
+        f"_disabled_until must be ~300s in the future; "
+        f"got {chain._disabled_until - _t.time():.1f}s"
+    )
+    # Shared limiter also cooled down.
+    rl = chain._fetcher._rate_limiter
+    remaining = rl._cooldown_until - _t.monotonic()
+    assert remaining > 280, (
+        f"shared SmartAPIRateLimiter must have ~300s cooldown after "
+        f"AG8001; got remaining={remaining:.1f}s"
+    )
+
 
 

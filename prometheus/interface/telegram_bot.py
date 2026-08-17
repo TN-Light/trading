@@ -123,10 +123,20 @@ class TelegramBot:
             response = session.get(url, timeout=10)
             if response.status_code == 200:
                 bot_info = response.json().get("result", {})
-                logger.info(f"Telegram bot connected: @{bot_info.get('username', 'unknown')}")
+                # DEBUG (not INFO) — _try_connect is also invoked by the
+                # transport watchdog health probe (every ~3 min) and by
+                # _init_bot's strategy loops. Promoting to INFO here caused
+                # redundant "Telegram bot connected" log spam every 3 min
+                # even when no actual reconnect happened. The "Telegram
+                # connected via <strategy>" INFO log in _init_bot is the
+                # operator-visible proof of an established connection.
+                logger.debug(
+                    f"Telegram probe ok: @{bot_info.get('username', 'unknown')} "
+                    f"base={base_url}"
+                )
                 return True
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"Telegram probe failed on {base_url}: {exc}")
         return False
 
     def _build_session_for_strategy(self, strategy: str):
@@ -848,7 +858,32 @@ class TelegramBot:
         self.send_message(text)
 
     def alert_scanner_summary(self, scan_results: List[Dict]):
-        """Send multi-index scanner results in a compact, mobile-friendly format."""
+        """Send multi-index scanner results in a compact, mobile-friendly format.
+
+        Freshness guard (Fix B, 2026-08-17):
+        Each scan_result may carry ``_signal_generated_at`` (unix ts, set in
+        ``main._scan_one_cmd`` / ``_scan_intra_cmd``). If the delay between
+        signal generation and this summary send exceeds
+        ``STALE_THRESHOLD_SEC`` (default 90s), the row is tagged with a
+        ``⚠️ STALE +Xs`` badge in the displayed list, and is EXCLUDED from
+        the per-signal ``alert_new_signal`` follow-up call — a /scan is an
+        inquiry, not an order placement, but operators have manually traded
+        off stale /scan alerts. Flagging the staleness prevents the "signal
+        said 268, Kite already shows 256" class of mistakes.
+        """
+        STALE_THRESHOLD_SEC = 90
+        now_ts = time.time()
+
+        def _age(r):
+            ts = r.get("_signal_generated_at")
+            if not ts:
+                return None
+            return max(0, int(now_ts - ts))
+
+        def _is_stale(r):
+            age = _age(r)
+            return age is not None and age > STALE_THRESHOLD_SEC
+
         if not scan_results:
             self.send_message(
                 "\U0001f50d <b>SCAN COMPLETE</b>\n"
@@ -865,12 +900,20 @@ class TelegramBot:
         swing_top = swing_actionable[:3]
         intraday_top = intraday_actionable[:3]
 
-        lines = [
+        stale_count = sum(1 for r in results if _is_stale(r))
+        header_lines = [
             "\U0001f50d <b>MARKET SCAN</b>",
             f"<code>{datetime.now().strftime('%d %b %Y  %H:%M')}</code>",
             "<i>Showing top-ranked actionable signals only.</i>",
             "",
         ]
+        if stale_count:
+            header_lines.insert(
+                2,
+                f"\u26a0\ufe0f <b>{stale_count} stale signal(s) (>{STALE_THRESHOLD_SEC}s old)</b> "
+                f"— premium may have moved. Do NOT enter without re-checking live LTP.",
+            )
+        lines = list(header_lines)
 
         def _format_row(r):
             action = r.get("action", "HOLD")
@@ -880,14 +923,15 @@ class TelegramBot:
             sig_count = r.get("signal_count", 0)
             tf = r.get("timeframe", "15minute")
             tf_clean = tf.replace("intraday ", "").replace("minute", "m").replace("day", "D")
-            
+
             direction = "CE Buy" if "CE" in action else "PE Buy" if "PE" in action else "HOLD"
             d_emoji = "🟢" if "CE" in action else "🔴" if "PE" in action else "⚪"
-            
+
             sig_only = " (sig only)" if not r.get("executable", True) else ""
-            
+            stale_tag = f" \u26a0\ufe0f STALE +{_age(r)}s" if _is_stale(r) else ""
+
             return (
-                f"{d_emoji} <b>{symbol} ({tf_clean})</b>: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {regime.upper()}{sig_only}"
+                f"{d_emoji} <b>{symbol} ({tf_clean})</b>: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {regime.upper()}{sig_only}{stale_tag}"
             )
 
         if intraday_top:
@@ -911,14 +955,24 @@ class TelegramBot:
             lines.append("")
 
         actionable = [r for r in results if r["action"] != "HOLD" and r.get("adj_confidence", 0) >= 0.50]
-        if actionable:
-            lines.append(f"\U0001f525 <b>{len(actionable)} actionable signal(s)</b> above 50%")
+        # Fix B: do NOT trigger the per-signal follow-up alert for stale
+        # signals — the displayed row already carries the STALE badge. The
+        # per-signal alert would otherwise look identical to a real-time
+        # auto-scan signal and could be manually traded against a stale price.
+        actionable_fresh = [r for r in actionable if not _is_stale(r)]
+        if actionable_fresh:
+            lines.append(f"\U0001f525 <b>{len(actionable_fresh)} actionable signal(s)</b> above 50%")
+        elif actionable:
+            lines.append(
+                f"\u23f8 {len(actionable)} signal(s) above 50% but ALL stale (>{STALE_THRESHOLD_SEC}s) — skipped per-signal alerts"
+            )
         else:
             lines.append("\u23f8 No signals above 50% threshold")
 
         self.send_message("\n".join(lines))
 
-        for r in actionable[:3]:
+        # Fire per-signal alerts only for fresh actionable rows.
+        for r in actionable_fresh[:3]:
             self.alert_new_signal({
                 "action": r["action"],
                 "symbol": r["symbol"],

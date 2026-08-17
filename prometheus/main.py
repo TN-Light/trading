@@ -1883,6 +1883,20 @@ class Prometheus:
         expiry = str(out.get("option_expiry_date", "") or out.get("expiry", "") or "")
         symbol = str(out.get("symbol", ""))
 
+        # Fix C (2026-08-17 audit): propagate expiry + tradingsymbol back into
+        # the output dict so alert_new_signal (telegram_bot.py:760) can build
+        # the friendly Kite-searchable contract display (`SENSEX 20 AUG 77400 PE`
+        # instead of the bare Kite-format instrument code `SENSEX2682077400PE`).
+        # Previously ``expiry`` was a local var used only to build
+        # ``out["instrument"]`` via generate_tradingsymbol(), but never written
+        # to ``out["expiry"]`` — so alert_new_signal received ``expiry=""`` and
+        # skipped the friendly_contract branch, falling back to the raw
+        # instrument code. This restores the user-friendly format the operator
+        # expects, including the parenthesised Kite tradingsymbol for
+        # one-tap paste into the Kite mobile search box.
+        if expiry:
+            out["expiry"] = expiry
+
         lot_size = int(out.get("lot_size") or get_lot_size(symbol) or 0)
         out["lot_size"] = lot_size
         quantity = int(out.get("quantity", 0) or 0)
@@ -1912,7 +1926,12 @@ class Prometheus:
                 underlying = "NIFTY"
             else:
                 underlying = sym_upper  # Stock F&O
-            out["instrument"] = generate_tradingsymbol(underlying, expiry, strike, out["option_type"])
+            instrument = generate_tradingsymbol(underlying, expiry, strike, out["option_type"])
+            out["instrument"] = instrument
+            # Make the Kite tradingsymbol available as a top-level field so
+            # alert_new_signal's tsym_part shows "(SENSEX26AUG77400PE)" beside
+            # the friendly name for direct paste into Kite's search box.
+            out["tradingsymbol"] = instrument
 
         return out
 
@@ -3778,9 +3797,16 @@ class Prometheus:
         return None
 
     def _alert_signal(self, refined_signal: Dict):
-        """Send generic signal alert only for single-account mode."""
-        if self.multi_account is not None:
-            return
+        """Send generic signal alert for the current signal.
+
+        Fires for both single-account and multi-account/paper-capture modes.
+        Previously short-circuited when ``self.multi_account`` was set, which
+        silently dropped the rich signal alert (symbol/SL/target/score/
+        strategy/regime) in paper mode — operators only saw the barebones
+        ORDER PLACED message from ``live_bridge._alert_position_opened``
+        and could not tell whether an entry came from a real signal or a
+        spontaneous capture event.
+        """
         symbol = refined_signal.get("symbol", "")
         action = refined_signal.get("action", "HOLD")
         if action == "HOLD":
@@ -4153,8 +4179,8 @@ class Prometheus:
         Intraday trading — continuous scanning during market hours.
 
         Timing:
-        - 9:15-9:45: Skip (opening noise)
-        - 9:45-14:30: Scan aligned to bar interval (5min→300s, 15min→900s)
+        - 9:15 to 9:15+skip_first_minutes (default 09:30): Skip (opening noise)
+        - 9:15+skip_first_minutes to 14:30: Scan aligned to bar interval (5min→300s, 15min→900s)
         - 14:30-15:15: Monitor only, no new entries
         - 15:15: Force close all intraday positions
 
@@ -4203,6 +4229,16 @@ class Prometheus:
 
         max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
+        # Scan window opens at 09:15 + skip_minutes. Display this in every
+        # status string so the operator sees the actual scan-start time
+        # (was hardcoded to "9:45 AM" while real skip was 15min -> 09:30).
+        _scan_start_min = 15 + int(skip_minutes)
+        _scan_start_time = dtime(9, _scan_start_min) if _scan_start_min < 60 else dtime(10, _scan_start_min - 60)
+        _scan_start_str = (
+            f"{_scan_start_time.hour}:{_scan_start_time.minute:02d} AM"
+            if _scan_start_time.hour == 9
+            else f"{_scan_start_time.hour}:{_scan_start_time.minute:02d} AM"
+        )
         last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
         square_off_str = intraday_cfg.get("square_off_time", "15:15")
         intra_profile_live = self._apply_intraday_ab_profile(
@@ -4285,16 +4321,16 @@ class Prometheus:
                     _session_peak_equity = self._get_current_equity()
                     self._reset_intraday_guardrail_audit(mode_label)
                     self.dashboard.show_status_line(
-                        f"{mode_label}: Pre-market. Scan starts at 9:45 AM."
+                        f"{mode_label}: Pre-market. Scan starts at {_scan_start_str}."
                     )
                     time.sleep(60)
                     continue
 
-                # Skip opening noise (9:15-9:45)
+                # Skip opening noise (9:15 to 9:15+skip_minutes)
                 market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
                 if (now - market_open).total_seconds() < skip_minutes * 60:
                     self.dashboard.show_status_line(
-                        f"{mode_label}: Skipping opening noise. Scan at 9:45 AM."
+                        f"{mode_label}: Skipping opening noise. Scan at {_scan_start_str}."
                     )
                     time.sleep(30)
                     continue
@@ -4643,6 +4679,10 @@ class Prometheus:
 
         intra_max_trades = intraday_cfg.get("max_daily_trades", 4)
         skip_minutes = intraday_cfg.get("skip_first_minutes", 30)
+        # Computed scan-start string (was hardcoded "9:45 AM" — see run_intraday_mode).
+        _scan_start_min = 15 + int(skip_minutes)
+        _scan_start_time = dtime(9, _scan_start_min) if _scan_start_min < 60 else dtime(10, _scan_start_min - 60)
+        _scan_start_str = f"{_scan_start_time.hour}:{_scan_start_time.minute:02d} AM"
         last_entry_str = intraday_cfg.get("last_entry_time", "14:30")
         square_off_str = intraday_cfg.get("square_off_time", "15:15")
         intra_profile_live = self._apply_intraday_ab_profile(
@@ -4758,17 +4798,17 @@ class Prometheus:
                     # Retry Telegram if it failed at startup
                     self.telegram.reconnect()
                     self.dashboard.show_status_line(
-                        f"{mode_label}: Pre-market. Waiting for 9:45 AM."
+                        f"{mode_label}: Pre-market. Waiting for {_scan_start_str}."
                     )
                     time.sleep(60)
                     _consecutive_errors = 0  # Reset AFTER successful pre-market iteration
                     continue
 
-                # Skip opening noise (9:15-9:45)
+                # Skip opening noise (9:15 to 9:15+skip_minutes)
                 market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
                 if (now - market_open).total_seconds() < skip_minutes * 60:
                     self.dashboard.show_status_line(
-                        f"{mode_label}: Skipping opening noise."
+                        f"{mode_label}: Skipping opening noise. Scan at {_scan_start_str}."
                     )
                     time.sleep(30)
                     continue
@@ -8839,7 +8879,12 @@ class Prometheus:
 
         swing_count = 0
         swing_details = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # max_workers=3 (was 10) — 10 parallel Angel One fetches from one IP
+        # trigger AB1021 "Too many requests" 429s every scan, forcing 5/10/20s
+        # backoff retries per chunk. With 10 symbols, 3 workers complete in
+        # ~3x the time of one fetch with ZERO 429s, where 10 workers stall for
+        # 8+ minutes per scan. Same cap used by scanner.py:290 (fetch pool).
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             for ds in executor.map(_scan_swing, self.all_symbols):
                 if ds:
                     swing_count += 1
@@ -8850,7 +8895,7 @@ class Prometheus:
         intra_details = []
         if intraday_enabled:
             intraday_symbols = self._get_intraday_instruments(self.symbols)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 for di in executor.map(_scan_intra, intraday_symbols):
                     if di:
                         intra_count += 1
@@ -8972,13 +9017,22 @@ class Prometheus:
                         "strike": exe.strike,
                         "option_type": exe.option_type,
                         "expiry": exe.expiry,
+                        # Freshness timestamp (Fix B): alert_scanner_summary
+                        # uses this to flag/drop signals delivered >90s after
+                        # generation. Prevents stale-signal entries — a real
+                        # signal at premium=268 that took 8min to deliver is
+                        # no longer actionable when premium has moved to 256.
+                        "_signal_generated_at": time.time(),
                     }
                 except Exception as e:
                     logger.debug(f"Scan failed for {symbol}: {e}")
                     return None
 
             scan_results = []
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            # max_workers=3 (was 10) — see _tg_cmd_scan_count rationale.
+            # Higher concurrency just triggers Angel One AB1021 backoff loops
+            # that dominate scan wall-clock time.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 for sres in executor.map(_scan_one_cmd, self.all_symbols):
                     if sres: scan_results.append(sres)
 
@@ -9030,12 +9084,15 @@ class Prometheus:
                             "strike": exec_sig.get("strike", 0),
                             "option_type": exec_sig.get("option_type", ""),
                             "expiry": exec_sig.get("expiry", ""),
+                            # Freshness timestamp (Fix B) — see _scan_one_cmd.
+                            "_signal_generated_at": time.time(),
                         }
                     except Exception as e:
                         logger.debug(f"Intraday scan failed for {symbol}: {e}")
                         return None
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                # max_workers=3 (was 10) — keep Angel One below 429 threshold.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                     for sres in executor.map(_scan_intra_cmd, intraday_instruments):
                         if sres: scan_results.append(sres)
 

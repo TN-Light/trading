@@ -97,13 +97,90 @@ class AngelOneOptionChain:
         return time.time() < self._disabled_until
 
     def _mark_auth_failure(self, reason: str):
+        """Disable the option-chain path AND propagate to the shared
+        cooldown so the historical fetcher / VIX fetch respect it too.
+
+        Bug (2026-08-17 audit): previously ``_mark_auth_failure`` only
+        set ``_disabled_until`` (read by ``_get_obj``), but the historical
+        fetcher's SmartAPIRateLimiter was never informed — so after an
+        AG8001 the option-chain stayed silent for 5 min while the fetcher
+        kept firing at 1.0s pace and either got its own AG8001 or
+        competed for the same broken session.
+        """
         self._disabled_until = time.time() + self._auth_cooldown_sec
+        rl = getattr(self._fetcher, "_rate_limiter", None)
+        if rl is not None:
+            rl.set_cooldown(float(self._auth_cooldown_sec))
         logger.warning(
             f"Angel One option chain disabled for {self._auth_cooldown_sec}s due to auth failure: {reason}"
         )
 
+    def _mark_rate_limited(self, result, where: str) -> bool:
+        """Detect AB1021/AB1020/429 in an API response and propagate a
+        20s global cooldown to the shared SmartAPIRateLimiter.
+
+        Returns True iff the response looks rate-limited.  Callers MUST
+        skip fallbacks when this returns True — re-trying within
+        milliseconds is what triggered the SDK's 131-second urllib3 retry
+        cascade (documented in commit fbd9ddd) before August 2026.
+
+        Bug (2026-08-17 audit): ``discover_contracts`` only inspected
+        responses for ``AG8001`` ("invalid token") and silently bailed
+        on ``AB1021`` ("too many requests") without setting any
+        cooldown. Every scan-cycle retry pattern burned through the
+        retry budget until the Angel One endpoint itself cooled down.
+        """
+        if not result or not isinstance(result, dict):
+            return False
+        if result.get("status"):
+            return False
+        code = str(result.get("errorcode") or result.get("errorCode") or "")
+        msg = str(result.get("message", "") or "")
+        is_rl = (
+            code in ("AB1021", "AB1020")
+            or "too many requests" in msg.lower()
+            or "exceeding access rate" in msg.lower()
+            or "access denied" in msg.lower()
+        )
+        if is_rl:
+            rl = getattr(self._fetcher, "_rate_limiter", None)
+            if rl is not None:
+                rl.set_cooldown(20.0)
+            logger.warning(
+                f"Angel One option-chain rate-limited in {where} "
+                f"(code={code or 'unknown'}, msg={msg[:80]}); "
+                f"propagated 20s global cooldown"
+            )
+        return is_rl
+
     def _rate_limit(self):
-        """Simple rate limiter for API calls."""
+        """Gate every option-chain API call through the shared
+        SmartAPIRateLimiter (1.0s minimum gap + global cooldown).
+
+        Bug (2026-08-17 audit): the option-chain path had its own
+        independent 0.35s pacer, separate from the historical fetcher's
+        SmartAPIRateLimiter added in commit fbd9ddd.  With max_workers=3
+        concurrent scan threads + 7 intraday instruments (Session 30
+        expansion), the option-chain alone fired at ~3 calls/sec/worker
+        = ~9 calls/sec across workers, vs Angel One's ~3 req/sec
+        limit. The two limiters were totally uncoordinated — a 429 on
+        searchScrip set no cooldown visible to ``fetch_historical``,
+        and vice-versa.  Unifying the gate on the fetcher's existing
+        ``SmartAPIRateLimiter`` means ALL Angel One callers
+        (historical fetcher, VIX fetch, searchScrip, getMarketData,
+        ltpData, optionGreek) respect a single global rate and
+        cooldown.
+
+        Backward-compat: if the fetcher doesn't expose
+        ``_rate_limiter`` (e.g. legacy callers or test fixtures via
+        ``__new__``), fall back to the original 0.35s pacer so unit
+        tests like ``test_angelone_options_searchScrip_uses_resolved_segment_per_underlying``
+        keep working unchanged.
+        """
+        rl = getattr(self._fetcher, "_rate_limiter", None)
+        if rl is not None:
+            rl.wait()
+            return
         elapsed = time.time() - self._last_call
         if elapsed < self._min_interval:
             time.sleep(self._min_interval - elapsed)
@@ -179,10 +256,23 @@ class AngelOneOptionChain:
                         pass
 
                 result = obj.searchScrip(seg, search_query)
+                # Bug (2026-08-17 audit): if the FIRST searchScrip tripped
+                # AB1021, do NOT immediately fire the fallback — that
+                # would double the rate-limit window. The shared limiter
+                # has now set a 20s global cooldown; bail this call so
+                # other workers / symbols take the wait too.
+                if self._mark_rate_limited(result, f"searchScrip('{seg}', '{search_query}')"):
+                    return []
+
                 if not result or not result.get("data"):
-                    # Fallback: try bare underlying (original behavior)
+                    # Fallback ONLY when the first call returned no data
+                    # due to a tradingsymbol format mismatch (e.g. stale
+                    # daily-expiry calendar). Skip fallback for AB1021 —
+                    # it would extend the rate-limit window.
                     if search_query != underlying:
                         result = obj.searchScrip(seg, underlying)
+                        if self._mark_rate_limited(result, f"searchScrip_fallback('{seg}', '{underlying}')"):
+                            return []
 
                 if not result or not result.get("data"):
                     msg = str(result.get("message", "")) if isinstance(result, dict) else ""
@@ -418,6 +508,13 @@ class AngelOneOptionChain:
                 # Bug (2026-07-28 audit): route BSE-listed contracts
                 # (SENSEX) on BFO instead of hardcoding "NFO".
                 response = obj.getMarketData("FULL", {seg: batch})
+                # Bug (2026-08-17 audit): detect AB1021 on getMarketData
+                # — bail this batch and let the shared cooldown govern
+                # subsequent fetches across all symbols.
+                if self._mark_rate_limited(response, f"getMarketData({seg}, batch={i})"):
+                    # Stop the loop; remaining batches will hit the
+                    # shared cooldown automatically and clear in ~20s.
+                    break
                 if response and response.get("status") and response.get("data"):
                     fetched = response["data"].get("fetched", [])
                     for item in fetched:
@@ -618,6 +715,12 @@ class AngelOneOptionChain:
             underlying = self.UNDERLYING_MAP.get(symbol, "NIFTY")
             seg = self._exchange_for(underlying)
             result = obj.ltpData(seg, target["tradingsymbol"], target["symboltoken"])
+            # Bug (2026-08-17 audit): AB1021 on ltpData previously passed
+            # through silently as None — the next getMarketData / optionGreek
+            # retried in the same call. Bail immediately on rate-limit so
+            # the shared cooldown governs all pending Angel One callers.
+            if self._mark_rate_limited(result, f"ltpData({seg}, {target['tradingsymbol']})"):
+                return None
             if result and result.get("status") and result.get("data"):
                 data = result["data"]
                 ltp = float(data.get("ltp", 0) or 0)
@@ -639,13 +742,14 @@ class AngelOneOptionChain:
                     # Bug (2026-07-28 audit): same segment routing as the
                     # ltpData call above — SENSEX ships on BFO.
                     full = obj.getMarketData("FULL", {seg: [target["symboltoken"]]})
-                    if full and full.get("data", {}).get("fetched"):
-                        f = full["data"]["fetched"][0]
-                        premium["bid"] = float(f.get("bestBidPrice", 0) or 0)
-                        premium["ask"] = float(f.get("bestAskPrice", 0) or 0)
-                        premium["spread"] = premium["ask"] - premium["bid"]
-                        premium["oi"] = int(f.get("opnInterest", 0) or 0)
-                        premium["volume"] = int(f.get("tradeVolume", 0) or 0)
+                    if not self._mark_rate_limited(full, f"getMarketData({seg}, {target['tradingsymbol']})"):
+                        if full and full.get("data", {}).get("fetched"):
+                            f = full["data"]["fetched"][0]
+                            premium["bid"] = float(f.get("bestBidPrice", 0) or 0)
+                            premium["ask"] = float(f.get("bestAskPrice", 0) or 0)
+                            premium["spread"] = premium["ask"] - premium["bid"]
+                            premium["oi"] = int(f.get("opnInterest", 0) or 0)
+                            premium["volume"] = int(f.get("tradeVolume", 0) or 0)
                 except Exception:
                     pass
 
@@ -658,13 +762,14 @@ class AngelOneOptionChain:
                         "strikeprice": str(strike),
                         "optiontype": option_type,
                     })
-                    if g_result and g_result.get("data"):
-                        gd = g_result["data"]
-                        premium["delta"] = float(gd.get("delta", 0) or 0)
-                        premium["gamma"] = float(gd.get("gamma", 0) or 0)
-                        premium["theta"] = float(gd.get("theta", 0) or 0)
-                        premium["vega"] = float(gd.get("vega", 0) or 0)
-                        premium["iv"] = float(gd.get("impliedVolatility", 0) or 0)
+                    if not self._mark_rate_limited(g_result, f"optionGreek({target['tradingsymbol']})"):
+                        if g_result and g_result.get("data"):
+                            gd = g_result["data"]
+                            premium["delta"] = float(gd.get("delta", 0) or 0)
+                            premium["gamma"] = float(gd.get("gamma", 0) or 0)
+                            premium["theta"] = float(gd.get("theta", 0) or 0)
+                            premium["vega"] = float(gd.get("vega", 0) or 0)
+                            premium["iv"] = float(gd.get("impliedVolatility", 0) or 0)
                 except Exception:
                     pass
 
@@ -698,6 +803,14 @@ class AngelOneOptionChain:
                             # underlying cache key.
                             seg = self._exchange_for(underlying)
                             result = obj.ltpData(seg, tradingsymbol, token)
+                            # Bug (2026-08-17 audit): AB1021 on the
+                            # position-monitor LTP poll previously
+                            # silently returned None — but the next bar
+                            # cycle re-fired immediately, extending the
+                            # rate-limit window. Propagate cooldown so
+                            # subsequent bars respect it too.
+                            if self._mark_rate_limited(result, f"ltpData({seg}, {tradingsymbol})"):
+                                return None
                             if result and result.get("data"):
                                 return float(result["data"].get("ltp", 0) or 0)
                         except Exception:
