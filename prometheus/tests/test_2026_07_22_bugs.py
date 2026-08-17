@@ -1622,4 +1622,157 @@ def test_angelone_options_mark_auth_failure_propagates_cooldown():
     )
 
 
+# ===========================================================================
+# Patch (2026-08-17 audit) — OIAnalyzer max_pain broadcast crash on
+# asymmetric CE/PE strikes.
+#
+# Root cause: ``oi_analyzer.analyze`` directly passed raw
+# ``calls["oi"]`` (say len 20) and ``puts["oi"]`` (say len 17) to
+# ``max_pain`` along with ``calls["strike"]`` (len 20). Inside max_pain
+# the inner ``put_oi * np.maximum(strike - strikes, 0)`` multiplied a
+# length-17 array against a length-20 array and crashed:
+#     ValueError: operands could not be broadcast together with
+#     shapes (20,) (17,)
+# The exception propagated up through ``main._analyze_impl`` and got
+# caught by ``analyze``'s try/except, which logged "analyze(NIFTY 50)
+# failed" and silently returned None. Net effect: NIFTY 50 / NIFTY BANK
+# / NIFTY MIDCAP SELECT disappeared from /scan CLI output entirely
+# (only SENSEX, which happened to have CE/PE-balanced chains, survived).
+# Production paper-trade path was unaffected (uses a separate signal
+# factory that doesn't touch the OI analyzer).
+#
+# Fix:
+#   - ``oi_analyzer.analyze`` now builds a unified strike / call-OI /
+#     put-OI pivot via pandas groupby+merge+fillna(0) before calling
+#     max_pain. All three arrays feed in at equal length.
+#   - ``max_pain`` itself now defensively validates length equality and
+#     raises a clearer ``ValueError`` so future bad callers don't get a
+#     cryptic numpy broadcast message.
+# ===========================================================================
+
+def test_max_pain_handles_asymmetric_ce_pe_strikes():
+    """Regression: ``oi_analyzer.analyze`` must pivot CE and PE OI onto
+    the union of strikes before calling max_pain, so unequal CE/PE
+    strike counts (e.g. NIFTY 50: 20 CE strikes vs 17 PE strikes) no
+    longer crash with a broadcast ValueError.
+    """
+    import numpy as np
+    import pandas as pd
+    from prometheus.signals.oi_analyzer import OIAnalyzer
+
+    # Simulate a chain with 20 CE strikes but only 17 PE strikes —
+    # the asymmetric pattern that crashed NIFTY 50 in /scan.
+    # Build CE: strikes 24000-24950 step 50, OI decaying from ATM.
+    # Build PE: strikes 24000-24800 step 50 (only 17 strikes, missing
+    # 24850, 24900, 24950).
+    ce_strikes = np.arange(24000.0, 25000.0, 50.0)            # 20 strikes
+    pe_strikes = np.arange(24000.0, 24850.0, 50.0)            # 17 strikes
+    spot = 24500.0
+
+    calls_df = pd.DataFrame({
+        "strike": ce_strikes,
+        "option_type": "CE",
+        "oi":        np.linspace(1000, 500, len(ce_strikes)),
+        "oi_change": np.linspace(100, 0, len(ce_strikes)),
+        "iv":        np.full(len(ce_strikes), 0.18),
+        "volume":    np.linspace(200, 50, len(ce_strikes)),
+    })
+    puts_df = pd.DataFrame({
+        "strike": pe_strikes,
+        "option_type": "PE",
+        "oi":        np.linspace(800, 300, len(pe_strikes)),
+        "oi_change": np.linspace(80, 0, len(pe_strikes)),
+        "iv":        np.full(len(pe_strikes), 0.20),
+        "volume":    np.linspace(150, 40, len(pe_strikes)),
+    })
+    chain_df = pd.concat([calls_df, puts_df], ignore_index=True)
+
+    analyzer = OIAnalyzer()
+    # Must NOT throw — pre-fix this raised the broadcast ValueError.
+    result = analyzer.analyze(chain_df, spot_price=spot)
+
+    # Max pain must be populated and inside the strike range.
+    mp = result.get("metrics", {}).get("max_pain")
+    assert mp is not None, "max_pain missing from OI metrics"
+    assert 24000.0 <= float(mp) <= 24950.0, (
+        f"max_pain {mp} outside strike range [24000, 24950]"
+    )
+
+
+def test_max_pain_raises_on_shape_mismatch():
+    """max_pain must defensively raise a clear ValueError when callers
+    pass unequal-length arrays, so future bad callers surface a clear
+    error instead of a cryptic numpy broadcast.
+    """
+    import numpy as np
+    import pytest
+    from prometheus.utils.options_math import max_pain
+
+    strikes = np.arange(24000.0, 24100.0, 10.0)        # len 10
+    call_oi = np.full(10, 100.0)
+    put_oi = np.full(9, 100.0)                          # off by one
+
+    with pytest.raises(ValueError) as exc_info:
+        max_pain(strikes, call_oi, put_oi, spot=24050.0)
+
+    assert "shape mismatch" in str(exc_info.value), (
+        f"expected shape-mismatch error; got {exc_info.value}"
+    )
+
+
+def test_max_pain_aligned_pivot_is_consistent_with_brute_force():
+    """Verify the pivot approach produces the same max_pain as a direct
+    brute-force computation over the union of strikes — this proves the
+    fillna(0) workaround doesn't alter the algorithm's semantics.
+    """
+    import numpy as np
+    import pandas as pd
+    from prometheus.signals.oi_analyzer import OIAnalyzer
+
+    ce_strikes = np.arange(24000.0, 24100.0, 10.0)     # 10 strikes
+    pe_strikes = np.arange(24010.0, 24100.0, 10.0)    # 9 strikes (offset)
+    spot = 24050.0
+
+    calls_df = pd.DataFrame({
+        "strike": ce_strikes,
+        "option_type": "CE",
+        "oi":        np.linspace(1000, 100, len(ce_strikes)),
+        "oi_change": np.zeros(len(ce_strikes)),
+        "iv":        np.full(len(ce_strikes), 0.18),
+        "volume":    np.zeros(len(ce_strikes)),
+    })
+    puts_df = pd.DataFrame({
+        "strike": pe_strikes,
+        "option_type": "PE",
+        "oi":        np.linspace(800, 80, len(pe_strikes)),
+        "oi_change": np.zeros(len(pe_strikes)),
+        "iv":        np.full(len(pe_strikes), 0.20),
+        "volume":    np.zeros(len(pe_strikes)),
+    })
+    chain_df = pd.concat([calls_df, puts_df], ignore_index=True)
+
+    analyzer = OIAnalyzer()
+    result = analyzer.analyze(chain_df, spot_price=spot)
+    pivot_mp = float(result["metrics"]["max_pain"])
+
+    # Brute-force: build union strikes, zero-fill OI gaps, iterate.
+    union_strikes = np.array(sorted(set(ce_strikes) | set(pe_strikes)))
+    ce_map = dict(zip(ce_strikes, calls_df["oi"].values))
+    pe_map = dict(zip(pe_strikes, puts_df["oi"].values))
+    ce_oi = np.array([ce_map.get(s, 0.0) for s in union_strikes])
+    pe_oi = np.array([pe_map.get(s, 0.0) for s in union_strikes])
+
+    pain = np.zeros(len(union_strikes))
+    for i, E in enumerate(union_strikes):
+        pain[i] = (
+            np.sum(ce_oi * np.maximum(union_strikes - E, 0)) +
+            np.sum(pe_oi * np.maximum(E - union_strikes, 0))
+        )
+    brute_mp = float(union_strikes[int(np.argmax(pain))])
+    
+    assert pivot_mp == brute_mp, (
+        f"max_pain via pivot analyzer ({pivot_mp}) != "
+        f"brute-force ({brute_mp}) — pivot introduced bias"
+    )
+
 

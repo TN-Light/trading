@@ -74,15 +74,41 @@ class OIAnalyzer:
             signals.append(pcr_signal)
 
         # 2. Max Pain
+        # Bug (2026-08-17 audit): NIFTY 50 / NIFTY BANK / NIFTY MIDCAP SELECT
+        # option chains often list DIFFERENT strike sets for CE vs PE — the
+        # exchange's strike-listing algorithm is moneyness-driven, not
+        # symmetric. Passing raw calls["oi"] (say 20 rows) and puts["oi"]
+        # (say 17 rows) into max_pain triggered:
+        #   ValueError: operands could not be broadcast together with
+        #   shapes (20,) (17,)
+        # …which silently crashed the entire analyze(NIFTY) call inside
+        # the legacy /scan path, leaving the operator with a /scan table
+        # that contained only SENSEX (the only chain with balanced CE/PE
+        # counts after strikes_around_atm filtering).
+        #
+        # Fix: pivot CE and PE OI onto the UNION of their strikes, zero-
+        # filling whichever side is missing a strike. The three arrays
+        # (strikes, call_oi, put_oi) then have equal length and max_pain's
+        # per-strike inner products broadcast correctly. This is also
+        # mathematically equivalent to the proper max-pain definition
+        # (zero OI contributes zero pain) — no approximation introduced.
         if not calls.empty and not puts.empty:
-            mp = max_pain(
-                calls["strike"].values,
-                calls["oi"].values,
-                puts["oi"].values,
-                spot_price
-            )
-            metrics["max_pain"] = mp
-            metrics["max_pain_distance_pct"] = round((spot_price - mp) / spot_price * 100, 2)
+            ce_pivot = calls.groupby("strike")["oi"].sum()
+            pe_pivot = puts.groupby("strike")["oi"].sum()
+            oi_pivot = pd.DataFrame(
+                {"ce_oi": ce_pivot, "pe_oi": pe_pivot}
+            ).fillna(0.0).sort_index()
+            if len(oi_pivot) >= 2:
+                mp = max_pain(
+                    oi_pivot.index.values.astype(float),
+                    oi_pivot["ce_oi"].values.astype(float),
+                    oi_pivot["pe_oi"].values.astype(float),
+                    spot_price,
+                )
+                metrics["max_pain"] = mp
+                metrics["max_pain_distance_pct"] = round(
+                    (spot_price - mp) / spot_price * 100, 2
+                )
 
         # 3. OI-based Support/Resistance
         support_resistance = self._find_oi_support_resistance(calls, puts, spot_price)

@@ -182,8 +182,39 @@ def max_pain(
     """
     Calculate Max Pain — the strike price where total option buyer losses are maximized.
     This is where the market tends to gravitate toward on expiry.
+
+    All three input arrays MUST be equal-length: `strikes` is the candidate
+    expiry-price grid (typically the union of CE + PE strikes), and
+    `call_oi`/`put_oi` hold the OI at each grid point (zero where the
+    strike only lists one side — exchanges commonly list asymmetric CE/PE
+    strike counts for index options).
+
+    Bug (2026-08-17 audit): pre-fix, callers passed unequal-length CE/PE
+    arrays (`call_oi(20)` vs `put_oi(17)` for NIFTY 50) and the inner
+    `put_oi * np.maximum(strike - strikes, 0)` broadcast crashed:
+        ValueError: operands could not be broadcast together with
+        shapes (20,) (17,)
+    Top-level caller (oi_analyzer.AnalysisChain) now builds a unified
+    pivot before invoking max_pain, so equal-length is guaranteed. This
+    guard remains to surface any future bad caller clearly instead of
+    silently propagating a numpy broadcast error.
     """
-    total_pain = np.zeros(len(strikes))
+    strikes = np.asarray(strikes, dtype=float)
+    call_oi = np.asarray(call_oi, dtype=float)
+    put_oi = np.asarray(put_oi, dtype=float)
+
+    n = len(strikes)
+    if len(call_oi) != n or len(put_oi) != n:
+        raise ValueError(
+            f"max_pain: shape mismatch — strikes({n}) "
+            f"call_oi({len(call_oi)}) put_oi({len(put_oi)}). "
+            f"All arrays must be equal-length; individually reindex onto "
+            f"the union of CE + PE strikes and fill missing OI with 0."
+        )
+    if n == 0:
+        return float(spot)
+
+    total_pain = np.zeros(n)
 
     for i, strike in enumerate(strikes):
         # Call holders' pain at this expiry price
