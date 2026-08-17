@@ -141,9 +141,6 @@ intraday:
   - NIFTY BANK
   - SENSEX
   - NIFTY MIDCAP SELECT
-  - HDFCBANK
-  - TATAMOTORS
-  - ICICIBANK
   bar_interval: auto
   use_backtest_generator: true
   breakeven_ratio: 0.4
@@ -154,9 +151,6 @@ intraday:
   - NIFTY BANK
   - SENSEX
   - NIFTY MIDCAP SELECT
-  - HDFCBANK
-  - TATAMOTORS
-  - ICICIBANK
   last_entry_time: '14:30'
   max_daily_trades: 3
   risk_per_trade_pct: 2.0
@@ -346,13 +340,12 @@ market:
     NIFTY BANK: 30
     NIFTY MIDCAP SELECT: 120
     SENSEX: 20
-  stocks:
-  - HDFCBANK
-  - RELIANCE
-  - SBIN
-  - TATAMOTORS
-  - INFY
-  - ICICIBANK
+  stocks: []  # Aug-17: removed 6 F&O stocks — zero backtest coverage,
+              # no live LTP from Angel One (searchScrip returns no
+              # contracts for them), and a known indicator broadcast
+              # bug on stock OHLCV lengths. Revisit only after each
+              # stock has dedicated backtest validation + verified
+              # Angel One option chains per Session 24 robustness gates.
   trading_hours:
     end: '15:40'              # F&O derivatives extended to 15:40 (SEBI 2025)
     cash_end: '15:15'         # F&O stocks regular trading ends 15:15 (CAS begins)
