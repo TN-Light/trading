@@ -558,11 +558,16 @@ class DataEngine:
             try:
                 df = self._fetch_from_source(source, symbol, start_date, end_date, interval, days)
                 if not df.empty:
-                    # Inter-symbol throttle: after a successful Angel One
-                    # multi-chunk fetch, pause 2s so the next symbol's
-                    # burst doesn't immediately trip the rate limit.
+                    # Inter-symbol throttle: paused 2s pre-Aug-17 to
+                    # stop the next symbol's burst from tripping the
+                    # rate limit. Now redundant — the shared
+                    # SmartAPIRateLimiter (angelone_fetcher.py) sets
+                    # 0.4s spacing globally and a 20s cooldown on
+                    # AB1021 that all callers (fetcher / option-chain /
+                    # VIX) respect. Keeping a tiny 0.1s as a safety
+                    # margin against SDK-side per-IP accounting jitter.
                     if source == "angelone":
-                        time.sleep(2.0)
+                        time.sleep(0.1)
                     return df
             except Exception as e:
                 logger.warning(f"{source} fetch attempt {attempt}/{self.fetch_retries} failed: {e}")

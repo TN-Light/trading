@@ -8879,12 +8879,13 @@ class Prometheus:
 
         swing_count = 0
         swing_details = []
-        # max_workers=3 (was 10) — 10 parallel Angel One fetches from one IP
-        # trigger AB1021 "Too many requests" 429s every scan, forcing 5/10/20s
-        # backoff retries per chunk. With 10 symbols, 3 workers complete in
-        # ~3x the time of one fetch with ZERO 429s, where 10 workers stall for
-        # 8+ minutes per scan. Same cap used by scanner.py:290 (fetch pool).
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # max_workers=5 (was 3 — Aug-17 follow-up): the shared
+        # SmartAPIRateLimiter now serialises all Angel One calls
+        # (fetcher / option-chain / VIX), so raising workers no longer
+        # risks AB1021. 5 workers let signal evaluation overlap with
+        # API waits; the limiter keeps dispatch under the ~3 req/sec
+        # Angel One cap regardless of worker count.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             for ds in executor.map(_scan_swing, self.all_symbols):
                 if ds:
                     swing_count += 1
@@ -8895,7 +8896,7 @@ class Prometheus:
         intra_details = []
         if intraday_enabled:
             intraday_symbols = self._get_intraday_instruments(self.symbols)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 for di in executor.map(_scan_intra, intraday_symbols):
                     if di:
                         intra_count += 1
@@ -9029,10 +9030,13 @@ class Prometheus:
                     return None
 
             scan_results = []
-            # max_workers=3 (was 10) — see _tg_cmd_scan_count rationale.
-            # Higher concurrency just triggers Angel One AB1021 backoff loops
-            # that dominate scan wall-clock time.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            # max_workers=5 (was 3 — Aug-17 follow-up): shared
+            # SmartAPIRateLimiter now coordinates all Angel One callers
+            # so worker count is bounded by signal-eval CPU overlap, not
+            # by per-IP rate risk. Higher concurrency previously triggered
+            # AB1021 backoff loops that dominated scan wall-clock time;
+            # the unified limiter dispatches at ~2.5 req/sec regardless.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 for sres in executor.map(_scan_one_cmd, self.all_symbols):
                     if sres: scan_results.append(sres)
 
@@ -9091,8 +9095,8 @@ class Prometheus:
                         logger.debug(f"Intraday scan failed for {symbol}: {e}")
                         return None
 
-                # max_workers=3 (was 10) — keep Angel One below 429 threshold.
-                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                # max_workers=5 (was 3 — Aug-17 follow-up): see above.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                     for sres in executor.map(_scan_intra_cmd, intraday_instruments):
                         if sres: scan_results.append(sres)
 

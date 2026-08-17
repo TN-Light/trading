@@ -287,7 +287,10 @@ class LiveScanner:
         scan_data_map: Dict[str, ScanData] = {}
         t0 = time.monotonic()
         
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix='fetch') as pool:
+        # max_workers=5 (was 3 — Aug-17 follow-up): shared
+        # SmartAPIRateLimiter coordinates all Angel One callers so the
+        # fetch pool can no longer trigger AB1021 on its own.
+        with ThreadPoolExecutor(max_workers=5, thread_name_prefix='fetch') as pool:
             futures = {
                 pool.submit(self._fetch_symbol_data, sym): sym
                 for sym in self._symbols

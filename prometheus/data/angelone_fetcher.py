@@ -144,8 +144,13 @@ class AngelOneFetcher:
         self._auth_token = None
         self._login_time = None
         self._lock = threading.Lock()
-        # Shared rate limiter — 1.0s minimum gap between getCandleData calls
-        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=1.0)
+        # Shared rate limiter — 0.4s minimum gap = ~2.5 req/sec.
+        # Pre-Aug-17 used 1.0s (2.5x too conservative) — Angel One's cap
+        # is ~3 req/sec, and the shared limiter now coordinates ALL
+        # callers (fetcher + option-chain + VIX), so even with
+        # max_workers=5 the effective dispatch rate stays under cap.
+        # See 2026-08-17 audit follow-up (commit 31e9d15).
+        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=0.4)
 
     def _login(self) -> bool:
         """Login to Angel One SmartAPI with TOTP."""
@@ -340,8 +345,11 @@ class AngelOneFetcher:
                 chunk_failed = True
                 break
 
-            # Inter-chunk delay — keeps us well under the 180 req/min ceiling
-            time.sleep(1.5)
+            # Inter-chunk delay — kept at 0.3s (was 1.5s) since the
+            # SmartAPIRateLimiter already enforces 0.4s between calls
+            # and a 20s cooldown on AB1021. Pre-Aug-17 this was the
+            # only throttle and had to be conservative.
+            time.sleep(0.3)
             chunk_start = chunk_end
 
         if chunk_failed:
