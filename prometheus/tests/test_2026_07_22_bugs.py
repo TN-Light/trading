@@ -18,6 +18,8 @@ from typing import Optional
 
 import pytest
 
+from unittest.mock import MagicMock
+
 from prometheus.papertrade import PaperTradeEngine
 from prometheus.papertrade.types import Direction
 from prometheus.papertrade.signal_source import SignalNotification
@@ -1910,6 +1912,169 @@ def test_from_signal_dict_defaults_score_to_zero_pre_fix_shape():
     assert notif.signal_score == 0.0, (
         "when signal_strength is missing, downstream must default to 0.0 "
         "— that is exactly the pre-fix bug"
+    )
+
+
+# ===========================================================================
+# Patch (2026-08-18 audit) — alert dedupe must include ``strike`` and
+# ``source`` so:
+#   1. Two different strikes on the same (symbol, action) pair BOTH alert
+#      (previously the 2nd was silently killed while the paper trade still
+#      opened — that's why paper trades appeared "without a signal call").
+#   2. /scan (source="multi") and auto-scan (source="auto") dedupe
+#      independently so manual /scan no longer silences the next auto
+#      alert.
+#
+# Pre-fix key shape:  "{date}:{symbol}:{action}:{account}"
+# Post-fix key shape: "{date}:{symbol}:{action}:{account}:{source}:{strike}"
+#
+# Backward compat: ``strike=None`` and ``source="auto"`` defaults keep the
+# old callers' behavior if they don't pass the new args, BUT the alert
+# callers in ``_alert_signal`` and ``_dispatch_multi_account_live`` have
+# been updated to extract ``strike`` from the refined signal and pass it
+# through.
+# ===========================================================================
+
+def test_signal_dedupe_key_includes_strike_and_source():
+    """The dedupe key now embeds ``strike`` and ``source`` so two alerts
+    with different strikes (or different sources) no longer collide.
+    """
+    from prometheus.main import Prometheus
+
+    # Build a minimal stub — we only call the static key-builder, no I/O.
+    class _Stub(Prometheus):
+        def __init__(self):
+            pass
+
+    stub = _Stub()
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Same symbol+action, DIFFERENT strikes -> DIFFERENT keys (both alert).
+    k_low = stub._signal_dedupe_key("NIFTY 50", "BUY_CE", strike=24000.0, source="auto")
+    k_high = stub._signal_dedupe_key("NIFTY 50", "BUY_CE", strike=24200.0, source="auto")
+    assert k_low != k_high, (
+        "different strikes on same (symbol, action) MUST produce different "
+        "dedupe keys; otherwise the 2nd alert was silently killed while the "
+        "paper trade still opened — the 'appeared out of nowhere' bug"
+    )
+    assert "24000.00" in k_low and "24200.00" in k_high, (
+        f"strike segment missing from key; got {k_low!r} and {k_high!r}"
+    )
+
+    # Same symbol+action+strike, DIFFERENT sources -> DIFFERENT keys.
+    k_auto = stub._signal_dedupe_key("NIFTY 50", "BUY_CE", strike=24000.0, source="auto")
+    k_multi = stub._signal_dedupe_key("NIFTY 50", "BUY_CE", strike=24000.0, source="multi")
+    assert k_auto != k_multi, (
+        "manual /scan (source=multi) and auto-scan (source=auto) MUST "
+        "dedupe independently; otherwise /scan silences the next auto alert"
+    )
+    assert "auto" in k_auto and "multi" in k_multi
+
+    # Same everything, DIFFERENT account -> DIFFERENT keys (multi-account path).
+    k_acc_a = stub._signal_dedupe_key("NIFTY 50", "BUY_CE", account="paper_100k",
+                                     strike=24000.0, source="multi")
+    k_acc_b = stub._signal_dedupe_key("NIFTY 50", "BUY_CE", account="primary",
+                                     strike=24000.0, source="multi")
+    assert k_acc_a != k_acc_b
+
+    # Date scope still present.
+    assert today in k_auto, "dedupe key MUST remain date-scoped"
+
+
+def test_signal_dedupe_allows_different_strikes_to_both_alert():
+    """Live behavior: first signal alerts, second signal on the SAME
+    (symbol, action) but DIFFERENT strike must ALSO alert — pre-fix,
+    the second was silently dropped while the paper trade still opened.
+    """
+    import time
+    from prometheus.main import Prometheus
+
+    class _Stub(Prometheus):
+        def __init__(self):
+            self._alerted_signals = {}
+            # bypass _save_alerted_signals (file I/O) — we're testing state.
+
+        def _save_alerted_signals(self):
+            pass  # no-op for test
+
+    stub = _Stub()
+
+    # First signal: NIFTY BANK BUY_CE @ strike 57000
+    assert not stub._is_signal_duplicate("NIFTY BANK", "BUY_CE", strike=57000.0, source="auto"), (
+        "first alert MUST NOT be a duplicate"
+    )
+    stub._mark_signal_alerted("NIFTY BANK", "BUY_CE", strike=57000.0, source="auto")
+
+    # Second signal: SAME direction, DIFFERENT strike (57100) — must NOT dedupe.
+    assert not stub._is_signal_duplicate("NIFTY BANK", "BUY_CE", strike=57100.0, source="auto"), (
+        "different strike on same (symbol, action) MUST alert — pre-fix "
+        "this was the silent-dedupe-while-paper-trade-opens bug"
+    )
+
+    # Third signal: SAME strike as the first — MUST dedupe (still in cooldown).
+    assert stub._is_signal_duplicate("NIFTY BANK", "BUY_CE", strike=57000.0, source="auto"), (
+        "identical (symbol, action, strike) within cooldown MUST still dedupe"
+    )
+
+
+def test_signal_dedupe_source_decouples_scan_from_auto():
+    """Manual /scan (source='multi') must NOT silence an auto-scan alert
+    (source='auto') on the same (symbol, action, strike) — operators
+    complained their /scan was eating the next auto alert.
+    """
+    from prometheus.main import Prometheus
+
+    class _Stub(Prometheus):
+        def __init__(self):
+            self._alerted_signals = {}
+
+        def _save_alerted_signals(self):
+            pass
+
+    stub = _Stub()
+
+    # Manual /scan fires an alert for NIFTY 50 BUY_CE @ 24000.
+    stub._mark_signal_alerted("NIFTY 50", "BUY_CE", strike=24000.0, source="multi")
+
+    # Immediately after, the 15-min auto-scan fires the SAME signal.
+    # Pre-fix: this was deduped (shared key). Post-fix: separate sources
+    # => separate keys => both alert.
+    assert not stub._is_signal_duplicate("NIFTY 50", "BUY_CE", strike=24000.0, source="auto"), (
+        "auto-scan MUST NOT be silenced by a manual /scan dedupe entry — "
+        "they have different sources and must dedupe independently"
+    )
+
+
+def test_alert_signal_passes_strike_and_source_through(monkeypatch):
+    """`_alert_signal` extracts ``strike`` from the refined_signal dict
+    and forwards ``source='auto'`` (default) into the dedupe helpers, so
+    two consecutive alerts on different strikes both fire.
+    """
+    from prometheus.main import Prometheus
+
+    class _Stub(Prometheus):
+        def __init__(self):
+            self._alerted_signals = {}
+            self.telegram = MagicMock()
+            self._save_alerted_signals = MagicMock()  # no file I/O
+
+    stub = _Stub()
+
+    sig_a = {"symbol": "SENSEX", "action": "BUY_PE", "strike": 77600.0,
+             "entry_price": 200.0, "stop_loss": 180.0, "target": 260.0}
+    sig_b = {"symbol": "SENSEX", "action": "BUY_PE", "strike": 77800.0,
+             "entry_price": 200.0, "stop_loss": 180.0, "target": 260.0}
+
+    # Both must alert — different strikes.
+    stub._alert_signal(sig_a, source="auto")
+    stub._alert_signal(sig_b, source="auto")
+
+    # Telegram send (alert_new_signal) called twice — both went through.
+    assert stub.telegram.alert_new_signal.call_count == 2, (
+        "expected 2 distinct alerts for 2 different strikes; got "
+        f"{stub.telegram.alert_new_signal.call_count} — dedupe is wrongly "
+        "collapsing them to one alert"
     )
 
 

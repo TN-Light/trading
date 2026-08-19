@@ -1084,11 +1084,12 @@ class Prometheus:
 
             sym = refined_signal.get("symbol", "")
             act = refined_signal.get("action", "HOLD")
-            if not self._is_signal_duplicate(sym, act, account=label):
-                self._mark_signal_alerted(sym, act, account=label)
+            strike_v = refined_signal.get("strike", 0) or 0
+            if not self._is_signal_duplicate(sym, act, account=label, strike=strike_v, source="multi"):
+                self._mark_signal_alerted(sym, act, account=label, strike=strike_v, source="multi")
                 self.telegram.alert_new_signal(execution_signal, source="multi")
             else:
-                logger.info(f"[{label}] Signal dedupe: {sym} {act} already alerted")
+                logger.info(f"[{label}] Signal dedupe: {sym} {act} strike={strike_v} already alerted")
 
             try:
                 position = stack.order_manager.execute_signal(execution_signal, confirm=False)
@@ -3796,7 +3797,7 @@ class Prometheus:
         )
         return None
 
-    def _alert_signal(self, refined_signal: Dict):
+    def _alert_signal(self, refined_signal: Dict, source: str = "auto"):
         """Send generic signal alert for the current signal.
 
         Fires for both single-account and multi-account/paper-capture modes.
@@ -3806,34 +3807,73 @@ class Prometheus:
         ORDER PLACED message from ``live_bridge._alert_position_opened``
         and could not tell whether an entry came from a real signal or a
         spontaneous capture event.
+
+        Dedupe (2026-08-18 audit): the dedupe key now includes ``strike``
+        and ``source`` so:
+          - Two different strikes on the same (symbol, action) pair BOTH
+            alert (previously the 2nd was silently killed while the paper
+            trade still opened — that's why paper trades appeared
+            "without a signal call").
+          - /scan dedupe (source="multi") and auto-scan dedupe
+            (source="auto") no longer share keys, so a manual /scan no
+            longer silences the next auto-scan alert.
         """
         symbol = refined_signal.get("symbol", "")
         action = refined_signal.get("action", "HOLD")
         if action == "HOLD":
             return
-        if self._is_signal_duplicate(symbol, action):
-            logger.info(f"Signal dedupe: {symbol} {action} already alerted")
+        strike = refined_signal.get("strike", 0) or 0
+        if self._is_signal_duplicate(symbol, action, strike=strike, source=source):
+            logger.info(f"Signal dedupe: {symbol} {action} strike={strike} source={source} already alerted")
             return
-        self._mark_signal_alerted(symbol, action)
-        self.telegram.alert_new_signal(refined_signal, source="auto")
+        self._mark_signal_alerted(symbol, action, strike=strike, source=source)
+        self.telegram.alert_new_signal(refined_signal, source=source)
 
-    # ── Signal deduplication helpers ──────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────
 
-    def _signal_dedupe_key(self, symbol: str, action: str, account: str = "primary") -> str:
-        """Build a date-scoped key so dedupe resets each trading day."""
+    def _signal_dedupe_key(
+        self,
+        symbol: str,
+        action: str,
+        account: str = "primary",
+        strike: Optional[float] = None,
+        source: str = "auto",
+    ) -> str:
+        """Build a date-scoped key so dedupe resets each trading day.
+
+        Includes ``strike`` and ``source`` so two different strikes on the
+        same (symbol, action) pair both fire alerts, and so /scan (multi)
+        and auto-scan (auto) dedupe independently. ``account`` is preserved
+        for the multi-account path.
+        """
         today = datetime.now().strftime("%Y-%m-%d")
-        return f"{today}:{symbol}:{action}:{account}"
+        strike_seg = f"{float(strike):.2f}" if strike else "_"
+        return f"{today}:{symbol}:{action}:{account}:{source}:{strike_seg}"
 
-    def _is_signal_duplicate(self, symbol: str, action: str, account: str = "primary",
-                             cooldown_seconds: int = 1800) -> bool:
+    def _is_signal_duplicate(
+        self,
+        symbol: str,
+        action: str,
+        account: str = "primary",
+        strike: Optional[float] = None,
+        source: str = "auto",
+        cooldown_seconds: int = 1800,
+    ) -> bool:
         """Check if the same signal was already alerted within the cooldown window."""
-        key = self._signal_dedupe_key(symbol, action, account)
+        key = self._signal_dedupe_key(symbol, action, account, strike=strike, source=source)
         prev_ts = self._alerted_signals.get(key, 0)
         return (time.time() - prev_ts) < cooldown_seconds
 
-    def _mark_signal_alerted(self, symbol: str, action: str, account: str = "primary"):
+    def _mark_signal_alerted(
+        self,
+        symbol: str,
+        action: str,
+        account: str = "primary",
+        strike: Optional[float] = None,
+        source: str = "auto",
+    ):
         """Record that a signal was alerted (persists to file for crash recovery)."""
-        key = self._signal_dedupe_key(symbol, action, account)
+        key = self._signal_dedupe_key(symbol, action, account, strike=strike, source=source)
         self._alerted_signals[key] = time.time()
         self._save_alerted_signals()
 
