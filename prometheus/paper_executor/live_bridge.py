@@ -459,9 +459,18 @@ class LivePaperCapture:
             try:
                 if reason == "target":
                     self._telegram.alert_target_hit(trade_info)
-                elif reason in ("stop_loss", "stop_loss_premium_phase2",
-                                "stop_loss_premium_phase3"):
+                elif reason == "stop_loss":
                     self._telegram.alert_stop_loss_hit(trade_info)
+                elif reason in ("stop_loss_premium_phase2",
+                                "stop_loss_premium_phase3"):
+                    # Trailing-stop lock: phase3 locks ≥70% of peak profit,
+                    # phase2 locks ≥20%. Calling these "STOP LOSS HIT"
+                    # mislabels a profitable exit as a loss (per backtest
+                    # NIFTY 50: phase3 = 67%WR, +Rs 9,952; phase2 = 0%WR,
+                    # small Rs -215). Route to a distinct alert so the
+                    # operator sees what actually happened.
+                    phase = "phase3" if reason.endswith("phase3") else "phase2"
+                    self._telegram.alert_trailing_lock_hit(trade_info, phase=phase)
                 else:
                     # time_stop / square_off / end_of_day / end_of_data /
                     # reverse_signal / manual — use generic close

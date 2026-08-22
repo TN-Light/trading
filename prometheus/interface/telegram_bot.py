@@ -1012,7 +1012,7 @@ class TelegramBot:
         self.send_message(text)
 
     def alert_stop_loss_hit(self, trade_info: Dict):
-        """Alert when a stop loss is hit."""
+        """Alert when a stop loss is hit (phase1 — actual loss to original SL)."""
         pnl = trade_info.get("pnl", 0)
         text = (
             "\U0001f6d1 <b>STOP LOSS HIT</b>\n"
@@ -1020,6 +1020,32 @@ class TelegramBot:
             f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
             f"P&L: <code>Rs {pnl:+,.0f}</code>"
         )
+        self.send_message(text)
+
+    def alert_trailing_lock_hit(self, trade_info: Dict, phase: str = ""):
+        """Alert when the 5-stage trailing stop locks in profit (phase2/phase3).
+
+        These exits hit a trailing SL — but at a price ABOVE entry for phase3
+        (lock 70%) and near entry for phase2 (lock 20%). Reporting them as
+        'STOP LOSS HIT' was mislabelling profit-locks as losses, making a
+        profitable exit look like a SL hit.
+        """
+        pnl = trade_info.get("pnl", 0)
+        tag = f" ({phase})" if phase else ""
+        if pnl >= 0:
+            text = (
+                "\U0001f4c8 <b>TRAILING LOCKED</b>" + tag + "\n"
+                f"{trade_info.get('symbol', '')}\n"
+                f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
+                f"P&L: <code>Rs {pnl:+,.0f}</code>"
+            )
+        else:
+            text = (
+                "\U0001f6d1 <b>TRAILING EXIT</b>" + tag + "\n"
+                f"{trade_info.get('symbol', '')}\n"
+                f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
+                f"P&L: <code>Rs {pnl:+,.0f}</code>"
+            )
         self.send_message(text)
 
     def alert_target_hit(self, trade_info: Dict):

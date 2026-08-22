@@ -145,7 +145,7 @@ intraday:
   use_backtest_generator: true
   breakeven_ratio: 0.4
   enabled: true
-  allow_multiple_trades_per_symbol: true
+  allow_multiple_trades_per_symbol: false
   instruments:
   - NIFTY 50
   - NIFTY BANK
