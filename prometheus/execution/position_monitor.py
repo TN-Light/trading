@@ -70,13 +70,22 @@ class TrailingState:
     # 3-phase premium floor tracking (1=immunity, 2=buffered, 3=full)
     _current_phase: int = 1
 
+    # Credit Spread support (Theta decay & inverted trailing)
+    strategy_type: str = ""
+    target_decay_price: float = 0.0
+    breakeven_decay_price: float = 0.0
+    hard_sl_price: float = 0.0
+
     def __post_init__(self):
         if self.risk_distance == 0.0 and self.entry_premium > 0:
-            self.risk_distance = (
-                self.entry_premium - self.initial_sl
-                if self.initial_sl > 0
-                else self.entry_premium * 0.3
-            )
+            if getattr(self, "strategy_type", "") == "credit_spread":
+                self.risk_distance = abs(self.initial_sl - self.entry_premium) if self.initial_sl > 0 else self.entry_premium * 0.5
+            else:
+                self.risk_distance = (
+                    self.entry_premium - self.initial_sl
+                    if self.initial_sl > 0
+                    else self.entry_premium * 0.3
+                )
 
     def current_stage(self) -> str:
         """Human-readable current trailing stage."""
@@ -257,10 +266,59 @@ class PositionMonitor:
         Uses real LTP (current_price) instead of backtest's modeled premium.
         """
         entry = state.entry_premium
-        rd = state.risk_distance
         old_sl = state.current_sl
         stage_changed = False
 
+        # ── CREDIT SPREAD DECAY & STOP LOSS MONITORING ──
+        if getattr(state, "strategy_type", "") == "credit_spread":
+            net_credit = state.entry_premium
+            target_decay = getattr(state, "target_decay_price", 0.0) or (net_credit * 0.30)
+            breakeven_decay = getattr(state, "breakeven_decay_price", 0.0) or (net_credit * 0.50)
+            hard_sl = getattr(state, "hard_sl_price", 0.0) or (net_credit * 1.50)
+
+            # 1. Hard Stop Loss: spread jumped above 1.5x initial credit
+            if current_price >= hard_sl:
+                logger.warning(
+                    f"[MONITOR] Credit Spread Hard SL: {state.position_id} "
+                    f"Spread LTP={current_price:.2f} >= Hard SL={hard_sl:.2f} (Credit={net_credit:.2f})"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "stop_loss_credit_spread")
+                return
+
+            # 2. Target Decay: 70% of credit decayed (e.g. spread dropped to 30% of entry)
+            if current_price <= target_decay and target_decay > 0:
+                logger.info(
+                    f"[MONITOR] Credit Spread Target Hit (70% Decay): {state.position_id} "
+                    f"Spread LTP={current_price:.2f} <= Target={target_decay:.2f} (Credit={net_credit:.2f})"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "target_decay_credit_spread")
+                return
+
+            # 3. Breakeven Lock: 50% of credit decayed -> ratchet SL down to protect gain
+            if current_price <= breakeven_decay and not state.breakeven_set:
+                new_sl = net_credit * 0.85  # guaranteed 15% profit floor
+                state.current_sl = new_sl
+                state.breakeven_set = True
+                logger.info(
+                    f"[TRAIL] Credit Spread Breakeven Lock: {state.position_id} "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (Spread LTP={current_price:.2f})"
+                )
+
+            # 4. If current price crosses above ratcheted SL
+            if state.breakeven_set and current_price >= state.current_sl:
+                logger.info(
+                    f"[MONITOR] Credit Spread Breakeven SL Hit: {state.position_id} "
+                    f"Spread LTP={current_price:.2f} >= SL={state.current_sl:.2f}"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "breakeven_exit_credit_spread")
+                return
+
+            return
+
+        rd = state.risk_distance
         if rd <= 0:
             return
 

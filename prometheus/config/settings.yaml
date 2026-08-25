@@ -249,7 +249,14 @@ intraday:
       min_rolling_pf: 1.1
       require_full_window: true
       rolling_window_trades: 20
-      today_only: true
+    credit_spread:
+      enabled: true
+      target_decay_pct: 0.70
+      breakeven_decay_pct: 0.50
+      max_loss_multiplier: 1.5
+      strike_otm_steps: 1
+      hedge_otm_steps: 3
+      min_credit_pct: 0.15
     premium_targeting_enabled: true
     profiles:
       tier1:

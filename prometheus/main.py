@@ -1999,7 +1999,31 @@ class Prometheus:
         except Exception as e:
             logger.debug(f"PA Momentum scanner check failed for {symbol}: {e}")
 
-        # 2. Fallback to confluence backtest generator
+        # 2. Check Hedged Credit Spread for sideways/range regimes (Dual-Regime Barbell)
+        try:
+            from prometheus.strategies.credit_spread import CreditSpreadStrategy
+            from prometheus.config import get
+
+            if get("intraday.credit_spread.enabled", True):
+                if not hasattr(self, "_credit_spread_strategy"):
+                    self._credit_spread_strategy = CreditSpreadStrategy()
+
+                intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+                if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
+                    cs_sig = self._credit_spread_strategy.evaluate_spread(
+                        intra_df, symbol=symbol, capital=self.initial_capital
+                    )
+                    if cs_sig:
+                        logger.info(
+                            f"CreditSpread signal generated for {symbol}: "
+                            f"{cs_sig.get('spread_type')} (Credit=Rs {cs_sig.get('net_credit', 0):.2f}) "
+                            f"[{cs_sig.get('tradingsymbol', '')}]"
+                        )
+                        return cs_sig
+        except Exception as e:
+            logger.debug(f"Credit Spread check failed for {symbol}: {e}")
+
+        # 3. Fallback to confluence backtest generator
         if not use_backtest_generator:
             use_backtest_generator = True
             
@@ -5716,7 +5740,7 @@ class Prometheus:
             live_source = "BS"
             try:
                 angelone = getattr(self.data, "angelone_options", None)
-                if angelone is not None and strike > 0 and expiry_date_str:
+                if not allow_bs_fallback and angelone is not None and strike > 0 and expiry_date_str:
                     live_quote = angelone.get_real_premium(
                         symbol=symbol,
                         strike=strike,
@@ -6710,6 +6734,7 @@ class Prometheus:
 
         # Create clean param_overrides (without regime_overrides) for signal generator
         clean_param_overrides = {k: v for k, v in overrides.items() if k not in ["regime_overrides"]}
+        clean_param_overrides["allow_bs_fallback"] = True
 
         # Set tuned detector if available
         if tuned_detector:
@@ -6983,6 +7008,7 @@ class Prometheus:
             if "counter_bias_breakout_atr" in ab_cfg:
                 intraday_overrides["counter_bias_breakout_atr"] = float(ab_cfg.get("counter_bias_breakout_atr", 0.8))
         intraday_overrides.update(overrides)
+        intraday_overrides["allow_bs_fallback"] = True
 
         # Create signal generator with intraday interval
         signal_gen = self._make_signal_generator(
@@ -7503,7 +7529,7 @@ class Prometheus:
         # Otherwise, use the original inline signal generator (backward compatible).
         # Always use factory signal generator (unified path — no look-ahead bias)
         self.regime_detector.reset_cache()
-        param_overrides_dict = {"mr_min_score": mr_min_score}
+        param_overrides_dict = {"mr_min_score": mr_min_score, "allow_bs_fallback": True}
         if regime_overrides:
             if "recheck_bars" in regime_overrides:
                 param_overrides_dict["recheck_bars"] = regime_overrides["recheck_bars"]
