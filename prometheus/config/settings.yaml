@@ -202,17 +202,20 @@ intraday:
     breakout_atr_buffer: 0.1
     breakout_lookback: 0
     ce_high_vix_edge_penalty: 0.25
-    confluence_sideways: 3.5
-    confluence_trending: 2.7
+    confluence_sideways: 3.2
+    confluence_trending: 2.5
     counter_bias_breakout_atr: 0.8
-    counter_bias_min_net_edge: 2.6
+    counter_bias_min_net_edge: 2.4
     dead_zone_end: '13:00'
-    dead_zone_start: '12:00'
+    dead_zone_start: '11:45'
     disable_mean_reversion: false
     mr_min_score: 2.0
     enabled: true
-    entry_cutoff_time: '14:15'
-    entry_start_time: '09:30'
+    entry_cutoff_time: '14:30'
+    entry_start_time: '09:50'
+    target_premium_pct_t1: 0.18
+    breakeven_pct_trigger: 0.10
+    stagnation_max_bars: 4
     event_risk_gate:
       block_after_minutes: 20
       block_before_minutes: 15
@@ -228,10 +231,10 @@ intraday:
     gap_fade_threshold_pct: 0.3
     kelly_wr: 0.4
     max_daily_trades: 5
-    min_net_edge: 1.4
-    min_rr: 2.0
+    min_net_edge: 1.2
+    min_rr: 1.8
     monday_1dte_guard: true
-    monday_override_breakout_atr: 0.9
+    monday_override_breakout_atr: 0.8
     monday_override_score: 4.0
     oi_sr_tolerance_pct: 0.0025
     orb_atr_buffer: 0.05

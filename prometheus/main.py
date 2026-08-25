@@ -1966,8 +1966,41 @@ class Prometheus:
         use_backtest_generator: bool,
     ) -> Optional[Dict]:
         """Return an executable intraday signal dict for the given mode."""
+        # 1. Check Price Action & Momentum Breakout first (fast intraday edge)
+        try:
+            from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
+            from prometheus.utils.indian_market import get_atm_strike, get_expiry_date
+
+            if not hasattr(self, "_pa_momentum_scanner"):
+                self._pa_momentum_scanner = PriceActionMomentumScanner()
+
+            intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+            if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
+                pa_sig = self._pa_momentum_scanner.evaluate_bar(intra_df, symbol=symbol)
+                if pa_sig:
+                    spot_price = float(pa_sig.get("entry_price", 0) or intra_df["close"].iloc[-1])
+                    pa_sig["strike"] = get_atm_strike(spot_price, symbol)
+                    pa_sig["expiry"] = get_expiry_date(symbol)
+                    pa_sig["underlying_price"] = spot_price
+                    pa_sig["spot_price"] = spot_price
+                    pa_sig["timeframe"] = "intraday"
+                    pa_sig["trade_mode"] = "intraday"
+
+                    execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
+                    if execution_signal:
+                        execution_signal["trade_mode"] = "intraday"
+                        execution_signal.setdefault("timeframe", "intraday")
+                        logger.info(
+                            f"PriceActionMomentum signal generated for {symbol}: "
+                            f"{execution_signal.get('action')} @ {spot_price:.1f} "
+                            f"({execution_signal.get('strategy', '')})"
+                        )
+                        return execution_signal
+        except Exception as e:
+            logger.debug(f"PA Momentum scanner check failed for {symbol}: {e}")
+
+        # 2. Fallback to confluence backtest generator
         if not use_backtest_generator:
-            logger.warning(f"Intraday fallback logic (analyze_intraday) was removed. Forcing use_backtest_generator=True for {symbol}")
             use_backtest_generator = True
             
         if use_backtest_generator:

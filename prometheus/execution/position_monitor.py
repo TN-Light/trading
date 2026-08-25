@@ -400,23 +400,37 @@ class PositionMonitor:
                 self._on_exit(state.position_id, current_price, "time_stop")
             return
 
+        # ── Stagnation Exit (cut stagnant options after 4 bars to prevent theta decay) ──
+        if state.trade_mode == "intraday" and state.entry_bar_count >= 4 and not state.breakeven_set:
+            if current_price < entry * 1.03:
+                logger.info(
+                    f"[MONITOR] Stagnation cut: {state.position_id} "
+                    f"after {state.entry_bar_count} bars (LTP={current_price:.2f} <= Entry*1.03={entry*1.03:.2f})"
+                )
+                if self._on_exit:
+                    self._on_exit(state.position_id, current_price, "stagnation_exit")
+                return
+
         # ── 5-STAGE TRAILING STOP (bullish — long options) ──
         # For bearish, we're buying PUTs so premium INCREASES when underlying drops.
         # The trailing logic is the same: premium goes up = profit.
         price_for_trail = current_price
 
         if not state.breakeven_set:
-            # Stage 0: BREAKEVEN TRAP
-            be_trigger = entry + rd * state.breakeven_ratio
+            # Stage 0: BREAKEVEN TRAP — triggers at 0.4R OR at +10% premium gain
+            be_trigger_rd = entry + rd * state.breakeven_ratio if rd > 0 else entry * 1.10
+            be_trigger_pct = entry * 1.10
+            be_trigger = min(be_trigger_rd, be_trigger_pct)
             if price_for_trail >= be_trigger:
-                new_sl = entry + rd * 0.10
-                state.current_sl = new_sl
-                state.breakeven_set = True
-                stage_changed = True
-                logger.info(
-                    f"[TRAIL] {state.position_id} Stage 0 BREAKEVEN: "
-                    f"SL {old_sl:.2f} -> {new_sl:.2f}"
-                )
+                new_sl = entry + max(rd * 0.10, entry * 0.015)
+                if new_sl > state.current_sl:
+                    state.current_sl = new_sl
+                    state.breakeven_set = True
+                    stage_changed = True
+                    logger.info(
+                        f"[TRAIL] {state.position_id} Stage 0 BREAKEVEN: "
+                        f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f}, Entry={entry:.2f})"
+                    )
 
         elif not state.trailing_activated:
             # Stage 1: Lock 20% at 1.0R
