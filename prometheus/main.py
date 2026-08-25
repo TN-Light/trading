@@ -1976,11 +1976,12 @@ class Prometheus:
 
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
             pa_sig = None
+            is_exp = is_weekly_expiry_day(symbol)
             if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
-                pa_sig = self._pa_momentum_scanner.evaluate_bar(intra_df, symbol=symbol)
+                pa_sig = self._pa_momentum_scanner.evaluate_bar(intra_df, symbol=symbol, is_expiry_day=is_exp)
 
             # Option C: 5-Minute Expiry Fast-Trigger on active expiry days
-            if not pa_sig and is_weekly_expiry_day(symbol):
+            if not pa_sig and is_exp:
                 try:
                     df_5m = self.data.fetch_intraday(symbol, interval="5minute", days=1)
                     if df_5m is not None and not df_5m.empty and len(df_5m) >= 15:
@@ -4646,8 +4647,21 @@ class Prometheus:
                     time.sleep(60)
                     continue
 
-                # No new entries after 2:30 PM — monitor only
-                if current_time >= last_entry_time:
+                # Check if today is weekly expiry day for any tracked instrument
+                from prometheus.utils.indian_market import is_weekly_expiry_day
+                any_expiry_today = any(is_weekly_expiry_day(sym) for sym in intraday_instruments)
+
+                effective_last_entry = last_entry_time
+                if any_expiry_today:
+                    expiry_last_entry_str = get("intraday.expiry_fast_trigger.last_entry_time_expiry", "15:05")
+                    try:
+                        elh, elm = map(int, expiry_last_entry_str.split(":"))
+                        effective_last_entry = dtime(elh, elm)
+                    except Exception:
+                        effective_last_entry = dtime(15, 5)
+
+                # No new entries after cutoff — monitor only
+                if current_time >= effective_last_entry:
                     n_pos = self.position_monitor.active_count if self.position_monitor else 0
                     self.dashboard.show_status_line(
                         f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
@@ -4668,7 +4682,11 @@ class Prometheus:
                 # ── INTRADAY SCAN ──
                 bar_interval = self._select_intraday_interval()
                 # Auto-match scan interval to bar interval (5min→300s, 15min→900s)
-                scan_interval = 300 if bar_interval == "5minute" else 900
+                # During Expiry Power Hour (13:30 - 15:05 on expiry days), scan every 180s (3 minutes)
+                if any_expiry_today and current_time >= dtime(13, 30):
+                    scan_interval = int(get("intraday.expiry_fast_trigger.power_hour_scan_interval_seconds", 180))
+                else:
+                    scan_interval = 300 if bar_interval == "5minute" else 900
 
                 # Rate limit scans — wait for candle close
                 if _last_scan_time and (now - _last_scan_time).total_seconds() < scan_interval:

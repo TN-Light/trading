@@ -157,6 +157,9 @@ intraday:
     timeframe: 5minute
     min_volume_surge_mult: 1.30
     vwap_reclaim_required: true
+    last_entry_time_expiry: '15:05'
+    power_hour_start_time: '13:30'
+    power_hour_scan_interval_seconds: 180
   allowed_instruments:
   - NIFTY 50
   - NIFTY BANK

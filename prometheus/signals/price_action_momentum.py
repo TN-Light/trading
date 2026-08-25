@@ -42,12 +42,14 @@ class PriceActionMomentumScanner:
         self,
         df: pd.DataFrame,
         symbol: str = "NIFTY 50",
+        is_expiry_day: bool = False,
     ) -> Optional[Dict]:
         """Evaluate latest candle for price action / momentum breakout.
 
         Args:
             df: DataFrame with OHLCV data and 'timestamp' column.
             symbol: Index symbol name.
+            is_expiry_day: Whether today is weekly expiry day for this symbol.
 
         Returns:
             Dict with signal metadata or None if no actionable breakout.
@@ -66,7 +68,9 @@ class PriceActionMomentumScanner:
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
         # Session Time Gate: Skip first 35 mins (09:15 - 09:50) to avoid open chop
-        if current_time < dtime(9, 50) or current_time > dtime(14, 30):
+        # On expiry sessions, allow signals up to 15:05 (Power Hour)
+        cutoff_time = dtime(15, 5) if is_expiry_day else dtime(14, 30)
+        if current_time < dtime(9, 50) or current_time > cutoff_time:
             return None
 
         # Dead zone check: 11:45 - 13:00 (lunchtime chop)
@@ -268,8 +272,8 @@ class PriceActionMomentumScanner:
         current_time = current_ts.time() if hasattr(current_ts, "time") else dtime(10, 0)
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
-        # Expiry fast trigger operates from 09:35 to 15:00
-        if current_time < dtime(9, 35) or current_time > dtime(15, 0):
+        # Expiry fast trigger operates from 09:35 to 15:05 (Expiry Power Hour)
+        if current_time < dtime(9, 35) or current_time > dtime(15, 5):
             return None
 
         if current_date:
