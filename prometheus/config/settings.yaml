@@ -213,6 +213,7 @@ intraday:
     enabled: true
     entry_cutoff_time: '14:30'
     entry_start_time: '09:50'
+    skip_first_minutes: 35
     target_premium_pct_t1: 0.18
     breakeven_pct_trigger: 0.10
     stagnation_max_bars: 4

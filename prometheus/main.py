@@ -2026,10 +2026,7 @@ class Prometheus:
         except Exception as e:
             logger.debug(f"Credit Spread check failed for {symbol}: {e}")
 
-        # 3. Fallback to confluence backtest generator
-        if not use_backtest_generator:
-            use_backtest_generator = True
-            
+        # 3. Fallback to confluence backtest generator (only if explicitly enabled)
         if use_backtest_generator:
             backtest_signal = self._get_intraday_backtest_signal(symbol, bar_interval)
             execution_signal = self._legacy_convert_backtest_signal_for_execution(backtest_signal)
