@@ -305,6 +305,8 @@ class PositionMonitor:
                     f"[TRAIL] Credit Spread Breakeven Lock: {state.position_id} "
                     f"SL {old_sl:.2f} -> {new_sl:.2f} (Spread LTP={current_price:.2f})"
                 )
+                if self._on_trailing_update:
+                    self._on_trailing_update(state, old_sl, current_price)
 
             # 4. If current price crosses above ratcheted SL
             if state.breakeven_set and current_price >= state.current_sl:
@@ -551,7 +553,10 @@ class PositionMonitor:
         if stage_changed and state.current_sl != old_sl:
             self._modify_broker_sl(state)
             if self._on_trailing_update:
-                self._on_trailing_update(state, old_sl)
+                try:
+                    self._on_trailing_update(state, old_sl, current_price)
+                except TypeError:
+                    self._on_trailing_update(state, old_sl)
             if self._on_state_changed:
                 self._on_state_changed(state)
 

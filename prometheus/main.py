@@ -3131,16 +3131,55 @@ class Prometheus:
                 f"{pnl_emoji} P&L: <b>{pnl_text}</b>"
             )
 
-    def _handle_trailing_update(self, state, old_sl: float):
-        """Callback when trailing stop advances a stage."""
+    def _handle_trailing_update(self, state, old_sl: float, current_price: float = 0.0):
+        """Callback when trailing stop advances a stage — sends actionable trigger values for live execution."""
         kite_name = self._make_kite_search_name(state.tradingsymbol, state.symbol)
         display = kite_name if kite_name else state.tradingsymbol
-        self.telegram.send_message(
-            f"\U0001f4c8 <b>TRAILING STOP UPDATE</b>\n\n"
-            f"<code>{display}</code>\n"
-            f"Stage: <b>{state.current_stage()}</b>\n"
-            f"SL: {old_sl:.2f} \u2192 {state.current_sl:.2f}"
-        )
+        tsym = state.tradingsymbol or state.symbol
+        entry = float(state.entry_premium or 0.0)
+        new_sl = float(state.current_sl or 0.0)
+        target = float(state.target or 0.0)
+        ltp = current_price if current_price > 0 else getattr(state, "premium_hwm", entry)
+
+        gain_pct = ((ltp - entry) / entry * 100) if entry > 0 else 0.0
+        sl_gain_pct = ((new_sl - entry) / entry * 100) if entry > 0 else 0.0
+
+        if getattr(state, "strategy_type", "") == "credit_spread":
+            text = (
+                f"🛡️ <b>CREDIT SPREAD PROFIT LOCK</b>\n\n"
+                f"<b>Symbol:</b> <code>{state.symbol}</code>\n"
+                f"<b>Contract:</b> <code>{display}</code>\n"
+                f"📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
+                f"<code>{tsym}</code>\n\n"
+                f"<b>Net Credit:</b> Rs {entry:.2f}\n"
+                f"<b>Current Spread LTP:</b> Rs {ltp:.2f} (50% Decayed)\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👉 <b>ACTION FOR LIVE TRADERS:</b>\n"
+                f"<b>Update Spread Buyback SL Trigger on Kite to:</b>\n"
+                f"<code>Rs {new_sl:.2f}</code> (Guaranteed +15% profit)\n"
+                f"<i>Old SL: Rs {old_sl:.2f} ➔ New SL: Rs {new_sl:.2f}</i>\n"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+        else:
+            sl_status = f"+{sl_gain_pct:.1f}% profit locked" if sl_gain_pct > 0 else "Breakeven lock"
+            text = (
+                f"🛡️ <b>TRAILING STOP TRIGGER UPDATE</b>\n\n"
+                f"<b>Symbol:</b> <code>{state.symbol}</code>\n"
+                f"<b>Contract:</b> <code>{display}</code>\n"
+                f"📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
+                f"<code>{tsym}</code>\n\n"
+                f"<b>Milestone:</b> 🎯 <b>{state.current_stage()}</b>\n"
+                f"<b>Entry Price:</b> Rs {entry:.2f}\n"
+                f"<b>Current LTP:</b> Rs {ltp:.2f} ({gain_pct:+.1f}%)\n"
+                f"<b>Target:</b> Rs {target:.2f}\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"👉 <b>ACTION FOR LIVE TRADERS:</b>\n"
+                f"<b>Update Stop-Loss Trigger on Kite to:</b>\n"
+                f"<code>Rs {new_sl:.2f}</code> ({sl_status})\n"
+                f"<i>Old SL: Rs {old_sl:.2f} ➔ New SL: Rs {new_sl:.2f}</i>\n"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+        self.telegram.send_message(text)
 
     def _handle_state_persist(self, state):
         """Callback to persist trailing state to SQLite."""
