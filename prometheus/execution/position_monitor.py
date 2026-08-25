@@ -75,6 +75,7 @@ class TrailingState:
     target_decay_price: float = 0.0
     breakeven_decay_price: float = 0.0
     hard_sl_price: float = 0.0
+    low_vix_mode: bool = False
 
     def __post_init__(self):
         if self.risk_distance == 0.0 and self.entry_premium > 0:
@@ -477,10 +478,11 @@ class PositionMonitor:
         price_for_trail = current_price
 
         if not state.breakeven_set:
-            # Stage 0: BREAKEVEN TRAP — triggers at +10% premium gain or 0.4R
-            be_trigger = min(entry + rd * state.breakeven_ratio if rd > 0 else entry * 1.10, entry * 1.10)
+            # Stage 0: BREAKEVEN TRAP — triggers at +10% gain (+8% in Low-VIX mode)
+            be_pct = 1.08 if state.low_vix_mode else 1.10
+            be_trigger = min(entry + rd * state.breakeven_ratio if rd > 0 else entry * be_pct, entry * be_pct)
             if price_for_trail >= be_trigger:
-                new_sl = max(entry * 1.015, entry + max(rd * 0.10, entry * 0.015))
+                new_sl = round(max(entry * 1.015, entry + max(rd * 0.10, entry * 0.015)), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
                     state.breakeven_set = True
@@ -491,10 +493,11 @@ class PositionMonitor:
                     )
 
         elif not state.trailing_activated:
-            # Stage 1: Lock +8% profit at +18% gain (or 1.0R)
-            s1_trigger = min(entry + rd * 1.0, entry * 1.18)
+            # Stage 1: Lock +8% profit at +18% gain (+14% in Low-VIX mode)
+            s1_pct = 1.14 if state.low_vix_mode else 1.18
+            s1_trigger = min(entry + rd * 1.0, entry * s1_pct)
             if price_for_trail >= s1_trigger:
-                new_sl = max(entry * 1.08, entry + rd * 0.20)
+                new_sl = round(max(entry * 1.08, entry + rd * 0.20), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
                     state.trailing_activated = True
@@ -505,30 +508,34 @@ class PositionMonitor:
                     )
 
         elif not state.trailing_stage2:
-            # Stage 2: Lock +16% profit at +25% gain (or 2.0R)
-            s2_trigger = min(entry + rd * 1.5, entry * 1.25)
+            # Stage 2: Lock +16% profit at +25% gain (+18% in Low-VIX mode locks +14%)
+            s2_pct = 1.18 if state.low_vix_mode else 1.25
+            lock_pct = 1.14 if state.low_vix_mode else 1.16
+            s2_trigger = min(entry + rd * 1.5, entry * s2_pct)
             if price_for_trail >= s2_trigger:
-                new_sl = max(entry * 1.16, entry + rd * 0.50)
+                new_sl = round(max(entry * lock_pct, entry + rd * 0.50), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
                     state.trailing_stage2 = True
                     stage_changed = True
                     logger.info(
-                        f"[TRAIL] {state.position_id} Stage 2 LOCK +16%: "
+                        f"[TRAIL] {state.position_id} Stage 2 LOCK +{int((lock_pct-1)*100)}%: "
                         f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
                     )
 
         elif not state.trailing_stage3:
-            # Stage 3: Lock +24% profit at +32% gain, begin runner
-            s3_trigger = min(entry + rd * 2.0, entry * 1.32)
+            # Stage 3: Lock +24% profit at +32% gain, begin runner (+22% in Low-VIX mode)
+            s3_pct = 1.22 if state.low_vix_mode else 1.32
+            lock_pct = 1.18 if state.low_vix_mode else 1.24
+            s3_trigger = min(entry + rd * 2.0, entry * s3_pct)
             if price_for_trail >= s3_trigger:
-                new_sl = max(entry * 1.24, entry + rd * 0.70)
+                new_sl = round(max(entry * lock_pct, entry + rd * 0.70), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
                     state.trailing_stage3 = True
                     stage_changed = True
                     logger.info(
-                        f"[TRAIL] {state.position_id} Stage 3 RUNNER (+24% Lock): "
+                        f"[TRAIL] {state.position_id} Stage 3 RUNNER (+{int((lock_pct-1)*100)}% Lock): "
                         f"SL {old_sl:.2f} -> {new_sl:.2f}, HWM={price_for_trail:.2f}"
                     )
 

@@ -144,6 +144,19 @@ intraday:
     min_bars_before_check: 1
     vwap_buffer_pct: 0.05
     indicator: vwap_supertrend
+  low_vix_mode:
+    enabled: true
+    vix_threshold: 12.0
+    target_pct: 0.22
+    sl_risk_pct: 0.15
+    be_trigger_pct: 0.08
+    stage1_trigger_pct: 0.14
+    stage2_trigger_pct: 0.18
+  expiry_fast_trigger:
+    enabled: true
+    timeframe: 5minute
+    min_volume_surge_mult: 1.30
+    vwap_reclaim_required: true
   allowed_instruments:
   - NIFTY 50
   - NIFTY BANK

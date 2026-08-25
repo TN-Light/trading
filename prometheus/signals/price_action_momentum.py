@@ -247,3 +247,131 @@ class PriceActionMomentumScanner:
             }
 
         return None
+
+    def evaluate_5m_expiry_surge(
+        self,
+        df_5m: pd.DataFrame,
+        df_15m: Optional[pd.DataFrame] = None,
+        symbol: str = "NIFTY 50",
+    ) -> Optional[Dict]:
+        """Detect fast 5-minute VWAP reclaim / gamma surges on weekly expiry sessions."""
+        if df_5m is None or len(df_5m) < 15:
+            return None
+
+        if not pd.api.types.is_datetime64_any_dtype(df_5m["timestamp"]):
+            df_5m = df_5m.copy()
+            df_5m["timestamp"] = pd.to_datetime(df_5m["timestamp"])
+
+        current_row = df_5m.iloc[-1]
+        prev_row = df_5m.iloc[-2]
+        current_ts = current_row["timestamp"]
+        current_time = current_ts.time() if hasattr(current_ts, "time") else dtime(10, 0)
+        current_date = current_ts.date() if hasattr(current_ts, "date") else None
+
+        # Expiry fast trigger operates from 09:35 to 15:00
+        if current_time < dtime(9, 35) or current_time > dtime(15, 0):
+            return None
+
+        if current_date:
+            today_bars = df_5m[df_5m["timestamp"].dt.date == current_date].copy()
+        else:
+            today_bars = df_5m.iloc[-30:].copy()
+
+        if len(today_bars) < 4:
+            return None
+
+        close = float(current_row["close"])
+        high = float(current_row["high"])
+        low = float(current_row["low"])
+        prev_close = float(prev_row["close"])
+
+        # 5-min VWAP
+        try:
+            typical_price = (df_5m["high"] + df_5m["low"] + df_5m["close"]) / 3
+            if "volume" in df_5m.columns and df_5m["volume"].sum() > 0:
+                vwap_df = calculate_session_vwap(df_5m)
+                vwap_val = float(vwap_df["vwap"].iloc[-1])
+                vwap = vwap_val if not np.isnan(vwap_val) and vwap_val > 0 else float(typical_price.iloc[-1])
+            else:
+                vwap = float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
+        except Exception:
+            vwap = close
+
+        # 5-min ATR
+        atr_s = calculate_atr(df_5m, period=14)
+        atr_5m = float(atr_s.iloc[-1]) if len(atr_s) > 0 and not np.isnan(atr_s.iloc[-1]) else close * 0.003
+
+        # Volume expansion check (if available)
+        vol_surge = True
+        if "volume" in df_5m.columns and df_5m["volume"].iloc[-10:-1].mean() > 0:
+            avg_vol = float(df_5m["volume"].iloc[-10:-1].mean())
+            curr_vol = float(current_row["volume"])
+            vol_surge = (curr_vol >= avg_vol * 1.20)
+
+        # 1. Bullish 5-min VWAP Reclaim or Consolidation Breakout
+        recent_3 = today_bars.iloc[-4:-1]
+        box_high_3 = float(recent_3["high"].max())
+        box_low_3 = float(recent_3["low"].min())
+
+        is_bull_reclaim = (prev_close <= vwap * 1.001 and close > vwap * 1.001)
+        is_bull_breakout = (close > box_high_3 and (close - prev_close) > 0.5 * atr_5m)
+
+        if (is_bull_reclaim or is_bull_breakout) and close > vwap and vol_surge:
+            reasons = ["5M_Expiry_Surge"]
+            if is_bull_reclaim:
+                reasons.append("VWAP_Reclaim_Up")
+            if is_bull_breakout:
+                reasons.append("Box_Breakout_Up")
+
+            sl = max(low - (0.5 * atr_5m), close - (1.5 * atr_5m))
+            target = close + (2.0 * atr_5m)
+            rr = (target - close) / max(close - sl, 1.0)
+            return {
+                "symbol": symbol,
+                "action": "BUY_CE",
+                "direction": "bullish",
+                "confidence": 0.80,
+                "edge_score": 4.5,
+                "entry_price": round(close, 2),
+                "stop_loss": round(sl, 2),
+                "target": round(target, 2),
+                "risk_reward": round(rr, 2),
+                "strategy": f"Expiry_FastTrigger ({'+'.join(reasons)})",
+                "reasons": reasons,
+                "timeframe": "5minute",
+                "fast_expiry_surge": True,
+                "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
+            }
+
+        # 2. Bearish 5-min VWAP Breakdown
+        is_bear_breakdown = (prev_close >= vwap * 0.999 and close < vwap * 0.999)
+        is_bear_box_break = (close < box_low_3 and (prev_close - close) > 0.5 * atr_5m)
+
+        if (is_bear_breakdown or is_bear_box_break) and close < vwap and vol_surge:
+            reasons = ["5M_Expiry_Surge"]
+            if is_bear_breakdown:
+                reasons.append("VWAP_Breakdown_Down")
+            if is_bear_box_break:
+                reasons.append("Box_Breakdown_Down")
+
+            sl = min(high + (0.5 * atr_5m), close + (1.5 * atr_5m))
+            target = close - (2.0 * atr_5m)
+            rr = (close - target) / max(sl - close, 1.0)
+            return {
+                "symbol": symbol,
+                "action": "BUY_PE",
+                "direction": "bearish",
+                "confidence": 0.80,
+                "edge_score": 4.5,
+                "entry_price": round(close, 2),
+                "stop_loss": round(sl, 2),
+                "target": round(target, 2),
+                "risk_reward": round(rr, 2),
+                "strategy": f"Expiry_FastTrigger ({'+'.join(reasons)})",
+                "reasons": reasons,
+                "timeframe": "5minute",
+                "fast_expiry_surge": True,
+                "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
+            }
+
+        return None

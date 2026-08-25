@@ -1969,47 +1969,76 @@ class Prometheus:
         # 1. Check Price Action & Momentum Breakout first (fast intraday edge)
         try:
             from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
-            from prometheus.utils.indian_market import get_atm_strike, get_expiry_date
+            from prometheus.utils.indian_market import get_atm_strike, get_expiry_date, is_weekly_expiry_day
 
             if not hasattr(self, "_pa_momentum_scanner"):
                 self._pa_momentum_scanner = PriceActionMomentumScanner()
 
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+            pa_sig = None
             if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
                 pa_sig = self._pa_momentum_scanner.evaluate_bar(intra_df, symbol=symbol)
-                if pa_sig:
-                    spot_price = float(pa_sig.get("entry_price", 0) or intra_df["close"].iloc[-1])
-                    strike = get_atm_strike(spot_price, symbol)
-                    opt_type = "CE" if "CE" in pa_sig.get("action", "") else "PE"
-                    expiry_dt = get_expiry_date(symbol)
-                    expiry_str = expiry_dt.isoformat() if expiry_dt else None
-                    lot_sz = get_lot_size(symbol)
 
-                    # Fetch real live option LTP from Angel One
-                    opt_ltp = 0.0
-                    tradingsymbol = ""
-                    if hasattr(self.data, "angelone_options") and self.data.angelone_options:
-                        try:
-                            prem_info = self.data.angelone_options.get_real_premium(
-                                symbol, strike, opt_type, expiry=expiry_str, spot_price=spot_price
-                            )
-                            if prem_info and float(prem_info.get("ltp", 0) or 0) > 0:
-                                opt_ltp = float(prem_info["ltp"])
-                                tradingsymbol = prem_info.get("tradingsymbol", "")
-                        except Exception as e:
-                            logger.debug(f"Live premium fetch error for {symbol} {strike}{opt_type}: {e}")
+            # Option C: 5-Minute Expiry Fast-Trigger on active expiry days
+            if not pa_sig and is_weekly_expiry_day(symbol):
+                try:
+                    df_5m = self.data.fetch_intraday(symbol, interval="5minute", days=1)
+                    if df_5m is not None and not df_5m.empty and len(df_5m) >= 15:
+                        pa_sig = self._pa_momentum_scanner.evaluate_5m_expiry_surge(
+                            df_5m, df_15m=intra_df, symbol=symbol
+                        )
+                except Exception as e:
+                    logger.debug(f"5-min expiry surge check error for {symbol}: {e}")
 
-                    if opt_ltp > 0:
-                        # Real option pricing
-                        sl_price = round(max(1.0, opt_ltp * 0.80), 2)  # 20% risk bracket
-                        tgt_price = round(opt_ltp * 1.35, 2)            # 35% target
-                        pa_sig["entry_price"] = opt_ltp
-                        pa_sig["stop_loss"] = sl_price
-                        pa_sig["target"] = tgt_price
-                        pa_sig["risk_reward"] = 1.75
+            if pa_sig:
+                spot_price = float(pa_sig.get("entry_price", 0) or (intra_df["close"].iloc[-1] if intra_df is not None else 0))
+                strike = get_atm_strike(spot_price, symbol)
+                opt_type = "CE" if "CE" in pa_sig.get("action", "") else "PE"
+                expiry_dt = get_expiry_date(symbol)
+                expiry_str = expiry_dt.isoformat() if expiry_dt else None
+                lot_sz = get_lot_size(symbol)
+
+                # Fetch real live option LTP from Angel One
+                opt_ltp = 0.0
+                tradingsymbol = ""
+                if hasattr(self.data, "angelone_options") and self.data.angelone_options:
+                    try:
+                        prem_info = self.data.angelone_options.get_real_premium(
+                            symbol, strike, opt_type, expiry=expiry_str, spot_price=spot_price
+                        )
+                        if prem_info and float(prem_info.get("ltp", 0) or 0) > 0:
+                            opt_ltp = float(prem_info["ltp"])
+                            tradingsymbol = prem_info.get("tradingsymbol", "")
+                    except Exception as e:
+                        logger.debug(f"Live premium fetch error for {symbol} {strike}{opt_type}: {e}")
+
+                if opt_ltp > 0:
+                    # Option B: Low-VIX Regime Adaptive Brackets
+                    current_vix = 15.0
+                    try:
+                        vix_val = self.data.get_vix()
+                        if vix_val and vix_val > 0:
+                            current_vix = float(vix_val)
+                    except Exception:
+                        pass
+
+                    is_low_vix = (current_vix < 12.0)
+                    if is_low_vix:
+                        sl_price = round(max(1.0, opt_ltp * 0.85), 2)  # -15% tight risk bracket
+                        tgt_price = round(opt_ltp * 1.22, 2)            # +22% quick scalp target
+                        pa_sig["low_vix_mode"] = True
                     else:
-                        logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping signal")
-                        return None
+                        sl_price = round(max(1.0, opt_ltp * 0.80), 2)  # -20% normal risk bracket
+                        tgt_price = round(opt_ltp * 1.35, 2)            # +35% normal target
+                        pa_sig["low_vix_mode"] = False
+
+                    pa_sig["entry_price"] = opt_ltp
+                    pa_sig["stop_loss"] = sl_price
+                    pa_sig["target"] = tgt_price
+                    pa_sig["risk_reward"] = round((tgt_price - opt_ltp) / max(opt_ltp - sl_price, 0.1), 2)
+                else:
+                    logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping signal")
+                    return None
 
                     pa_sig["strike"] = strike
                     pa_sig["option_type"] = opt_type
@@ -3608,6 +3637,12 @@ class Prometheus:
             return
         state = self.order_manager.create_trailing_state(position.position_id)
         if state:
+            try:
+                vix = self.data.get_vix()
+                if vix and vix < 12.0:
+                    state.low_vix_mode = True
+            except Exception:
+                pass
             self.position_monitor.add_position(state)
             self._handle_state_persist(state)
 
