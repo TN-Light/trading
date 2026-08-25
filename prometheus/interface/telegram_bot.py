@@ -755,6 +755,46 @@ class TelegramBot:
         if action == "HOLD":
             return
 
+        # ── DEDICATED SPREAD ALERT FORMATTING (BARBELL DUAL-REGIME) ──
+        if signal.get("strategy_type") == "credit_spread" or "SPREAD" in action:
+            spread_type = signal.get("spread_type", action)
+            net_credit = float(signal.get("net_credit", entry) or 0)
+            target_decay = float(signal.get("target_decay_price", target) or 0)
+            hard_sl = float(signal.get("hard_sl_price", sl) or 0)
+            margin_req = float(signal.get("margin_required", 35000) or 35000)
+            legs = signal.get("legs", [])
+            
+            legs_text = ""
+            for leg in legs:
+                leg_act = leg.get("action", "BUY")
+                leg_sym = leg.get("tradingsymbol", "")
+                leg_prem = float(leg.get("premium", 0.0) or 0)
+                leg_tag = "(Hedge Margin Reducer)" if leg.get("is_hedge") else "(Short Theta Collector)"
+                legs_text += f"• <b>{leg_act}</b> <code>{leg_sym}</code> (~Rs {leg_prem:.1f}) {leg_tag}\n"
+
+            # Source tag for alert segregation
+            if source == "scan":
+                source_tag = "  📡 <i>/scan</i>"
+            elif source == "auto":
+                source_tag = "  ⚡ <i>auto</i>"
+            elif source == "multi":
+                source_tag = "  ⚡ <i>multi</i>"
+            else:
+                source_tag = ""
+
+            text = (
+                f"🛡️ <b>NEW BARBELL SIGNAL: {spread_type}</b>{source_tag}\n"
+                f"<b>Underlying:</b> <code>{symbol}</code>\n\n"
+                f"<b>Legs (Copy & Search in Kite/Angel):</b>\n{legs_text}\n"
+                f"<b>Net Credit:</b> Rs {net_credit:,.1f}/share\n"
+                f"<b>Target Exit (70% Decay):</b> Rs {target_decay:,.1f}\n"
+                f"<b>Hard Stop Loss (1.5x):</b> Rs {hard_sl:,.1f}\n"
+                f"<b>Est. Margin Required:</b> Rs {margin_req:,.0f}/lot\n"
+                f"<b>Hold:</b> <code>same-day theta decay</code>\n"
+            )
+            self.send_message(text)
+            return
+
         # Generate user-friendly contract name if expiry and strike are present
         friendly_contract = ""
         if expiry and strike and option_type:
