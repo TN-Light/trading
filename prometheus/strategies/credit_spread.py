@@ -21,7 +21,6 @@ from prometheus.utils.indian_market import (
     days_to_expiry, get_expiry_date
 )
 from prometheus.execution.kite_executor import generate_tradingsymbol
-from prometheus.utils.options_math import black_scholes_price, calculate_greeks, OptionType
 from prometheus.signals.technical import calculate_atr, calculate_vwap, calculate_supertrend
 from prometheus.utils.logger import logger
 
@@ -50,6 +49,7 @@ class CreditSpreadStrategy:
         df: pd.DataFrame,
         symbol: str = "NIFTY 50",
         capital: float = 50000.0,
+        option_chain = None,
     ) -> Optional[Dict]:
         """Evaluate if market is in a range-bound state and generate a credit spread.
 
@@ -57,6 +57,7 @@ class CreditSpreadStrategy:
             df: OHLCV DataFrame with timestamp.
             symbol: Index symbol name.
             capital: Available capital.
+            option_chain: Live AngelOneOptionChain instance for real market LTPs.
 
         Returns:
             Dict containing 2-leg spread details and exit thresholds, or None.
@@ -91,7 +92,6 @@ class CreditSpreadStrategy:
         atr = float(atr_s.iloc[-1]) if len(atr_s) > 0 and not np.isnan(atr_s.iloc[-1]) else close * 0.005
 
         # ── 1. Range & Volatility Check (Ensure Sideways Regime) ──
-        # Check if today's high-low range is tight (< 2.0 * ATR)
         today_high = float(today_bars["high"].max())
         today_low = float(today_bars["low"].min())
         day_range = today_high - today_low
@@ -110,14 +110,8 @@ class CreditSpreadStrategy:
         lot_size = get_lot_size(symbol)
         expiry_date = get_expiry_date(symbol)
         expiry_str = expiry_date.strftime("%Y-%m-%d") if expiry_date else ""
-        dte = max(days_to_expiry(symbol), 1)
-        T = dte / 365.0
-        r = 0.07  # Risk-free rate
-        vol = max(atr / close * np.sqrt(252), 0.12)
 
         # ── 2. Select Spread Type ──
-        # If price is near upper half of range / SuperTrend is flat-to-bearish -> Bear Call Spread
-        # If price is near lower half of range / SuperTrend is flat-to-bullish -> Bull Put Spread
         midpoint = (today_high + today_low) / 2.0
         
         if close >= midpoint or st_dir == -1:
@@ -125,7 +119,6 @@ class CreditSpreadStrategy:
             spread_type = "BEAR_CALL_SPREAD"
             short_strike = atm_strike + (self.strike_otm_steps * interval)
             long_strike = short_strike + (self.hedge_otm_steps * interval)
-            opt_type = OptionType.CALL
             opt_str = "CE"
             action = "SELL_CALL_SPREAD"
         else:
@@ -133,19 +126,45 @@ class CreditSpreadStrategy:
             spread_type = "BULL_PUT_SPREAD"
             short_strike = atm_strike - (self.strike_otm_steps * interval)
             long_strike = short_strike - (self.hedge_otm_steps * interval)
-            opt_type = OptionType.PUT
             opt_str = "PE"
             action = "SELL_PUT_SPREAD"
 
-        # ── 3. Theoretical Option Pricing & Net Credit ──
-        short_premium = black_scholes_price(close, short_strike, T, r, vol, opt_type)
-        long_premium = black_scholes_price(close, long_strike, T, r, vol, opt_type)
-        net_credit = short_premium - long_premium
+        # Generate Kite Tradingsymbols
+        sym_map = {
+            "NIFTY 50": "NIFTY",
+            "NIFTY BANK": "BANKNIFTY",
+            "SENSEX": "SENSEX",
+            "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+        }
+        underlying = sym_map.get(symbol, symbol.upper())
+        short_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, short_strike, opt_str)
+        long_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, long_strike, opt_str)
+
+        # ── 3. Real Market Option Pricing (No Black-Scholes) ──
+        short_premium = 0.0
+        long_premium = 0.0
+
+        if option_chain is not None:
+            try:
+                short_ltp = option_chain.get_option_ltp(short_tradingsymbol)
+                long_ltp = option_chain.get_option_ltp(long_tradingsymbol)
+                if short_ltp and short_ltp > 0:
+                    short_premium = float(short_ltp)
+                if long_ltp and long_ltp > 0:
+                    long_premium = float(long_ltp)
+            except Exception as e:
+                logger.debug(f"Could not fetch live option LTP for {short_tradingsymbol}: {e}")
+
         strike_width = abs(short_strike - long_strike)
 
-        # Ensure reasonable credit collected
+        # Realistic market baseline fallback when offline / backtesting
+        if short_premium <= 0 or long_premium <= 0:
+            short_premium = max(round(atr * 0.35, 2), strike_width * 0.25)
+            long_premium = max(round(atr * 0.12, 2), strike_width * 0.08)
+
+        net_credit = round(short_premium - long_premium, 2)
         if net_credit < (strike_width * self.min_credit_pct):
-            net_credit = max(net_credit, strike_width * self.min_credit_pct)
+            net_credit = round(strike_width * self.min_credit_pct, 2)
 
         max_profit = net_credit * lot_size
         max_loss = (strike_width - net_credit) * lot_size

@@ -2011,7 +2011,10 @@ class Prometheus:
                 intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
                 if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
                     cs_sig = self._credit_spread_strategy.evaluate_spread(
-                        intra_df, symbol=symbol, capital=self.initial_capital
+                        intra_df,
+                        symbol=symbol,
+                        capital=self.initial_capital,
+                        option_chain=getattr(self.data, "option_chain", None),
                     )
                     if cs_sig:
                         logger.info(
