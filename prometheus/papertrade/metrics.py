@@ -147,3 +147,151 @@ class MetricsEngine:
             avg_holding_duration_seconds=avg_dur,
             exit_reason_counts=exit_counts,
         )
+
+
+def record_daily_performance(
+    date_str: str = None,
+    total_trades: int = 0,
+    wins: int = 0,
+    losses: int = 0,
+    gross_profit: float = 0.0,
+    gross_loss: float = 0.0,
+    net_pnl: float = 0.0,
+    capital: float = 15000.0,
+    notes: str = "",
+) -> dict:
+    """Record or update a single day's trading performance in CSV & Markdown."""
+    import os
+    import pandas as pd
+    from datetime import datetime
+
+    ledger_dir = os.path.join("reports", "papertrade")
+    os.makedirs(ledger_dir, exist_ok=True)
+    csv_path = os.path.join(ledger_dir, "daily_performance_ledger.csv")
+    md_path = os.path.join(ledger_dir, "monthly_performance_tracker.md")
+
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+
+    win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+    daily_return = (net_pnl / capital * 100.0) if capital > 0 else 0.0
+
+    row = {
+        "Date": date_str,
+        "Total_Trades": int(total_trades),
+        "Wins": int(wins),
+        "Losses": int(losses),
+        "Win_Rate_Pct": round(win_rate, 1),
+        "Gross_Profit": round(gross_profit, 2),
+        "Gross_Loss": round(gross_loss, 2),
+        "Net_PnL": round(net_pnl, 2),
+        "Capital": round(capital, 2),
+        "Daily_Return_Pct": round(daily_return, 2),
+        "Cumulative_PnL": round(net_pnl, 2),
+        "Notes": notes,
+    }
+
+    if os.path.exists(csv_path):
+        try:
+            df = pd.read_csv(csv_path)
+            if "Date" in df.columns:
+                df = df[df["Date"] != date_str]
+                df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+            else:
+                df = pd.DataFrame([row])
+        except Exception:
+            df = pd.DataFrame([row])
+    else:
+        df = pd.DataFrame([row])
+
+    df["Date_dt"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date_dt").reset_index(drop=True)
+    df["Cumulative_PnL"] = df["Net_PnL"].cumsum().round(2)
+    df = df.drop(columns=["Date_dt"])
+    df.to_csv(csv_path, index=False)
+
+    _generate_monthly_tracker_md(df, md_path)
+    return row
+
+
+def _generate_monthly_tracker_md(df, md_path: str):
+    """Generate comprehensive monthly performance tracker markdown."""
+    from datetime import datetime
+
+    total_days = len(df)
+    total_trades = int(df["Total_Trades"].sum())
+    total_wins = int(df["Wins"].sum())
+    total_losses = int(df["Losses"].sum())
+    win_rate = (total_wins / total_trades * 100.0) if total_trades > 0 else 0.0
+
+    total_gross_profit = float(df["Gross_Profit"].sum())
+    total_gross_loss = float(df["Gross_Loss"].sum())
+    total_net_pnl = float(df["Net_PnL"].sum())
+    total_return_pct = (total_net_pnl / 15000.0 * 100.0)
+
+    green_days = int((df["Net_PnL"] > 0).sum())
+    red_days = int((df["Net_PnL"] < 0).sum())
+    breakeven_days = total_days - green_days - red_days
+    profit_factor = (abs(total_gross_profit) / abs(total_gross_loss)) if abs(total_gross_loss) > 0 else 0.0
+
+    net_pnl_str = f"+Rs {total_net_pnl:,.2f}" if total_net_pnl >= 0 else f"-Rs {abs(total_net_pnl):,.2f}"
+    status_emoji = "🟢" if total_net_pnl >= 0 else "🔴"
+
+    lines = [
+        "# 📊 PROMETHEUS — Monthly Performance Tracker",
+        "",
+        "**Tracking Period:** August 2026  ",
+        "**Initial Base Capital:** Rs 15,000  ",
+        f"**Current Realized Net P&L:** **{status_emoji} {net_pnl_str} ({total_return_pct:+.2f}%)**  ",
+        f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}  ",
+        "",
+        "---",
+        "",
+        "## 1. Month-to-Date Performance Overview",
+        "",
+        "| Metric | Value | Benchmark / Target | Status |",
+        "| :--- | :---: | :---: | :---: |",
+        f"| **Net Realized P&L** | **{net_pnl_str}** | +Rs 5,000 / month | {status_emoji} |",
+        f"| **Month Return %** | **{total_return_pct:+.2f}%** | +30.0% / month | {'Active' if total_return_pct >= 0 else 'Drawdown'} |",
+        f"| **Total Trading Days** | **{total_days}** | 20–22 days | In Progress |",
+        f"| **Green / Red Days** | **{green_days} Green / {red_days} Red / {breakeven_days} BE** | > 65% Green | {(green_days/total_days*100) if total_days > 0 else 0:.1f}% |",
+        f"| **Total Trades** | **{total_trades}** | ~3–5 / day | Tracked |",
+        f"| **Win Rate** | **{win_rate:.1f}%** ({total_wins}W / {total_losses}L) | > 55.0% | {'✅ Above Target' if win_rate >= 55 else '⚠️ Under Review'} |",
+        f"| **Profit Factor** | **{profit_factor:.2f}** | > 1.50 | {'✅ Good' if profit_factor >= 1.5 else '⚠️ Under Review'} |",
+        f"| **Gross Profit** | +Rs {total_gross_profit:,.2f} | — | Winning Trades |",
+        f"| **Gross Loss** | -Rs {abs(total_gross_loss):,.2f} | — | Losing Trades |",
+        "",
+        "---",
+        "",
+        "## 2. Daily Performance Log",
+        "",
+        "| Date | Trades | W / L | Win Rate | Gross Profit | Gross Loss | Net P&L | Daily Return | Cumulative P&L | Key Notes & Market Context |",
+        "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+    ]
+
+    for _, r in df.iterrows():
+        pnl = float(r["Net_PnL"])
+        cum = float(r["Cumulative_PnL"])
+        day_emoji = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+        pnl_fmt = f"+Rs {pnl:,.1f}" if pnl >= 0 else f"-Rs {abs(pnl):,.1f}"
+        cum_fmt = f"+Rs {cum:,.1f}" if cum >= 0 else f"-Rs {abs(cum):,.1f}"
+        ret_fmt = f"{float(r['Daily_Return_Pct']):+.1f}%"
+        lines.append(
+            f"| **{r['Date']}** | {int(r['Total_Trades'])} | {int(r['Wins'])}W / {int(r['Losses'])}L | "
+            f"{float(r['Win_Rate_Pct']):.0f}% | +Rs {float(r['Gross_Profit']):,.0f} | -Rs {abs(float(r['Gross_Loss'])):,.0f} | "
+            f"**{day_emoji} {pnl_fmt}** | {ret_fmt} | **{cum_fmt}** | {r.get('Notes', '')} |"
+        )
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("## 3. Data File Locations")
+    lines.append("")
+    lines.append("* **CSV Raw Ledger:** [`reports/papertrade/daily_performance_ledger.csv`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/daily_performance_ledger.csv)")
+    lines.append("* **Markdown Tracker:** [`reports/papertrade/monthly_performance_tracker.md`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/monthly_performance_tracker.md)")
+
+    try:
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception:
+        pass

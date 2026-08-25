@@ -9055,6 +9055,28 @@ class Prometheus:
         # Persist equity state at end of day (crash recovery)
         self._persist_equity_state()
 
+        # Record into persistent CSV ledger and Markdown monthly tracker
+        try:
+            from prometheus.papertrade.metrics import record_daily_performance
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            total_tr = int(state.trades_today)
+            wins_cnt = int(winning)
+            losses_cnt = max(0, total_tr - wins_cnt)
+            net_pnl_val = float(state.realized_pnl_today)
+            record_daily_performance(
+                date_str=today_str,
+                total_trades=total_tr,
+                wins=wins_cnt,
+                losses=losses_cnt,
+                gross_profit=max(0.0, net_pnl_val),
+                gross_loss=min(0.0, net_pnl_val),
+                net_pnl=net_pnl_val,
+                capital=float(state.capital),
+                notes="Intraday paper trading session",
+            )
+        except Exception as e:
+            logger.debug(f"Failed to update daily performance ledger: {e}")
+
     # ─────────────────────────────────────────────────────────────────────
     # TELEGRAM COMMAND HANDLERS
     # ─────────────────────────────────────────────────────────────────────
