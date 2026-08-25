@@ -859,24 +859,31 @@ class TelegramBot:
         elif quality == "LOW":
             caution = "\n⚠️ Volatile regime — lower conviction"
 
+        INDEX_MAP = {
+            "SENSEX": "SENSEX",
+            "NIFTY 50": "NIFTY",
+            "NIFTY BANK": "BANKNIFTY",
+            "NIFTY FIN SERVICE": "FINNIFTY",
+            "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+        }
+        und = INDEX_MAP.get(symbol, symbol.upper())
+
         # Resolve Kite tradingsymbol unconditionally
         tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument") or ""
         if not tradingsymbol and strike and option_type:
             try:
                 from prometheus.utils.indian_market import generate_tradingsymbol
-                INDEX_MAP = {
-                    "SENSEX": "SENSEX",
-                    "NIFTY 50": "NIFTY",
-                    "NIFTY BANK": "BANKNIFTY",
-                    "NIFTY FIN SERVICE": "FINNIFTY",
-                    "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
-                }
-                und = INDEX_MAP.get(symbol, symbol.upper())
                 tradingsymbol = generate_tradingsymbol(und, expiry, strike, option_type)
             except Exception as e:
                 logger.debug(f"Could not generate tradingsymbol fallback: {e}")
 
-        copy_box = f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n<code>{tradingsymbol}</code>\n" if tradingsymbol else ""
+        kite_search = f"{und} {int(float(strike))} {option_type}" if strike and option_type else tradingsymbol
+        copy_box = (
+            f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
+            f"<code>{kite_search}</code>\n"
+            f"<i>Contract: <code>{tradingsymbol}</code></i>\n"
+            if kite_search else ""
+        )
 
         contract_name = friendly_contract or instrument or f"{symbol} {int(float(strike))}{option_type}"
 

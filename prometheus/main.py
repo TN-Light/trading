@@ -3144,13 +3144,23 @@ class Prometheus:
         gain_pct = ((ltp - entry) / entry * 100) if entry > 0 else 0.0
         sl_gain_pct = ((new_sl - entry) / entry * 100) if entry > 0 else 0.0
 
+        INDEX_MAP = {
+            "SENSEX": "SENSEX",
+            "NIFTY 50": "NIFTY",
+            "NIFTY BANK": "BANKNIFTY",
+            "NIFTY FIN SERVICE": "FINNIFTY",
+            "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+        }
+        und = INDEX_MAP.get(state.symbol, state.symbol.upper())
+        kite_search = f"{und} {int(float(getattr(state, 'strike', 0)))} {getattr(state, 'option_type', '')}" if getattr(state, 'strike', 0) and getattr(state, 'option_type', '') else tsym
+
         if getattr(state, "strategy_type", "") == "credit_spread":
             text = (
                 f"🛡️ <b>CREDIT SPREAD PROFIT LOCK</b>\n\n"
                 f"<b>Symbol:</b> <code>{state.symbol}</code>\n"
                 f"<b>Contract:</b> <code>{display}</code>\n"
                 f"📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
-                f"<code>{tsym}</code>\n\n"
+                f"<code>{kite_search}</code>\n\n"
                 f"<b>Net Credit:</b> Rs {entry:.2f}\n"
                 f"<b>Current Spread LTP:</b> Rs {ltp:.2f} (50% Decayed)\n\n"
                 f"━━━━━━━━━━━━━━━━━━\n"
@@ -3167,7 +3177,8 @@ class Prometheus:
                 f"<b>Symbol:</b> <code>{state.symbol}</code>\n"
                 f"<b>Contract:</b> <code>{display}</code>\n"
                 f"📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
-                f"<code>{tsym}</code>\n\n"
+                f"<code>{kite_search}</code>\n"
+                f"<i>Token: <code>{tsym}</code></i>\n\n"
                 f"<b>Milestone:</b> 🎯 <b>{state.current_stage()}</b>\n"
                 f"<b>Entry Price:</b> Rs {entry:.2f}\n"
                 f"<b>Current LTP:</b> Rs {ltp:.2f} ({gain_pct:+.1f}%)\n"
