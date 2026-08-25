@@ -1979,21 +1979,64 @@ class Prometheus:
                 pa_sig = self._pa_momentum_scanner.evaluate_bar(intra_df, symbol=symbol)
                 if pa_sig:
                     spot_price = float(pa_sig.get("entry_price", 0) or intra_df["close"].iloc[-1])
-                    pa_sig["strike"] = get_atm_strike(spot_price, symbol)
-                    pa_sig["expiry"] = get_expiry_date(symbol)
+                    strike = get_atm_strike(spot_price, symbol)
+                    opt_type = "CE" if "CE" in pa_sig.get("action", "") else "PE"
+                    expiry_dt = get_expiry_date(symbol)
+                    expiry_str = expiry_dt.isoformat() if expiry_dt else None
+                    lot_sz = get_lot_size(symbol)
+
+                    # Fetch real live option LTP from Angel One
+                    opt_ltp = 0.0
+                    tradingsymbol = ""
+                    if hasattr(self.data, "angelone_options") and self.data.angelone_options:
+                        try:
+                            prem_info = self.data.angelone_options.get_real_premium(
+                                symbol, strike, opt_type, expiry=expiry_str, spot_price=spot_price
+                            )
+                            if prem_info and float(prem_info.get("ltp", 0) or 0) > 0:
+                                opt_ltp = float(prem_info["ltp"])
+                                tradingsymbol = prem_info.get("tradingsymbol", "")
+                        except Exception as e:
+                            logger.debug(f"Live premium fetch error for {symbol} {strike}{opt_type}: {e}")
+
+                    if opt_ltp > 0:
+                        # Real option pricing
+                        sl_price = round(max(1.0, opt_ltp * 0.80), 2)  # 20% risk bracket
+                        tgt_price = round(opt_ltp * 1.35, 2)            # 35% target
+                        pa_sig["entry_price"] = opt_ltp
+                        pa_sig["stop_loss"] = sl_price
+                        pa_sig["target"] = tgt_price
+                        pa_sig["risk_reward"] = 1.75
+                    else:
+                        logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping signal")
+                        return None
+
+                    pa_sig["strike"] = strike
+                    pa_sig["option_type"] = opt_type
+                    pa_sig["expiry"] = expiry_str
                     pa_sig["underlying_price"] = spot_price
                     pa_sig["spot_price"] = spot_price
                     pa_sig["timeframe"] = "intraday"
                     pa_sig["trade_mode"] = "intraday"
+                    pa_sig["lot_size"] = lot_sz
+                    pa_sig["lots"] = 1
+                    pa_sig["quantity"] = lot_sz
+                    pa_sig["lot_cost"] = opt_ltp * lot_sz
+                    if tradingsymbol:
+                        pa_sig["tradingsymbol"] = tradingsymbol
+                        pa_sig["instrument"] = tradingsymbol
 
                     execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
                     if execution_signal:
                         execution_signal["trade_mode"] = "intraday"
                         execution_signal.setdefault("timeframe", "intraday")
+                        if tradingsymbol:
+                            execution_signal["tradingsymbol"] = tradingsymbol
+                            execution_signal["instrument"] = tradingsymbol
                         logger.info(
                             f"PriceActionMomentum signal generated for {symbol}: "
-                            f"{execution_signal.get('action')} @ {spot_price:.1f} "
-                            f"({execution_signal.get('strategy', '')})"
+                            f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
+                            f"[{execution_signal.get('tradingsymbol', '')}]"
                         )
                         return execution_signal
         except Exception as e:
