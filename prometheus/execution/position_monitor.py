@@ -63,6 +63,10 @@ class TrailingState:
     bar_interval: str = "day"        # "day", "15minute", "5minute"
     trade_mode: str = "swing"        # "swing" or "intraday"
 
+    # Adverse indicator exit
+    adverse_exit_enabled: bool = True
+    _last_adverse_check: float = 0.0  # timestamp of last check
+
     # 3-phase premium floor tracking (1=immunity, 2=buffered, 3=full)
     _current_phase: int = 1
 
@@ -110,9 +114,11 @@ class PositionMonitor:
         on_exit: Optional[Callable] = None,
         on_trailing_update: Optional[Callable] = None,
         on_state_changed: Optional[Callable] = None,
+        data_engine=None,
     ):
         self.broker = broker
         self.poll_interval = poll_interval
+        self._data_engine = data_engine
         self._positions: Dict[str, TrailingState] = {}
         self._lock = threading.Lock()
         self._running = False
@@ -373,6 +379,17 @@ class PositionMonitor:
                 self._on_exit(state.position_id, current_price, "target")
             return
 
+        # ── Adverse indicator exit ──
+        try:
+            from prometheus.config import get
+            if get("intraday.adverse_exit.enabled", False) and state.trade_mode == "intraday":
+                if self._check_adverse_indicator(state, current_price):
+                    if self._on_exit:
+                        self._on_exit(state.position_id, current_price, "adverse_reversal")
+                    return
+        except Exception as e:
+            logger.debug(f"Adverse exit check error: {e}")
+
         # ── Time stop ──
         if state.max_bars > 0 and state.entry_bar_count >= state.max_bars:
             logger.info(
@@ -462,6 +479,70 @@ class PositionMonitor:
                 self._on_trailing_update(state, old_sl)
             if self._on_state_changed:
                 self._on_state_changed(state)
+
+    def _check_adverse_indicator(self, state: TrailingState, current_price: float) -> bool:
+        """Check if SuperTrend has flipped against the trade direction.
+        
+        Returns True if an adverse exit should be triggered.
+        """
+        if not state.adverse_exit_enabled:
+            return False
+        if not self._data_engine:
+            return False
+        
+        # Don't check in first 3 bars (let the trade breathe)
+        if state.entry_bar_count < 3:
+            return False
+        
+        # Throttle: only check every 5 minutes
+        import time as _time
+        now = _time.time()
+        check_interval = 300  # 5 minutes
+        try:
+            from prometheus.config import get
+            check_interval = get("intraday.adverse_exit.check_interval_seconds", 300)
+        except Exception:
+            pass
+        if now - state._last_adverse_check < check_interval:
+            return False
+        state._last_adverse_check = now
+        
+        # Fetch recent 15min data and compute SuperTrend
+        try:
+            from prometheus.signals.technical import calculate_supertrend
+            symbol = state.symbol
+            data = self._data_engine.fetch_historical(symbol, days=5, interval="15minute")
+            if data is None or len(data) < 30:
+                return False
+            
+            st_df = calculate_supertrend(data)
+            if st_df.empty or "supertrend_direction" not in st_df.columns:
+                return False
+            
+            st_direction = st_df["supertrend_direction"].iloc[-1]
+            # st_direction: 1 = bullish, -1 = bearish
+            
+            trade_is_bullish = state.direction == "bullish"  # CE position
+            st_is_bullish = (st_direction == 1)
+            
+            # Adverse = trade direction != SuperTrend direction
+            if trade_is_bullish and not st_is_bullish:
+                logger.warning(
+                    f"[ADVERSE] SuperTrend BEARISH vs BULLISH position: {state.position_id} "
+                    f"({state.tradingsymbol}) — triggering adverse exit"
+                )
+                return True
+            elif not trade_is_bullish and st_is_bullish:
+                logger.warning(
+                    f"[ADVERSE] SuperTrend BULLISH vs BEARISH position: {state.position_id} "
+                    f"({state.tradingsymbol}) — triggering adverse exit"
+                )
+                return True
+            
+            return False
+        except Exception as e:
+            logger.debug(f"Adverse indicator check failed for {state.position_id}: {e}")
+            return False
 
     # ------------------------------------------------------------------
     # Broker SL modification

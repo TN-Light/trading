@@ -65,7 +65,7 @@ capital:
     tier2:
       base_target: 4.0
       max_capital: 49999
-      max_loss_per_trade: 300
+      max_loss_per_trade: 500
       min_margin: 30000
       min_rr: 2.5
       name: 30K Balanced Growth
@@ -136,6 +136,11 @@ interface:
     enabled: true
     proxy: ''
 intraday:
+  adverse_exit:
+    enabled: true
+    check_interval_seconds: 300
+    indicator: supertrend
+    min_bars_before_check: 3
   allowed_instruments:
   - NIFTY 50
   - NIFTY BANK
@@ -227,7 +232,7 @@ intraday:
     min_rr: 2.0
     monday_1dte_guard: true
     monday_override_breakout_atr: 0.9
-    monday_override_score: 5.5
+    monday_override_score: 4.0
     oi_sr_tolerance_pct: 0.0025
     orb_atr_buffer: 0.05
     pcr_intraday_signal_delta: 0.2

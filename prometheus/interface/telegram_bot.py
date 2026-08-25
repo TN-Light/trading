@@ -1048,6 +1048,18 @@ class TelegramBot:
             )
         self.send_message(text)
 
+    def alert_adverse_exit(self, symbol, instrument, entry, exit_price, pnl, reason="SuperTrend reversal"):
+        msg = (
+            f"\U000026A0 <b>ADVERSE EXIT</b>\n"
+            f"Symbol: {symbol}\n"
+            f"Instrument: {instrument}\n"
+            f"Entry: {entry:.2f} → Exit: {exit_price:.2f}\n"
+            f"PnL: Rs {pnl:+.2f}\n"
+            f"Reason: {reason}\n"
+            f"\U0001f504 SuperTrend flipped against position"
+        )
+        self.send_message(msg)
+
     def alert_target_hit(self, trade_info: Dict):
         """Alert when target is achieved."""
         pnl = trade_info.get("pnl", 0)

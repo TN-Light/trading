@@ -249,9 +249,17 @@ class AngelOneOptionChain:
                     try:
                         from datetime import datetime as _dt
                         exp_dt = _dt.strptime(expiry_date[:10], "%Y-%m-%d")
-                        dd = f"{exp_dt.day:02d}"
-                        mon = exp_dt.strftime("%b").upper()
-                        search_query = f"{underlying}{dd}{mon}"
+                        seg = self._exchange_for(underlying)
+                        if seg == "BFO":
+                            # BFO (SENSEX) uses YY-MON format: SENSEX26AUG77800CE
+                            yy = f"{exp_dt.year % 100:02d}"
+                            mon = exp_dt.strftime("%b").upper()
+                            search_query = f"{underlying}{yy}{mon}"
+                        else:
+                            # NFO uses DD-MON-YY format: NIFTY26AUG2624400CE
+                            dd = f"{exp_dt.day:02d}"
+                            mon = exp_dt.strftime("%b").upper()
+                            search_query = f"{underlying}{dd}{mon}"
                     except Exception:
                         pass
 
@@ -770,8 +778,8 @@ class AngelOneOptionChain:
                             premium["theta"] = float(gd.get("theta", 0) or 0)
                             premium["vega"] = float(gd.get("vega", 0) or 0)
                             premium["iv"] = float(gd.get("impliedVolatility", 0) or 0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"optionGreek failed for {target.get('tradingsymbol', '?')}: {e}")
 
                 return premium
         except Exception as e:

@@ -2775,6 +2775,7 @@ class Prometheus:
             on_exit=self._handle_position_exit,
             on_trailing_update=self._handle_trailing_update,
             on_state_changed=self._handle_state_persist,
+            data_engine=self.data,
         )
         self.position_monitor.start()
 
@@ -2991,12 +2992,21 @@ class Prometheus:
             if kite_name:
                 kite_text = f"\n\U0001f4cb <code>{kite_name}</code>"
         
-        self.telegram.send_message(
-            f"\U0001f6a8 <b>POSITION CLOSED — {label}</b>\n"
-            f"{kite_text}{entry_text}\n"
-            f"Exit: <code>{exit_price:.2f}</code>\n"
-            f"{pnl_emoji} P&L: <b>{pnl_text}</b>"
-        )
+        if reason == "adverse_reversal":
+            self.telegram.alert_adverse_exit(
+                symbol=state.symbol if state else "UNKNOWN",
+                instrument=state.tradingsymbol if state else "UNKNOWN",
+                entry=state.entry_premium if state else 0.0,
+                exit_price=exit_price,
+                pnl=pnl if pnl is not None else 0.0,
+            )
+        else:
+            self.telegram.send_message(
+                f"\U0001f6a8 <b>POSITION CLOSED — {label}</b>\n"
+                f"{kite_text}{entry_text}\n"
+                f"Exit: <code>{exit_price:.2f}</code>\n"
+                f"{pnl_emoji} P&L: <b>{pnl_text}</b>"
+            )
 
     def _handle_trailing_update(self, state, old_sl: float):
         """Callback when trailing stop advances a stage."""
@@ -4241,6 +4251,7 @@ class Prometheus:
             on_exit=self._handle_position_exit,
             on_trailing_update=self._handle_trailing_update,
             on_state_changed=self._handle_state_persist,
+            data_engine=self.data,
         )
         self.position_monitor.start()
         if isinstance(self.broker, PaperTrader):
@@ -4691,6 +4702,7 @@ class Prometheus:
             on_exit=self._handle_position_exit,
             on_trailing_update=self._handle_trailing_update,
             on_state_changed=self._handle_state_persist,
+            data_engine=self.data,
         )
         self.position_monitor.start()
         self._restore_equity_state()
