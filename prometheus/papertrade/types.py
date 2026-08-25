@@ -43,13 +43,13 @@ class Direction(str, Enum):
 
     @classmethod
     def from_signal_direction(cls, signal_direction: str) -> "Direction":
-        """Map the legacy 'bullish'/'bearish' used throughout PROMETHEUS."""
+        """Map signal direction to LONG or SHORT."""
         d = (signal_direction or "").lower().strip()
-        if d == "bullish":
+        if d in ("bullish", "long", "buy", "buy_ce", "buy_pe"):
             return cls.LONG
-        if d == "bearish":
+        if d in ("bearish", "short", "sell", "neutral_range", "neutral", "sell_call_spread", "sell_put_spread"):
             return cls.SHORT
-        raise ValueError(f"Unknown signal direction: {signal_direction!r}")
+        return cls.SHORT if "sell" in d or "spread" in d else cls.LONG
 
 
 @dataclass
