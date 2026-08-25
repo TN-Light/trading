@@ -855,28 +855,38 @@ class TelegramBot:
         quality, wr = REGIME_QUALITY.get(regime, ("???", ""))
         caution = ""
         if quality == "WEAK":
-            caution = "\n\u26a0\ufe0f Low-confidence regime (26% WR)"
+            caution = "\n⚠️ Low-confidence regime (26% WR)"
         elif quality == "LOW":
-            caution = "\n\u26a0\ufe0f Volatile regime — lower conviction"
+            caution = "\n⚠️ Volatile regime — lower conviction"
 
-        contract_line = ""
-        tradingsymbol = signal.get("tradingsymbol", "")
-        tsym_part = f" (<code>{tradingsymbol}</code>)" if tradingsymbol else ""
-        if friendly_contract:
-            contract_line = f"Contract: <code>{friendly_contract}</code>{tsym_part}\n"
-        elif instrument:
-            contract_line = f"Contract: <code>{instrument}</code>{tsym_part}\n"
-        elif strike and option_type:
-            exp = f" {expiry}" if expiry else ""
-            contract_line = f"Contract: <code>{symbol}{exp} {int(float(strike))}{option_type}</code>{tsym_part}\n"
+        # Resolve Kite tradingsymbol unconditionally
+        tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument") or ""
+        if not tradingsymbol and strike and option_type:
+            try:
+                from prometheus.utils.indian_market import generate_tradingsymbol
+                INDEX_MAP = {
+                    "SENSEX": "SENSEX",
+                    "NIFTY 50": "NIFTY",
+                    "NIFTY BANK": "BANKNIFTY",
+                    "NIFTY FIN SERVICE": "FINNIFTY",
+                    "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+                }
+                und = INDEX_MAP.get(symbol, symbol.upper())
+                tradingsymbol = generate_tradingsymbol(und, expiry, strike, option_type)
+            except Exception as e:
+                logger.debug(f"Could not generate tradingsymbol fallback: {e}")
+
+        copy_box = f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n<code>{tradingsymbol}</code>\n" if tradingsymbol else ""
+
+        contract_name = friendly_contract or instrument or f"{symbol} {int(float(strike))}{option_type}"
 
         # Source tag for alert segregation
         if source == "scan":
-            source_tag = "  \U0001f4e1 <i>/scan</i>"
+            source_tag = "  📡 <i>/scan</i>"
         elif source == "auto":
-            source_tag = "  \u26a1 <i>auto</i>"
+            source_tag = "  ⚡ <i>auto</i>"
         elif source == "multi":
-            source_tag = "  \u26a1 <i>multi</i>"
+            source_tag = "  ⚡ <i>multi</i>"
         else:
             source_tag = ""
 
@@ -884,7 +894,9 @@ class TelegramBot:
             f"{emoji} <b>NEW TRADING SIGNAL</b>{source_tag}\n"
             f"{account_header}\n"
             f"<b>Symbol:</b> <code>{symbol}</code>\n"
-            f"<b>Action:</b> {action} {contract_line.replace('Contract: ', '')}\n"
+            f"<b>Action:</b> {action}\n"
+            f"<b>Contract:</b> {contract_name}\n"
+            f"{copy_box}\n"
             f"<b>Entry Price:</b> Rs {entry:,.1f}\n"
             f"<b>Stop Loss:</b> Rs {sl:,.1f}\n"
             f"<b>Target:</b> Rs {target:,.1f}\n\n"
