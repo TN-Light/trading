@@ -3141,12 +3141,14 @@ class Prometheus:
                 kite_text = f"\n\U0001f4cb <code>{kite_name}</code>"
         
         if reason == "adverse_reversal":
+            adv_reason = getattr(state, "_adverse_reason", "VWAP / SuperTrend Invalidation") if state else "Structural Invalidation"
             self.telegram.alert_adverse_exit(
                 symbol=state.symbol if state else "UNKNOWN",
                 instrument=state.tradingsymbol if state else "UNKNOWN",
                 entry=state.entry_premium if state else 0.0,
                 exit_price=exit_price,
                 pnl=pnl if pnl is not None else 0.0,
+                reason=adv_reason,
             )
         else:
             self.telegram.send_message(

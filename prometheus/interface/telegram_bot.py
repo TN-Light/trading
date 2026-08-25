@@ -1107,15 +1107,26 @@ class TelegramBot:
             )
         self.send_message(text)
 
-    def alert_adverse_exit(self, symbol, instrument, entry, exit_price, pnl, reason="SuperTrend reversal"):
+    def alert_adverse_exit(self, symbol, instrument, entry, exit_price, pnl, reason="VWAP / SuperTrend Invalidation"):
+        from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+        kite_name = human_search_name_from_api_symbol(instrument) if instrument else symbol
+        pnl_emoji = "🟢" if pnl and pnl > 0 else "🔴"
+        ret_pct = ((exit_price - entry) / entry * 100) if entry > 0 else 0.0
+
         msg = (
-            f"\U000026A0 <b>ADVERSE EXIT</b>\n"
-            f"Symbol: {symbol}\n"
-            f"Instrument: {instrument}\n"
-            f"Entry: {entry:.2f} → Exit: {exit_price:.2f}\n"
-            f"PnL: Rs {pnl:+.2f}\n"
-            f"Reason: {reason}\n"
-            f"\U0001f504 SuperTrend flipped against position"
+            f"🚨 <b>ADVERSE STRUCTURAL EXIT</b>\n\n"
+            f"<b>Symbol:</b> <code>{symbol}</code>\n"
+            f"<b>Contract:</b> <code>{kite_name}</code>\n"
+            f"📋 <b>Zerodha Kite Contract:</b>\n"
+            f"<code>{instrument}</code>\n\n"
+            f"<b>Entry:</b> Rs {entry:.2f} ➔ <b>Exit:</b> Rs {exit_price:.2f} ({ret_pct:+.1f}%)\n"
+            f"{pnl_emoji} <b>P&L:</b> Rs {pnl:+,.0f}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ <b>Invalidation Trigger:</b>\n"
+            f"<b>{reason}</b>\n\n"
+            f"👉 <b>ACTION FOR LIVE TRADERS:</b>\n"
+            f"<b>Close Kite position & cancel open GTT to cap loss early.</b>\n"
+            f"━━━━━━━━━━━━━━━━━━"
         )
         self.send_message(msg)
 

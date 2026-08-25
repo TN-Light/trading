@@ -561,7 +561,7 @@ class PositionMonitor:
                 self._on_state_changed(state)
 
     def _check_adverse_indicator(self, state: TrailingState, current_price: float) -> bool:
-        """Check if SuperTrend has flipped against the trade direction.
+        """Check if price action has structurally invalidated the trade (VWAP re-cross or SuperTrend flip).
         
         Returns True if an adverse exit should be triggered.
         """
@@ -570,54 +570,85 @@ class PositionMonitor:
         if not self._data_engine:
             return False
         
-        # Don't check in first 3 bars (let the trade breathe)
-        if state.entry_bar_count < 3:
+        from prometheus.config import get
+        cfg = get("intraday.adverse_exit", {})
+        min_bars = cfg.get("min_bars_before_check", 1)
+        
+        # Check after min_bars (default: 1 bar)
+        if state.entry_bar_count < min_bars:
             return False
         
-        # Throttle: only check every 5 minutes
+        # Throttle: check interval (default: 60s)
         import time as _time
         now = _time.time()
-        check_interval = 300  # 5 minutes
-        try:
-            from prometheus.config import get
-            check_interval = get("intraday.adverse_exit.check_interval_seconds", 300)
-        except Exception:
-            pass
+        check_interval = cfg.get("check_interval_seconds", 60)
         if now - state._last_adverse_check < check_interval:
             return False
         state._last_adverse_check = now
         
-        # Fetch recent 15min data and compute SuperTrend
         try:
-            from prometheus.signals.technical import calculate_supertrend
+            from prometheus.signals.technical import calculate_supertrend, calculate_session_vwap
             symbol = state.symbol
-            data = self._data_engine.fetch_historical(symbol, days=5, interval="15minute")
-            if data is None or len(data) < 30:
+            data = self._data_engine.fetch_historical(symbol, days=5, interval=getattr(state, "bar_interval", "15minute"))
+            if data is None or len(data) < 15:
                 return False
             
-            st_df = calculate_supertrend(data)
-            if st_df.empty or "supertrend_direction" not in st_df.columns:
-                return False
-            
-            st_direction = st_df["supertrend_direction"].iloc[-1]
-            # st_direction: 1 = bullish, -1 = bearish
-            
+            latest_bar = data.iloc[-1]
+            spot = float(latest_bar["close"])
             trade_is_bullish = state.direction == "bullish"  # CE position
-            st_is_bullish = (st_direction == 1)
             
-            # Adverse = trade direction != SuperTrend direction
-            if trade_is_bullish and not st_is_bullish:
-                logger.warning(
-                    f"[ADVERSE] SuperTrend BEARISH vs BULLISH position: {state.position_id} "
-                    f"({state.tradingsymbol}) — triggering adverse exit"
-                )
-                return True
-            elif not trade_is_bullish and st_is_bullish:
-                logger.warning(
-                    f"[ADVERSE] SuperTrend BULLISH vs BEARISH position: {state.position_id} "
-                    f"({state.tradingsymbol}) — triggering adverse exit"
-                )
-                return True
+            # 1. VWAP Structural Invalidation Check
+            if cfg.get("vwap_exit", True):
+                try:
+                    vwap_df = calculate_session_vwap(data)
+                    vwap = float(vwap_df["vwap"].iloc[-1])
+                    buf_pct = float(cfg.get("vwap_buffer_pct", 0.05)) / 100.0
+                    
+                    # Bearish (PE): spot rallies above VWAP by buffer
+                    if not trade_is_bullish and spot > vwap * (1.0 + buf_pct):
+                        reason = f"VWAP Bullish Invalidation (Spot {spot:.1f} > VWAP {vwap:.1f})"
+                        state._adverse_reason = reason
+                        logger.warning(
+                            f"[ADVERSE-EXIT] {reason} for BEARISH position: {state.position_id} "
+                            f"({state.tradingsymbol}) — triggering early structural cut"
+                        )
+                        return True
+                    
+                    # Bullish (CE): spot drops below VWAP by buffer
+                    if trade_is_bullish and spot < vwap * (1.0 - buf_pct):
+                        reason = f"VWAP Bearish Invalidation (Spot {spot:.1f} < VWAP {vwap:.1f})"
+                        state._adverse_reason = reason
+                        logger.warning(
+                            f"[ADVERSE-EXIT] {reason} for BULLISH position: {state.position_id} "
+                            f"({state.tradingsymbol}) — triggering early structural cut"
+                        )
+                        return True
+                except Exception as e:
+                    logger.debug(f"VWAP check error for {state.position_id}: {e}")
+            
+            # 2. SuperTrend Alignment Check
+            if cfg.get("supertrend_exit", True):
+                st_df = calculate_supertrend(data)
+                if not st_df.empty and "supertrend_direction" in st_df.columns:
+                    st_direction = st_df["supertrend_direction"].iloc[-1]
+                    st_is_bullish = (st_direction == 1)
+                    
+                    if trade_is_bullish and not st_is_bullish:
+                        reason = f"SuperTrend Bearish Flip ({st_df['supertrend'].iloc[-1]:.1f})"
+                        state._adverse_reason = reason
+                        logger.warning(
+                            f"[ADVERSE-EXIT] {reason} vs BULLISH position: {state.position_id} "
+                            f"({state.tradingsymbol}) — triggering adverse exit"
+                        )
+                        return True
+                    elif not trade_is_bullish and st_is_bullish:
+                        reason = f"SuperTrend Bullish Flip ({st_df['supertrend'].iloc[-1]:.1f})"
+                        state._adverse_reason = reason
+                        logger.warning(
+                            f"[ADVERSE-EXIT] {reason} vs BEARISH position: {state.position_id} "
+                            f"({state.tradingsymbol}) — triggering adverse exit"
+                        )
+                        return True
             
             return False
         except Exception as e:

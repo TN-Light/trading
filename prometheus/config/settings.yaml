@@ -138,9 +138,12 @@ interface:
 intraday:
   adverse_exit:
     enabled: true
-    check_interval_seconds: 300
-    indicator: supertrend
-    min_bars_before_check: 3
+    vwap_exit: true
+    supertrend_exit: true
+    check_interval_seconds: 60
+    min_bars_before_check: 1
+    vwap_buffer_pct: 0.05
+    indicator: vwap_supertrend
   allowed_instruments:
   - NIFTY 50
   - NIFTY BANK
