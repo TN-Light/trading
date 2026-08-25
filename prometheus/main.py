@@ -2022,6 +2022,31 @@ class Prometheus:
                     pa_sig["lots"] = 1
                     pa_sig["quantity"] = lot_sz
                     pa_sig["lot_cost"] = opt_ltp * lot_sz
+                    # ── Higher Momentum & Pyramiding Gate for Repeat Strike Entries ──
+                    traded_set = getattr(self, "_today_traded_instruments", set())
+                    if tradingsymbol and tradingsymbol in traded_set:
+                        edge_score = float(pa_sig.get("edge_score", 0) or 0.0)
+
+                        # 1. Block averaging down: check if existing open position is in loss
+                        if hasattr(self, "position_monitor") and self.position_monitor:
+                            open_positions = self.position_monitor.get_positions()
+                            for pid, pos_state in open_positions.items():
+                                if pos_state.tradingsymbol == tradingsymbol:
+                                    if opt_ltp < pos_state.entry_premium:
+                                        logger.info(
+                                            f"Scale-In Gate: Blocked repeat entry on {tradingsymbol} "
+                                            f"(Existing position in loss: LTP {opt_ltp:.2f} < Entry {pos_state.entry_premium:.2f})"
+                                        )
+                                        return None
+
+                        # 2. Require higher momentum confirmation (edge_score >= 5.0 vs normal 3.5)
+                        if edge_score < 5.0:
+                            logger.info(
+                                f"Scale-In Gate: Blocked repeat entry on {tradingsymbol} "
+                                f"(Score {edge_score:.1f} < 5.0: Higher Momentum Gate required for same strike)"
+                            )
+                            return None
+
                     if tradingsymbol:
                         pa_sig["tradingsymbol"] = tradingsymbol
                         pa_sig["instrument"] = tradingsymbol
