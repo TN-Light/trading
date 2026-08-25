@@ -1065,6 +1065,23 @@ class Prometheus:
             logger.info("Multi-account: no priced strike candidates available")
             return
 
+        if not hasattr(self, "_today_traded_instruments"):
+            self._today_traded_instruments = self._get_daily_state("dry_today_traded_instruments", set())
+
+        # Exclude candidates whose exact tradingsymbol or instrument was already traded today
+        available_candidates = [
+            c for c in candidates
+            if c.get("tradingsymbol") not in self._today_traded_instruments
+            and c.get("instrument") not in self._today_traded_instruments
+        ]
+        if not available_candidates and candidates:
+            logger.info(
+                f"Multi-account: all {len(candidates)} candidate strikes for "
+                f"{refined_signal.get('symbol')} were already traded today (blocking duplicate strike re-entry)"
+            )
+            return
+        candidates = available_candidates
+
         results = {}
         skipped = {}
 
@@ -1084,7 +1101,7 @@ class Prometheus:
 
             sym = refined_signal.get("symbol", "")
             act = refined_signal.get("action", "HOLD")
-            strike_v = refined_signal.get("strike", 0) or 0
+            strike_v = execution_signal.get("strike", 0) or refined_signal.get("strike", 0) or 0
             if not self._is_signal_duplicate(sym, act, account=label, strike=strike_v, source="multi"):
                 self._mark_signal_alerted(sym, act, account=label, strike=strike_v, source="multi")
                 self.telegram.alert_new_signal(execution_signal, source="multi")
@@ -1100,6 +1117,12 @@ class Prometheus:
                     logger.info(f"[{label}] skipped: {reason}")
                 else:
                     logger.info(f"[{label}] Position opened: {position.position_id}")
+                    tsym = execution_signal.get("tradingsymbol", "")
+                    if tsym:
+                        self._today_traded_instruments.add(tsym)
+                    if execution_signal.get("instrument"):
+                        self._today_traded_instruments.add(execution_signal["instrument"])
+                    self._set_daily_state("dry_today_traded_instruments", self._today_traded_instruments)
             except Exception as e:
                 logger.error(f"[{label}] Signal dispatch error: {e}")
                 skipped[label] = str(e)
@@ -4270,6 +4293,8 @@ class Prometheus:
         )
 
         _today_traded_symbols = self._get_daily_state("dry_today_traded_symbols", set())
+        _today_traded_instruments = self._get_daily_state("dry_today_traded_instruments", set())
+        self._today_traded_instruments = _today_traded_instruments
         _intraday_trades_today = self._get_daily_state("dry_intraday_trades_today", 0)
         _did_square_off = self._get_daily_state("dry_did_square_off", False)
         _last_scan_time = None
@@ -4356,6 +4381,9 @@ class Prometheus:
                 if current_time < dtime(9, 15):
                     _today_traded_symbols.clear()
                     self._set_daily_state("dry_today_traded_symbols", set())
+                    _today_traded_instruments.clear()
+                    self._set_daily_state("dry_today_traded_instruments", set())
+                    self._today_traded_instruments = set()
                     _intraday_trades_today = 0
                     self._set_daily_state("dry_intraday_trades_today", 0)
                     _did_square_off = False
@@ -4456,8 +4484,15 @@ class Prometheus:
                 # force-closed on a stray late quote.
                 self._paper_capture_feed_bars(intraday_instruments, bar_interval)
 
-                allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", False))
+                allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", True))
+                active_pos_symbols = set()
+                if hasattr(self, "position_monitor") and self.position_monitor:
+                    for s in self.position_monitor.get_positions().values():
+                        active_pos_symbols.add(s.symbol)
+
                 for symbol in intraday_instruments:
+                    if symbol in active_pos_symbols:
+                        continue
                     if symbol in _today_traded_symbols and not allow_mult:
                         continue
 
@@ -4493,6 +4528,13 @@ class Prometheus:
                         if position:
                             _today_traded_symbols.add(symbol)
                             self._set_daily_state("dry_today_traded_symbols", _today_traded_symbols)
+                            tsym = refined.get("tradingsymbol", "")
+                            if tsym:
+                                _today_traded_instruments.add(tsym)
+                            if refined.get("instrument"):
+                                _today_traded_instruments.add(refined["instrument"])
+                            self._today_traded_instruments = _today_traded_instruments
+                            self._set_daily_state("dry_today_traded_instruments", _today_traded_instruments)
                             _intraday_trades_today += 1
                             self._set_daily_state("dry_intraday_trades_today", _intraday_trades_today)
                             # Paper mode returns the trade_id string from
@@ -9117,7 +9159,7 @@ class Prometheus:
             # Intraday scan (during market hours only)
             from datetime import time as dtime
             now = datetime.now()
-            intraday_instruments = self._get_intraday_instruments(self.symbols[:2])
+            intraday_instruments = self._get_intraday_instruments(self.symbols)
             mkt_open = dtime(9, 15)
             mkt_close = dtime(15, 15)
 

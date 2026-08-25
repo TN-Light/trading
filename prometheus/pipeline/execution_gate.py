@@ -55,6 +55,16 @@ class ExecutionGate:
         from prometheus.config import get
         allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", False))
         dedup_key = f"{symbol}_{signal.direction}"
+        inst_key = getattr(signal, "tradingsymbol", "") or getattr(signal, "instrument", "") or f"{symbol}_{getattr(signal, 'strike', '')}_{signal.direction}"
+        
+        if inst_key in self._today_traded:
+            reason = f"{inst_key} contract already traded today"
+            logger.info(f"ExecutionGate: REJECT — {reason}")
+            return GateResult(
+                verdict=GateVerdict.REJECT_DUPLICATE_SYMBOL,
+                reason=reason,
+            )
+            
         if dedup_key in self._today_traded and not allow_mult:
             reason = f"{symbol} already traded today in {signal.direction} direction"
             logger.info(f"ExecutionGate: REJECT — {reason}")
@@ -110,6 +120,7 @@ class ExecutionGate:
         if bar_ts:
             self._last_bar_ts[symbol] = bar_ts
         self._today_traded.add(dedup_key)
+        self._today_traded.add(inst_key)
         
         logger.info(f"ExecutionGate: PASS — {symbol} {signal.action}")
         return GateResult(verdict=GateVerdict.PASS)
