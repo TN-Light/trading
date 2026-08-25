@@ -264,7 +264,7 @@ intraday:
         confluence_sideways: 3.2
         confluence_trending: 2.6
         kelly_wr: 0.38
-        max_daily_trades: 2
+        max_daily_trades: 6
         min_net_edge: 1.3
         min_rr: 2.0
         target_atr_mult: 2.0
