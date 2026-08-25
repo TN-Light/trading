@@ -313,10 +313,45 @@ def parse_api_tradingsymbol(tradingsymbol: str) -> Optional[dict]:
             return None
 
     rest = body[len(underlying):]  # "{date_code}{strike}"
-    # The date code is fixed-length 5 chars (YY + M + DD for weekly or
-    # YY + 3-letter-month for monthly). Strike is everything after that.
     if len(rest) < 5:
         return None
+
+    month_map_str = {
+        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+    }
+
+    # Case 1: Angel One 7-char weekly format: DD + MON + YY (e.g. 25AUG2614875)
+    # Validate that DD is 1..31 and YY is a valid F&O year (e.g. 24..30)
+    if (
+        len(rest) >= 7
+        and rest[:2].isdigit()
+        and 1 <= int(rest[:2]) <= 31
+        and rest[2:5].isalpha()
+        and rest[2:5].upper() in month_map_str
+        and rest[5:7].isdigit()
+        and int(rest[5:7]) in (24, 25, 26, 27, 28, 29, 30)
+    ):
+        try:
+            dd = int(rest[:2])
+            mon_str = rest[2:5].upper()
+            month = month_map_str[mon_str]
+            yy = int(rest[5:7])
+            strike_str = rest[7:]
+            strike = float(strike_str)
+            if strike > 0 and strike_str:
+                d = date(2000 + yy, month, dd)
+                return {
+                    "underlying": underlying,
+                    "expiry": d,
+                    "expiry_year_month": (2000 + yy, month),
+                    "strike": strike,
+                    "option_type": opt_type,
+                    "is_monthly": _is_monthly_expiry(d),
+                }
+        except (ValueError, KeyError, IndexError):
+            pass
+
     date_code = rest[:5]
     strike_str = rest[5:]
     try:
@@ -327,23 +362,10 @@ def parse_api_tradingsymbol(tradingsymbol: str) -> Optional[dict]:
         return None
 
     yy = int(date_code[:2])
-    # Try monthly: chars [2:5] are a 3-letter month abbreviation
-    mon_str = date_code[2:5]
-    month_map_str = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-                      "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+    # Case 2: Standard Monthly: YY + 3-letter month (e.g. 26AUG14875)
+    mon_str = date_code[2:5].upper()
     if mon_str in month_map_str and mon_str.isalpha():
         month = month_map_str[mon_str]
-        # NOTE: monthly-format tradingsymbols encode the month but NOT the
-        # specific expiry day-of-month. NSE restructured its derivatives
-        # framework effective September 1, 2025 — all NSE index & stock F&O
-        # contracts now expire on the LAST TUESDAY of the month. BSE
-        # derivatives (SENSEX, BANKEX) keep the LAST THURSDAY schedule.
-        # We delegate to ``indian_market.get_monthly_expiry`` which already has
-        # this date-aware logic baked in (see _resolve_weekly_expiry_day_name
-        # in indian_market.py). Callers needing the exact expiry for fresh
-        # trades should pass it via the upstream signal — this round-trip is
-        # only used to display names for stale DB rows where the original
-        # expiry date isn't separately available.
         try:
             from prometheus.utils.indian_market import (
                 get_monthly_expiry, _resolve_weekly_expiry_day_name,
@@ -351,7 +373,6 @@ def parse_api_tradingsymbol(tradingsymbol: str) -> Optional[dict]:
             weekday_name = _resolve_weekly_expiry_day_name(underlying)
             d = get_monthly_expiry(2000 + yy, month, weekday_name=weekday_name)
         except Exception:
-            # Fallback: last Tuesday (NSE convention post Sep-2025)
             from calendar import monthrange
             last_day = monthrange(2000 + yy, month)[1]
             d = date(2000 + yy, month, last_day)
@@ -366,7 +387,7 @@ def parse_api_tradingsymbol(tradingsymbol: str) -> Optional[dict]:
             "is_monthly": True,
         }
 
-    # Try weekly: YY M DD format (5 chars)
+    # Case 3: Standard Weekly: YY + M + DD format (e.g. 2682514875)
     try:
         m_char = date_code[2]
         dd = int(date_code[3:5])
