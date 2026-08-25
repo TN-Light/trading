@@ -369,3 +369,32 @@ These were confirmed wired into the live execution path, not just into test mock
 - Bug #6 regression test reproduced the empty `/status` body before the fix; passes after.
 - Bug #8 regression test reproduced `TypeError: unexpected kwarg 'is_square_off'` before the fix; passes after.
 
+## Session 32 Updates (August 25, 2026) — Prometheus 2.0: Barbell Dual-Regime & Momentum Scalping
+
+Completed full architectural pivot to **Prometheus 2.0 Barbell Dual-Regime System**:
+
+### 1. Intraday Momentum Scalping Engine
+- Implemented `PriceActionMomentumScanner` in `prometheus/signals/price_action_momentum.py`:
+  - Opening Range Breakout (ORB: 09:15–09:45 box) with ATR buffers.
+  - Session VWAP alignment & slope.
+  - SuperTrend (10, 3) trend confirmation.
+  - 4-bar consolidation squeeze breakout detection.
+- Shifted morning entry start time from `09:30` to `09:50 AM` in `settings.yaml` (skips the 37.9% win-rate morning chop trap).
+- Fast Breakeven Trap (+10% gain -> SL moved to Entry + costs).
+- Stagnation Cut: Exits flat trades after 4 bars (60 min) to protect capital against Theta decay.
+
+### 2. Barbell Dual-Regime Credit Spread Engine
+- Implemented `CreditSpreadStrategy` in `prometheus/strategies/credit_spread.py`:
+  - Bull Put Spreads & Bear Call Spreads with defined risk and SEBI margin reduction (~₹35,000–₹45,000 margin per lot).
+  - Inverted Decay Trailing in `PositionMonitor`: 50% decay locks breakeven, 70% decay triggers take-profit exit, 1.5x credit hard SL.
+- Dual-Regime routing in `_get_intraday_signal_for_execution`: Breakouts $\rightarrow$ Momentum Option Buying; Range-bound chop $\rightarrow$ Hedged Credit Spreads.
+
+### 3. Risk & Multi-Trade Controls
+- Enabled `allow_multiple_trades_per_symbol: true` with strict contract-level deduplication (blocks repeating the exact same strike/instrument, while allowing reverse PEs or different strikes).
+- Multi-index `/scan` command updated to scan all 4 indices (NIFTY 50, NIFTY BANK, SENSEX, NIFTY MIDCAP SELECT).
+
+### 4. Validation & Test Suite
+- `python -m pytest prometheus/tests/` $\rightarrow$ **51 passed, 0 failed**.
+- `python smoke_test_quick.py` $\rightarrow$ **4 passed, 0 failed**.
+- End-to-end verified on Monday Aug 24 historical data and 11-year dataset.
+

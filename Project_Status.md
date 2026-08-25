@@ -1,63 +1,49 @@
-# Project Status — PROMETHEUS (snapshot: 2026-07-07)
+# Project Status — PROMETHEUS 2.0 (snapshot: August 2026)
 
 ## Overview
-- **Purpose**: Indian F&O options-buying system (NO naked option selling)
+- **Purpose**: Indian F&O Barbell Dual-Regime System (Intraday Momentum Buying + Hedged Credit Spreads)
 - **Capital**: ₹15K–2L INR (adaptive bracket sizing)
-- **Broker**: AngelOne (primary data feed), Zerodha Kite Connect (execution)
+- **Broker**: AngelOne (primary data feed + options chain), Zerodha Kite Connect (execution)
 - **Mode**: Paper (current), targeting Live
-- **Instruments**: NIFTY 50, NIFTY BANK, SENSEX
+- **Instruments**: NIFTY 50, NIFTY BANK, SENSEX, NIFTY MIDCAP SELECT
 - **Languages/libs**: Python; pandas, numpy, scipy, yfinance, kiteconnect, sqlite, requests, loguru, rich
 
 ---
 
-## Architecture — Two Signal Engines
+## Architecture — Barbell Dual-Regime Engine (August 2026)
 
-### 1. APEX Intraday Engine (primary live path)
-- **Entry**: `signals/apex_generator.py` → `signals/aes_fusion.py`
-- **Technical stack**: VWAP, Session VWAP, EMA 9/21 cross, SuperTrend, RSI Divergence
-- **Scoring**: AES 6-factor edge score (0–100):
-  - regime_alignment: 30%, signal_confluence: 25%, volatility_support: 15%
-## Architecture — Signal Engine (July 2026)
+### 1. Momentum Option Buyer (Trending Regimes)
+- **Entry**: `signals/price_action_momentum.py` → `_get_intraday_signal_for_execution()` in `main.py`
+- **Technical Stack**: Opening Range Breakout (ORB: 09:15–09:45 box), VWAP Position & Slope, SuperTrend (10, 3), Consolidation Squeeze Breakouts
+- **Execution**: BUY ATM/ITM Option (CE / PE) with high gamma acceleration
+- **Target**: Quick Target 1 (+18% to +22% premium gain), Target 2 (+35% to +50% runner)
+- **Protection**: Fast Breakeven Lock at +10% gain, Stagnation Exit after 4 bars (60 min) flat, SuperTrend Adverse Cut
 
-### Apex Hunter (live path — the only active signal engine)
-- **Entry**: `_make_signal_generator()` in `main.py` → `signals/fusion.py` + `signals/technical.py`
-- **Technical stack**: VWAP, Volume Profile, FVG, Liquidity Sweeps, OTE, RSI Divergence, SuperTrend, EMA (ICT/SMC concepts)
-- **Scoring**: Weighted confluence sum (`fusion.py`)
-- **Sizing**: Risk-based (`_size_position()`)
-- **Intraday tuning**: V2 config overrides applied per scan (confluence thresholds, RR, time stops, dead zones, VWAP/EMA/SuperTrend alignment gates)
-- **Bar interval**: Auto-selected via VIX (≥18 → 5min, <18 → 15min)
-- **Config**: `intraday.use_backtest_generator: true`
-- **Validated**: 818 trades / 11 years, 18.7% max drawdown (swing backtest)
+### 2. Hedged Credit Spread Seller (Sideways / Range Regimes)
+- **Entry**: `strategies/credit_spread.py` → `_get_intraday_signal_for_execution()` in `main.py`
+- **Strategy**: Bull Put Spreads (Sell 1-OTM PE + Buy 3-OTM PE Hedge) & Bear Call Spreads (Sell 1-OTM CE + Buy 3-OTM CE Hedge)
+- **Defined Risk**: Hedge leg executed first, securing SEBI margin relief (~₹35,000–₹45,000 per lot)
+- **Decay Trailing**: Inverted Trailing Stop (50% decay locks breakeven, 70% decay triggers take-profit exit, 1.5x credit hard SL)
 
-> **Note**: A separate `apex_generator.py` was built and tested but deleted on 2026-07-09 after -58% on Bank Nifty in 30 days. All references removed. The term "Apex Hunter" now refers exclusively to `_make_signal_generator()`.
+### 3. Session Timing & Noise Gate
+- **09:15–09:50 AM**: Range Formation Gate (Observes ORB high/low, avoids 37.9% WR open chop)
+- **09:50–11:45 AM**: Morning Momentum Window
+- **11:45–13:00 PM**: Lunchtime Deadzone (No new directional entries)
+- **13:00–14:30 PM**: Afternoon Continuation Window
+- **15:15 PM**: Mandatory Intraday Square-Off
 
 ---
 
-## Core Files (current, verified July 2026)
+## Core Files (August 2026)
 
-### Signals
-| File | Purpose |
-|------|---------|
-| `prometheus/signals/technical.py` | VWAP, Volume Profile, FVG, Liquidity Sweeps, OTE, RSI, ATR, SuperTrend, EMA |
-| `prometheus/signals/fusion.py` | Weighted confluence engine — primary signal path (Apex Hunter) |
-| `prometheus/signals/aes_fusion.py` | AES 6-factor edge scoring (used by fusion.py) |
-| `prometheus/signals/regime_detector.py` | AMD/Parrondo regime classification |
-| `prometheus/signals/oi_analyzer.py` | PCR, Max Pain, OI support/resistance, IV skew |
-| `prometheus/signals/qrd_estimator.py` | Quantum Regime Detection |
-| `prometheus/signals/strike_gravity.py` | Strike-level gravity/penalty mapping |
-| `prometheus/signals/expiry_clock.py` | Expiry session timing evaluation |
-
-### Strategies
+### Signals & Strategies
 | File | Purpose | Status |
 |------|---------|--------|
-| `prometheus/strategies/trend.py` | Multi-timeframe trend strategy | LIVE (imported by main.py) |
-| `prometheus/strategies/volatility.py` | Volatility strategy | LIVE (imported by main.py) |
-| `prometheus/strategies/expiry.py` | Expiry-day strategy | LIVE (imported by main.py) |
-| `prometheus/strategies/selector.py` | Regime → strategy routing | LIVE (imported by main.py) |
-
-### Risk
-| File | Purpose |
-|------|---------|
+| `prometheus/signals/price_action_momentum.py` | ORB, VWAP, SuperTrend momentum breakout scanner | ACTIVE (Primary Trend) |
+| `prometheus/strategies/credit_spread.py` | Hedged Bull Put / Bear Call credit spreads | ACTIVE (Primary Sideways) |
+| `prometheus/signals/technical.py` | VWAP, SuperTrend, EMA, ATR, Volume Profile | ACTIVE |
+| `prometheus/signals/regime_detector.py` | AMD/Parrondo regime classification | ACTIVE |
+| `prometheus/strategies/selector.py` | Barbell Dual-Regime strategy routing | ACTIVE |
 | `prometheus/risk/manager.py` | Non-bypassable pre-trade gate (13 checks) |
 | `prometheus/risk/position_sizer.py` | Capital-bracket sizing |
 | `prometheus/risk/portfolio_scaler.py` | Portfolio-level scaling |

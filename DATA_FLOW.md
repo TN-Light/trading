@@ -1,47 +1,49 @@
-# PROMETHEUS — Architecture & Data Flow (Updated: 2026-07-07)
+# PROMETHEUS 2.0 — Architecture & Data Flow (August 2026)
 
 ## High-Level Components
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                         DATA SOURCES                              │
-│  AngelOne (live LTP/bid-ask)  ·  Kite Connect  ·  yfinance       │
-│  NSE Direct (options chain)   ·  CSV overrides                    │
+│  AngelOne (live LTP/bid-ask/Greeks) · Kite Connect · yfinance    │
+│  NSE Direct (options chain)         · CSV overrides              │
 └─────────────────────────┬────────────────────────────────────────┘
                           │
                     ┌─────▼─────┐
                     │ DataEngine │  (data/engine.py + data/store.py)
-                    │  IST norm  │  SQLite persistence, CSV fallback
+                    │  IST norm  │  SQLite persistence, Angel One extended intraday
                     └─────┬─────┘
                           │
-              ┌───────────┴───────────┐
-              │                       │
-     ┌────────▼────────┐    ┌────────▼────────┐
-     │  APEX Pipeline   │    │  Swing Pipeline  │
-     │  (intraday/live) │    │  (research/BT)   │
-     └────────┬────────┘    └────────┬────────┘
-              │                       │
-     ┌────────▼────────┐    ┌────────▼────────┐
-     │   AES Scoring    │    │  Fusion Scoring  │
-     └────────┬────────┘    └────────┬────────┘
-              │                       │
-              └───────────┬───────────┘
+            ┌─────────────┴─────────────┐
+            ▼                           ▼
+ ┌──────────────────────┐    ┌──────────────────────┐
+ │  REGIME A: TREND     │    │  REGIME B: SIDEWAYS  │
+ │  (35% Breakout Days) │    │  (65% Range Days)    │
+ ├──────────────────────┤    ├──────────────────────┤
+ │ PriceActionMomentum  │    │ CreditSpreadStrategy │
+ │ ORB + VWAP + SuperTr │    │ Bull Put / Bear Call │
+ ├──────────────────────┤    ├──────────────────────┤
+ │ BUY ATM/ITM Option   │    │ SELL Defined Spread  │
+ └──────────┬───────────┘    └──────────┬───────────┘
+            │                           │
+            └─────────────┬─────────────┘
                           │
                     ┌─────▼─────┐
                     │   Risk     │  (risk/manager.py — 13 checks)
-                    │   Manager  │  NON-BYPASSABLE
+                    │   Manager  │  NON-BYPASSABLE, contract-level deduplication
                     └─────┬─────┘
                           │
                     ┌─────▼─────┐
                     │ Execution  │  OrderManager → PaperTrader / KiteExecutor
                     └─────┬─────┘
                           │
-              ┌───────────┴───────────┐
-              │                       │
-     ┌────────▼────────┐    ┌────────▼────────┐
-     │ Position Monitor │    │  Telegram Bot    │
-     │ 5-stage trailing │    │  CLI Dashboard   │
-     └─────────────────┘    └─────────────────┘
+            ┌─────────────┴─────────────┐
+            │                           │
+   ┌────────▼────────┐         ┌────────▼────────┐
+   │ Position Monitor │         │  Telegram Bot    │
+   │ 5-stage trailing │         │  CLI Dashboard   │
+   │ Inverted decay   │         │  Real-time Marks │
+   └─────────────────┘         └─────────────────┘
 ```
 
 ---
