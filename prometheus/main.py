@@ -2069,8 +2069,8 @@ class Prometheus:
         except Exception as e:
             logger.debug(f"Credit Spread check failed for {symbol}: {e}")
 
-        # 3. Fallback to confluence backtest generator (only if explicitly enabled)
-        if use_backtest_generator:
+        # 3. Legacy confluence backtest generator is disabled for intraday (Price Action Momentum & Credit Spreads only)
+        if use_backtest_generator and getattr(self, "allow_legacy_backtest_generator", False):
             backtest_signal = self._get_intraday_backtest_signal(symbol, bar_interval)
             execution_signal = self._legacy_convert_backtest_signal_for_execution(backtest_signal)
             if execution_signal:

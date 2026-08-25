@@ -147,7 +147,7 @@ intraday:
   - SENSEX
   - NIFTY MIDCAP SELECT
   bar_interval: auto
-  use_backtest_generator: true
+  use_backtest_generator: false
   breakeven_ratio: 0.4
   enabled: true
   allow_multiple_trades_per_symbol: true
