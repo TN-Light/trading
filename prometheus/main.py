@@ -1997,6 +1997,9 @@ class Prometheus:
         use_backtest_generator: bool,
     ) -> Optional[Dict]:
         """Return an executable intraday signal dict for the given mode."""
+        execution_signal = None
+        cs_sig = None
+
         # 1. Check Price Action & Momentum Breakout first (fast intraday edge)
         try:
             from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
