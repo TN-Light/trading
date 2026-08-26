@@ -69,6 +69,7 @@
   * **SENSEX Friday Expiry Date Fix:** Corrected SENSEX weekly expiry day from Thursday to **Friday (`2026-08-28`)** to match BSE contract listings, ensuring Kite copy-paste searches always find the live contract.
   * **Strict Policy — Zero Mathematical Fallbacks:** Permanently banned all offline mathematical formulas (ATR/strike-width approximations and Black-Scholes estimates) across the entire engine. If live market option LTPs cannot be fetched from Angel One API, the signal is strictly discarded (`return None`) with an explicit warning log.
   * **Option Buying Execution Fix & Dual-Regime Prioritization:** Fixed an indentation bug in `main.py` that trapped Option Buying signals inside an `else:` block, completely restoring live `BUY_CE` / `BUY_PE` momentum breakout alerts. Configured concurrent dual-regime evaluation: directional breakouts (momentum score >= 3.5) take top priority #1, while sideways range markets trigger Hedged Credit Spreads (priority #2).
+  * **Global Cross-Symbol Leaderboard & Shadow Paper Trading:** Deployed batch candle scanning across all 4 indices. Candidate signals are aggregated and sorted by edge conviction: Rank #1 executes on the primary trading account, while Rank #2 and Rank #3 are automatically paper-traded in the shadow engine (`paper_capture.on_signal`) with live P&L and trailing stops so no signal is dropped or lost.
 
 ---
 *(Next trading day entry will be appended below)*

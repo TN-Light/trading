@@ -4778,6 +4778,8 @@ class Prometheus:
                     for s in self.position_monitor.get_positions().values():
                         active_pos_symbols.add(s.symbol)
 
+                # 1. Collect all candidates across all instruments
+                candidates = []
                 for symbol in intraday_instruments:
                     if symbol in active_pos_symbols:
                         continue
@@ -4788,18 +4790,29 @@ class Prometheus:
                         symbol, bar_interval, use_backtest_generator
                     )
                     if refined and refined.get("action") != "HOLD":
-                        self._alert_signal(refined)
+                        candidates.append(refined)
 
-                        # Paper mode: `_execute_signal_with_feedback` returns
-                        # None when LivePaperCapture is active (it deliberately
-                        # does NOT call paper_capture.on_signal — that would
-                        # open a duplicate position via `_dispatch_multi_account`
-                        # below). `_dispatch_multi_account` IS the paper
-                        # position opener in paper mode and returns the
-                        # ``trade_id`` from ``paper_capture.on_signal`` — so the
-                        # post-dispatch bookkeeping (`_today_traded_symbols`,
-                        # ``_intraday_trades_today``, monitor registration,
-                        # Telegram trade alert) runs correctly.
+                # 2. Sort by conviction/edge score descending (Option Buying >= 3.5 has natural priority)
+                candidates.sort(
+                    key=lambda s: float(s.get("signal_score", 0.0) or s.get("confidence", 0.0) or 0.0),
+                    reverse=True
+                )
+
+                # 3. Process Leaderboard: Rank #1 -> Primary Execution, Rank #2+ -> Shadow Tracking
+                for rank_idx, refined in enumerate(candidates):
+                    symbol = refined.get("symbol", "")
+                    score = float(refined.get("signal_score", 0.0) or 0.0)
+                    strat = refined.get("strategy_type", refined.get("strategy", ""))
+                    is_rank_1 = (rank_idx == 0)
+
+                    # Decorate with rank metadata
+                    refined["leaderboard_rank"] = rank_idx + 1
+                    refined["is_shadow_observation"] = not is_rank_1
+
+                    self._alert_signal(refined)
+
+                    if is_rank_1:
+                        # Rank #1: Dispatch to primary account
                         position = self._execute_signal_with_feedback(
                             refined, confirm=False, context=mode_label
                         )
@@ -4825,18 +4838,9 @@ class Prometheus:
                             self._set_daily_state("dry_today_traded_instruments", _today_traded_instruments)
                             _intraday_trades_today += 1
                             self._set_daily_state("dry_intraday_trades_today", _intraday_trades_today)
-                            # Paper mode returns the trade_id string from
-                            # ``paper_capture.on_signal``. LivePaperCapture
-                            # owns its own PositionTracker/5-stage trailing
-                            # stop (advanced by ``_paper_capture_feed_bars``
-                            # below) — DO NOT also register with the legacy
-                            # ``order_manager.create_trailing_state``
-                            # (that path is for broker positions and reads
-                            # ``position.position_id``, which a string lacks).
                             if isinstance(position, str):
                                 self.telegram.send_message(
-                                    f"\u2705 Intraday paper trade: {position} "
-                                    f"({bar_interval})"
+                                    f"🥇 <b>RANK #1 TRADE EXECUTED</b>: {position} ({bar_interval}) | Score: {score:.1f}"
                                 )
                             else:
                                 ts = self.order_manager.create_trailing_state(
@@ -4854,9 +4858,27 @@ class Prometheus:
                                     self.position_monitor.add_position(ts)
                                     self._handle_state_persist(ts)
                                 self.telegram.send_message(
-                                    f"\u2705 Intraday trade: {position.position_id} "
-                                    f"({bar_interval})"
+                                    f"🥇 <b>RANK #1 TRADE EXECUTED</b>: {position.position_id} ({bar_interval}) | Score: {score:.1f}"
                                 )
+                    else:
+                        # Rank #2+: Shadow Paper Trading for full outcome observation
+                        shadow_trade_id = None
+                        if getattr(self, "paper_capture", None):
+                            try:
+                                shadow_trade_id = self.paper_capture.on_signal(refined)
+                            except Exception as e:
+                                logger.debug(f"Shadow paper capture error for {symbol}: {e}")
+                        logger.info(
+                            f"🥈 [SHADOW-OBSERVATION] Rank #{rank_idx + 1} signal paper-tracked: "
+                            f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
+                        )
+                        self.telegram.send_message(
+                            f"🥈 <b>SHADOW SIGNAL OBSERVED (Rank #{rank_idx + 1})</b>\n"
+                            f"• Symbol: {symbol}\n"
+                            f"• Strategy: {strat}\n"
+                            f"• Score: {score:.1f}\n"
+                            f"• Status: Paper-traded in shadow engine to track live outcome."
+                        )
 
                 _last_scan_time = now
 
