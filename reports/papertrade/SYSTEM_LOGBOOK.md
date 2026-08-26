@@ -55,3 +55,15 @@
 
 ---
 *(Next trading day entry will be appended below)*
+## 📅 Entry 2: Wednesday, August 26, 2026 (Morning Session)
+
+### 1. Market Context & Alerts
+* **Opening Range High:** NIFTY 50 morning high established at 24,363.20.
+* **Barbell / Credit Spread Strategy Fix:** User received a sideways Bear Call Spread signal. Discovered that multi-account paper trade candidate router was omitting credit spreads, and Telegram copy strings lacked explicit weekly expiry dates.
+* **Upgrades Deployed:**
+  * **Credit Spread Paper Execution:** Multi-account candidate builder now supports 2-leg credit spreads so Barbell trades open and track P&L seamlessly in paper trading.
+  * **Kite 1-Tap Copy Strings with Weekly Expiry:** Formats explicit weekly dates (NIFTY 28 AUG 24200 PE and NIFTY 28 AUG 24050 PE) so searching on Zerodha Kite always pulls up the exact matching ₹37 / ₹12 weekly contracts without monthly expiry mismatch.
+  * **Kite Basket Order Instructions:** Clear Telegram execution guidance added: Buy hedge leg first (margin discount) -> Sell main leg.
+
+---
+*(Next trading day entry will be appended below)*

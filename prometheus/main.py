@@ -1200,6 +1200,28 @@ class Prometheus:
         if action == "HOLD" or not symbol:
             return []
 
+        # Special handling for Hedged Credit Spreads (Dual-Regime Barbell)
+        if refined_signal.get("strategy_type") == "credit_spread" or "SPREAD" in action:
+            lot_sz = int(self._get_lot_size_override(symbol))
+            net_cred = float(refined_signal.get("net_credit", 0) or 0)
+            cand = dict(refined_signal)
+            cand["risk_reward"] = 2.0
+            cand["lot_size"] = lot_sz
+            cand["lot_cost"] = net_cred * lot_sz
+            cand["min_capital_required"] = float(refined_signal.get("margin_required", 35000) or 35000)
+            cand["risk_amount_1lot"] = float(refined_signal.get("hard_sl_price", 10.0)) * lot_sz
+            cand["reward_amount_1lot"] = net_cred * lot_sz
+            cand["strike_tier"] = "SPREAD"
+            cand["option_type"] = "SPREAD"
+            cand["strike"] = int(refined_signal.get("short_strike", 0))
+            cand["instrument"] = refined_signal.get("tradingsymbol", f"{symbol} SPREAD")
+            cand["entry_price"] = net_cred
+            cand["stop_loss"] = float(refined_signal.get("hard_sl_price", 0))
+            cand["target"] = float(refined_signal.get("target_decay_price", 0))
+            cand["score"] = 100.0
+            cand["eligible_brackets"] = ["15K", "30K", "50K", "1L", "2L"]
+            return [cand]
+
         option_type = refined_signal.get("option_type", "")
         if not option_type:
             option_type = "CE" if "CE" in action else "PE" if "PE" in action else ""
@@ -1336,6 +1358,13 @@ class Prometheus:
         affordability_cap = capital * 0.8
         eligible = []
         for c in candidates:
+            # For paper trading credit spreads, allow with 1 lot allocation
+            if c.get("strategy_type") == "credit_spread" or "SPREAD" in str(c.get("action", "")):
+                cc = dict(c)
+                cc["recommended_lots"] = 1
+                eligible.append(cc)
+                continue
+
             if c["min_capital_required"] > affordability_cap:
                 continue
             if c["risk_amount_1lot"] > bracket.max_loss_per_trade:
@@ -1357,23 +1386,25 @@ class Prometheus:
     def _build_execution_signal_from_candidate(self, base_signal: Dict, candidate: Dict) -> Dict:
         """Create executable signal payload from ranked candidate metadata."""
         out = dict(base_signal)
-        out["strike"] = candidate["strike"]
-        out["option_type"] = candidate["option_type"]
-        out["instrument"] = candidate["instrument"]
+        out["strike"] = candidate.get("strike", 0)
+        out["option_type"] = candidate.get("option_type", "")
+        out["instrument"] = candidate.get("instrument", "")
         out["tradingsymbol"] = candidate.get("tradingsymbol", "")
         out["expiry"] = candidate.get("expiry", out.get("expiry", ""))
-        out["entry_price"] = candidate["entry_price"]
-        out["stop_loss"] = candidate["stop_loss"]
-        out["target"] = candidate["target"]
-        out["risk_reward"] = candidate["risk_reward"]
-        out["lot_size"] = candidate["lot_size"]
-        out["lot_cost"] = candidate["lot_cost"]
-        out["min_capital_required"] = candidate["min_capital_required"]
-        out["risk_amount_1lot"] = candidate["risk_amount_1lot"]
-        out["reward_amount_1lot"] = candidate["reward_amount_1lot"]
-        out["strike_tier"] = candidate["strike_tier"]
+        out["entry_price"] = candidate.get("entry_price", 0)
+        out["stop_loss"] = candidate.get("stop_loss", 0)
+        out["target"] = candidate.get("target", 0)
+        out["risk_reward"] = candidate.get("risk_reward", 2.0)
+        out["lot_size"] = candidate.get("lot_size", 50)
+        out["lot_cost"] = candidate.get("lot_cost", 0)
+        out["min_capital_required"] = candidate.get("min_capital_required", 0)
+        out["risk_amount_1lot"] = candidate.get("risk_amount_1lot", 0)
+        out["reward_amount_1lot"] = candidate.get("reward_amount_1lot", 0)
+        out["strike_tier"] = candidate.get("strike_tier", "ATM")
         out["premium_source"] = candidate.get("premium_source", "estimated")
         out["lots"] = int(candidate.get("recommended_lots", 1))
+        if "legs" in candidate:
+            out["legs"] = candidate["legs"]
         return out
 
     def _feed_real_premium(self, refined_signal: Dict):

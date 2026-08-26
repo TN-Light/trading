@@ -757,20 +757,39 @@ class TelegramBot:
 
         # ── DEDICATED SPREAD ALERT FORMATTING (BARBELL DUAL-REGIME) ──
         if signal.get("strategy_type") == "credit_spread" or "SPREAD" in action:
+            from prometheus.utils.symbol_format import human_search_name_from_api_symbol, human_search_name
+            from prometheus.utils.indian_market import get_expiry_date
+
             spread_type = signal.get("spread_type", action)
             net_credit = float(signal.get("net_credit", entry) or 0)
             target_decay = float(signal.get("target_decay_price", target) or 0)
             hard_sl = float(signal.get("hard_sl_price", sl) or 0)
             margin_req = float(signal.get("margin_required", 35000) or 35000)
             legs = signal.get("legs", [])
-            
+
             legs_text = ""
+            copy_boxes = ""
             for leg in legs:
                 leg_act = leg.get("action", "BUY")
                 leg_sym = leg.get("tradingsymbol", "")
                 leg_prem = float(leg.get("premium", 0.0) or 0)
-                leg_tag = "(Hedge Margin Reducer)" if leg.get("is_hedge") else "(Short Theta Collector)"
-                legs_text += f"• <b>{leg_act}</b> <code>{leg_sym}</code> (~Rs {leg_prem:.1f}) {leg_tag}\n"
+                leg_stk = leg.get("strike", 0)
+                leg_opt = leg.get("option_type", "")
+                is_hedge = leg.get("is_hedge", False)
+                leg_tag = "(Hedge - Buy First for Margin Benefit)" if is_hedge else "(Main Seller - Theta Collector)"
+
+                # Format clean human readable Kite search string with explicit weekly date
+                kite_name = human_search_name_from_api_symbol(leg_sym)
+                if not kite_name or kite_name == leg_sym:
+                    exp_d = get_expiry_date(symbol)
+                    if exp_d:
+                        kite_name = human_search_name(symbol, exp_d, leg_stk, leg_opt)
+                    else:
+                        kite_name = f"{symbol} {int(leg_stk)} {leg_opt}"
+
+                legs_text += f"• <b>{leg_act}</b> <code>{kite_name}</code> (~Rs {leg_prem:.1f}) {leg_tag}\n"
+                box_title = f"📋 LEG ({leg_act} HEDGE)" if is_hedge else f"📋 LEG ({leg_act} MAIN)"
+                copy_boxes += f"\n{box_title} (Tap to Copy):\n<code>{kite_name}</code>\n"
 
             # Source tag for alert segregation
             if source == "scan":
@@ -785,12 +804,15 @@ class TelegramBot:
             text = (
                 f"🛡️ <b>NEW BARBELL SIGNAL: {spread_type}</b>{source_tag}\n"
                 f"<b>Underlying:</b> <code>{symbol}</code>\n\n"
-                f"<b>Legs (Copy & Search in Kite/Angel):</b>\n{legs_text}\n"
-                f"<b>Net Credit:</b> Rs {net_credit:,.1f}/share\n"
-                f"<b>Target Exit (70% Decay):</b> Rs {target_decay:,.1f}\n"
-                f"<b>Hard Stop Loss (1.5x):</b> Rs {hard_sl:,.1f}\n"
-                f"<b>Est. Margin Required:</b> Rs {margin_req:,.0f}/lot\n"
-                f"<b>Hold:</b> <code>same-day theta decay</code>\n"
+                f"<b>Legs Breakdown:</b>\n{legs_text}"
+                f"{copy_boxes}\n"
+                f"💰 <b>Net Credit:</b> Rs {net_credit:,.1f}/share\n"
+                f"🎯 <b>Target Exit (70% Decay):</b> Rs {target_decay:,.1f}\n"
+                f"🛑 <b>Hard Stop Loss (1.5x):</b> Rs {hard_sl:,.1f}\n"
+                f"💼 <b>Est. Margin Required:</b> Rs {margin_req:,.0f}/lot\n"
+                f"⏳ <b>Hold:</b> <code>same-day theta decay</code>\n\n"
+                f"💡 <i>How to Execute on Kite: Open Basket Order ➔ Add BUY Hedge leg FIRST (to unlock margin discount) ➔ Add SELL leg.</i>\n"
+                f"ℹ️ <i>If you only trade Option Buying (Call/Put), you can safely ignore Barbell alerts.</i>"
             )
             self.send_message(text)
             return
