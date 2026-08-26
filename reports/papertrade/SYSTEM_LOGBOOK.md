@@ -72,5 +72,21 @@
   * **Global Cross-Symbol Leaderboard & Shadow Paper Trading:** Deployed batch candle scanning across all 4 indices. Candidate signals are aggregated and sorted by edge conviction: Rank #1 executes on the primary trading account, while Rank #2 and Rank #3 are automatically paper-traded in the shadow engine (`paper_capture.on_signal`) with live P&L and trailing stops so no signal is dropped or lost.
   * **System Error Fix (`execution_signal` UnboundLocalError):** Initialized `execution_signal = None` and `cs_sig = None` at the top of `_get_intraday_signal_for_execution`, completely resolving the runtime error when evaluating Credit Spreads without momentum breakouts.
 
+### 2. End-of-Day Trade Performance & Forensic Breakdown
+* **Total Trades Recorded:** 12 trades
+* **Total Realized Net P&L:** **+₹4,691.88** (Overall Profitable Day)
+* **Overall Win Rate:** 66.7% (8 Wins / 4 Losses)
+
+#### Strategy Breakdown:
+| Strategy | Trades | Win Rate | Net P&L | Key Observation |
+| :--- | :--- | :--- | :--- | :--- |
+| **Hedged Credit Spreads (Selling)** | 8 | **100.0% (8W / 0L)** | **+₹11,199.25** | Perfect capture of Theta decay in sideways consolidation (NIFTY & SENSEX). |
+| **PriceAction Momentum (Buying)** | 4 | **0.0% (0W / 4L)** | **-₹6,507.37** | False breakouts chopped out due to extreme low volatility (VIX = 10.65). |
+
+#### Critical Engineering Learnings:
+1. **The Barbell Architecture Validated:** Hedged Credit Spreads saved the day and generated +₹11,199 in pure profits while pure option buying struggled in low-volatility chop.
+2. **Low-VIX Regime Gate:** When VIX < 11.0, breakout velocity is suppressed. Option buying requires higher momentum threshold (Score $\ge$ 4.5) to avoid false expansion entries.
+3. **Monthly Expiry Nominal Risk Guard:** Large monthly contracts (e.g. BankNifty @ ₹924 LTP) must have strict capital allocation caps to prevent single-trade oversize risk.
+
 ---
 *(Next trading day entry will be appended below)*
