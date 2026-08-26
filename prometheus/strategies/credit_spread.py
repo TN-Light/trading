@@ -146,14 +146,29 @@ class CreditSpreadStrategy:
 
         if option_chain is not None:
             try:
-                short_ltp = option_chain.get_option_ltp(short_tradingsymbol)
-                long_ltp = option_chain.get_option_ltp(long_tradingsymbol)
-                if short_ltp and short_ltp > 0:
-                    short_premium = float(short_ltp)
-                if long_ltp and long_ltp > 0:
-                    long_premium = float(long_ltp)
+                # 1. Direct real premium lookup via AngelOneOptionChain
+                if hasattr(option_chain, "get_real_premium"):
+                    sq = option_chain.get_real_premium(symbol, short_strike, opt_str, expiry=expiry_str, spot_price=close)
+                    lq = option_chain.get_real_premium(symbol, long_strike, opt_str, expiry=expiry_str, spot_price=close)
+                    if sq and sq.get("ltp", 0) > 0:
+                        short_premium = float(sq["ltp"])
+                        if sq.get("tradingsymbol"):
+                            short_tradingsymbol = sq["tradingsymbol"]
+                    if lq and lq.get("ltp", 0) > 0:
+                        long_premium = float(lq["ltp"])
+                        if lq.get("tradingsymbol"):
+                            long_tradingsymbol = lq["tradingsymbol"]
+
+                # 2. Direct lookup via get_option_ltp
+                if short_premium <= 0 and hasattr(option_chain, "get_option_ltp"):
+                    s_ltp = option_chain.get_option_ltp(short_tradingsymbol)
+                    l_ltp = option_chain.get_option_ltp(long_tradingsymbol)
+                    if s_ltp and float(s_ltp) > 0:
+                        short_premium = float(s_ltp)
+                    if l_ltp and float(l_ltp) > 0:
+                        long_premium = float(l_ltp)
             except Exception as e:
-                logger.debug(f"Could not fetch live option LTP for {short_tradingsymbol}: {e}")
+                logger.warning(f"CreditSpread live premium fetch error for {symbol}: {e}")
 
         strike_width = abs(short_strike - long_strike)
 

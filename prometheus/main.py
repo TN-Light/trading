@@ -2143,7 +2143,7 @@ class Prometheus:
                         intra_df,
                         symbol=symbol,
                         capital=self.initial_capital,
-                        option_chain=getattr(self.data, "option_chain", None),
+                        option_chain=getattr(self.data, "angelone_options", None),
                     )
                     if cs_sig:
                         logger.info(

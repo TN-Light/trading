@@ -72,7 +72,8 @@ WEEKLY_EXPIRY_DAYS = {
     "NIFTY 50": "Thursday",       # Legacy default; date-aware override applied below
     "NIFTY BANK": "Wednesday",    # Legacy default; date-aware override applied below
     "NIFTY FIN SERVICE": "Tuesday",  # Legacy/default
-    "SENSEX": "Thursday",         # BSE index expiry (SEBI split)
+    "SENSEX": "Friday",           # BSE SENSEX weekly options expire on Friday
+    "BANKEX": "Monday",           # BSE BANKEX weekly options expire on Monday
     "NIFTY": "Thursday",
     "BANKNIFTY": "Wednesday",
     "FINNIFTY": "Tuesday",
@@ -81,10 +82,10 @@ WEEKLY_EXPIRY_DAYS = {
 # NSE moved index and stock F&O expiries to Tuesday effective Sep 1, 2025.
 NSE_TUESDAY_EXPIRY_CUTOVER = date(2025, 9, 1)
 
-# BSE derivatives keep Thursday expiry under the split schedule.
-BSE_THURSDAY_EXPIRY_SYMBOLS = {
+# BSE derivatives keep Friday/Monday expiry under the split schedule.
+BSE_FRIDAY_EXPIRY_SYMBOLS = {
     "SENSEX",
-    "BANKEX",
+    "BSX",
 }
 
 # ---------------------------------------------------------------------------
@@ -342,9 +343,9 @@ def _normalize_symbol_alias(symbol: str) -> str:
 
 
 def _is_bse_derivative_symbol(symbol: str) -> bool:
-    """Identify symbols that follow BSE Thursday expiry schedule."""
+    """Identify symbols that follow BSE expiry schedule."""
     normalized = _normalize_symbol_alias(symbol)
-    return normalized in BSE_THURSDAY_EXPIRY_SYMBOLS
+    return normalized in BSE_FRIDAY_EXPIRY_SYMBOLS or normalized == "BANKEX"
 
 
 def _resolve_weekly_expiry_day_name(symbol: str, on_date: Optional[date] = None) -> str:
@@ -354,8 +355,10 @@ def _resolve_weekly_expiry_day_name(symbol: str, on_date: Optional[date] = None)
 
     normalized = _normalize_symbol_alias(symbol)
 
-    if _is_bse_derivative_symbol(normalized):
-        return "Thursday"
+    if normalized in BSE_FRIDAY_EXPIRY_SYMBOLS:
+        return "Friday"
+    if normalized == "BANKEX":
+        return "Monday"
 
     # Historical BANKNIFTY schedule compatibility used by backtests.
     if normalized == "NIFTY BANK" and on_date.year < 2023:
