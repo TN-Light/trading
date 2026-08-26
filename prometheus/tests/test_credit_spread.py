@@ -49,8 +49,13 @@ def test_credit_spread_generation():
     prior_df = _generate_range_candles(n_bars=20, start_dt=datetime(2026, 8, 21, 9, 15))
     today_df = _generate_range_candles(n_bars=6, start_dt=datetime(2026, 8, 24, 9, 15))
     df = pd.concat([prior_df, today_df], ignore_index=True)
-    
-    spread = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=50000.0)
+
+    # Mock live option chain quotes
+    class MockChain:
+        def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
+            return {"ltp": 45.0, "bid": 44.0, "ask": 46.0, "tradingsymbol": f"{symbol}{strike}{option_type}"}
+
+    spread = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=50000.0, option_chain=MockChain())
     assert spread is not None, "Expected valid credit spread in sideways regime"
     assert spread["strategy_type"] == "credit_spread"
     assert spread["net_credit"] > 0

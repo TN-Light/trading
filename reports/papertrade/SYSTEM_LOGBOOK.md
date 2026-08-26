@@ -67,6 +67,7 @@
   * **PaperCapture Credit Spread Execution Fix:** Mapped top-level `entry_price` = `net_credit`, `strike` = `short_strike`, `stop_loss` = `hard_sl_price`, `target` = `target_decay_price` on `Hedged_Credit_Spread` signals, completely eliminating the `PAPER CAPTURE — signal skipped (no entry_price hint)` error.
   * **Live Market Option Chain Connected to Credit Spreads:** Replaced the offline fallback heuristic formula (`37.5` / `12.0`) with real-time Angel One SmartAPI live option chain quotes (`get_real_premium`), guaranteeing Telegram alerts and paper execution reflect the exact live market premiums (e.g. ₹67 & ₹138).
   * **SENSEX Friday Expiry Date Fix:** Corrected SENSEX weekly expiry day from Thursday to **Friday (`2026-08-28`)** to match BSE contract listings, ensuring Kite copy-paste searches always find the live contract.
+  * **Strict Policy — Zero Mathematical Fallbacks:** Permanently banned all offline mathematical formulas (ATR/strike-width approximations and Black-Scholes estimates) across the entire engine. If live market option LTPs cannot be fetched from Angel One API, the signal is strictly discarded (`return None`) with an explicit warning log.
 
 ---
 *(Next trading day entry will be appended below)*

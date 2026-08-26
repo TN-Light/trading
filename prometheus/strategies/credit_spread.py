@@ -172,10 +172,14 @@ class CreditSpreadStrategy:
 
         strike_width = abs(short_strike - long_strike)
 
-        # Realistic market baseline fallback when offline / backtesting
+        # Strict Rule: No fallback mathematical formulas allowed. Must have live option prices.
         if short_premium <= 0 or long_premium <= 0:
-            short_premium = max(round(atr * 0.35, 2), strike_width * 0.25)
-            long_premium = max(round(atr * 0.12, 2), strike_width * 0.08)
+            logger.warning(
+                f"CreditSpread skipped for {symbol}: Live option prices unavailable "
+                f"({short_tradingsymbol}=Rs {short_premium:.2f}, {long_tradingsymbol}=Rs {long_premium:.2f}) — "
+                f"synthetic formulas strictly banned."
+            )
+            return None
 
         net_credit = round(short_premium - long_premium, 2)
         if net_credit < (strike_width * self.min_credit_pct):
