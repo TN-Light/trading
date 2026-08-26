@@ -246,13 +246,8 @@ def human_search_name(
 
     strike_str = _format_strike(strike)
     mon = d.strftime("%b").upper()
-
-    if _is_monthly_expiry(d):
-        return f"{underlying} {mon} {strike_str} {opt}"
-
     day = d.day
-    suffix = _ordinal_suffix(day)
-    return f"{underlying} {day}{suffix} {mon} {strike_str} {opt}"
+    return f"{underlying} {day} {mon} {strike_str} {opt}"
 
 
 # ---------------------------------------------------------------------------
