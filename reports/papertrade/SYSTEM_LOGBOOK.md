@@ -68,6 +68,7 @@
   * **Live Market Option Chain Connected to Credit Spreads:** Replaced the offline fallback heuristic formula (`37.5` / `12.0`) with real-time Angel One SmartAPI live option chain quotes (`get_real_premium`), guaranteeing Telegram alerts and paper execution reflect the exact live market premiums (e.g. ₹67 & ₹138).
   * **SENSEX Friday Expiry Date Fix:** Corrected SENSEX weekly expiry day from Thursday to **Friday (`2026-08-28`)** to match BSE contract listings, ensuring Kite copy-paste searches always find the live contract.
   * **Strict Policy — Zero Mathematical Fallbacks:** Permanently banned all offline mathematical formulas (ATR/strike-width approximations and Black-Scholes estimates) across the entire engine. If live market option LTPs cannot be fetched from Angel One API, the signal is strictly discarded (`return None`) with an explicit warning log.
+  * **Option Buying Execution Fix & Dual-Regime Prioritization:** Fixed an indentation bug in `main.py` that trapped Option Buying signals inside an `else:` block, completely restoring live `BUY_CE` / `BUY_PE` momentum breakout alerts. Configured concurrent dual-regime evaluation: directional breakouts (momentum score >= 3.5) take top priority #1, while sideways range markets trigger Hedged Credit Spreads (priority #2).
 
 ---
 *(Next trading day entry will be appended below)*

@@ -2068,10 +2068,6 @@ class Prometheus:
                     pa_sig["stop_loss"] = sl_price
                     pa_sig["target"] = tgt_price
                     pa_sig["risk_reward"] = round((tgt_price - opt_ltp) / max(opt_ltp - sl_price, 0.1), 2)
-                else:
-                    logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping signal")
-                    return None
-
                     pa_sig["strike"] = strike
                     pa_sig["option_type"] = opt_type
                     pa_sig["expiry"] = expiry_str
@@ -2083,7 +2079,9 @@ class Prometheus:
                     pa_sig["lots"] = 1
                     pa_sig["quantity"] = lot_sz
                     pa_sig["lot_cost"] = opt_ltp * lot_sz
+
                     # ── Higher Momentum & Pyramiding Gate for Repeat Strike Entries ──
+                    repeat_entry_blocked = False
                     traded_set = getattr(self, "_today_traded_instruments", set())
                     if tradingsymbol and tradingsymbol in traded_set:
                         edge_score = float(pa_sig.get("edge_score", 0) or 0.0)
@@ -2098,37 +2096,43 @@ class Prometheus:
                                             f"Scale-In Gate: Blocked repeat entry on {tradingsymbol} "
                                             f"(Existing position in loss: LTP {opt_ltp:.2f} < Entry {pos_state.entry_premium:.2f})"
                                         )
-                                        return None
+                                        repeat_entry_blocked = True
+                                        break
 
                         # 2. Require higher momentum confirmation (edge_score >= 5.0 vs normal 3.5)
-                        if edge_score < 5.0:
+                        if not repeat_entry_blocked and edge_score < 5.0:
                             logger.info(
                                 f"Scale-In Gate: Blocked repeat entry on {tradingsymbol} "
                                 f"(Score {edge_score:.1f} < 5.0: Higher Momentum Gate required for same strike)"
                             )
-                            return None
+                            repeat_entry_blocked = True
 
-                    if tradingsymbol:
-                        pa_sig["tradingsymbol"] = tradingsymbol
-                        pa_sig["instrument"] = tradingsymbol
-
-                    execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
-                    if execution_signal:
-                        execution_signal["trade_mode"] = "intraday"
-                        execution_signal.setdefault("timeframe", "intraday")
+                    if not repeat_entry_blocked:
                         if tradingsymbol:
-                            execution_signal["tradingsymbol"] = tradingsymbol
-                            execution_signal["instrument"] = tradingsymbol
-                        logger.info(
-                            f"PriceActionMomentum signal generated for {symbol}: "
-                            f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
-                            f"[{execution_signal.get('tradingsymbol', '')}]"
-                        )
-                        return execution_signal
+                            pa_sig["tradingsymbol"] = tradingsymbol
+                            pa_sig["instrument"] = tradingsymbol
+
+                        execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
+                        if execution_signal:
+                            execution_signal["trade_mode"] = "intraday"
+                            execution_signal.setdefault("timeframe", "intraday")
+                            execution_signal["strategy_type"] = "option_buying"
+                            execution_signal["signal_score"] = float(pa_sig.get("edge_score", 3.8) or 3.8)
+                            if tradingsymbol:
+                                execution_signal["tradingsymbol"] = tradingsymbol
+                                execution_signal["instrument"] = tradingsymbol
+                            logger.info(
+                                f"PriceActionMomentum signal generated for {symbol}: "
+                                f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
+                                f"[{execution_signal.get('tradingsymbol', '')}]"
+                            )
+                else:
+                    logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping Option Buying signal")
         except Exception as e:
             logger.debug(f"PA Momentum scanner check failed for {symbol}: {e}")
 
         # 2. Check Hedged Credit Spread for sideways/range regimes (Dual-Regime Barbell)
+        cs_sig = None
         try:
             from prometheus.strategies.credit_spread import CreditSpreadStrategy
             from prometheus.config import get
@@ -2146,14 +2150,37 @@ class Prometheus:
                         option_chain=getattr(self.data, "angelone_options", None),
                     )
                     if cs_sig:
+                        cs_sig["strategy_type"] = "credit_spread"
+                        cs_sig["signal_score"] = float(cs_sig.get("signal_strength", 3.5) or 3.5)
                         logger.info(
                             f"CreditSpread signal generated for {symbol}: "
                             f"{cs_sig.get('spread_type')} (Credit=Rs {cs_sig.get('net_credit', 0):.2f}) "
                             f"[{cs_sig.get('tradingsymbol', '')}]"
                         )
-                        return cs_sig
         except Exception as e:
             logger.debug(f"Credit Spread check failed for {symbol}: {e}")
+
+        # 3. Prioritize Highest Probability / Edge Signal (Option Buying vs Option Selling)
+        if execution_signal and cs_sig:
+            buy_score = float(execution_signal.get("signal_score", 3.8))
+            spread_score = float(cs_sig.get("signal_score", 3.5))
+            # Directional Breakout with momentum >= 3.5 takes natural priority due to higher R:R
+            if buy_score >= 3.5:
+                logger.info(
+                    f"Signal Priority on {symbol}: Choosing Directional Option Buying "
+                    f"({execution_signal.get('action')}, score={buy_score:.1f}) over Credit Spread (score={spread_score:.1f})"
+                )
+                return execution_signal
+            else:
+                logger.info(
+                    f"Signal Priority on {symbol}: Choosing Credit Spread "
+                    f"({cs_sig.get('spread_type')}, score={spread_score:.1f}) over Option Buying (score={buy_score:.1f})"
+                )
+                return cs_sig
+        elif execution_signal:
+            return execution_signal
+        elif cs_sig:
+            return cs_sig
 
         # 3. Legacy confluence backtest generator is disabled for intraday (Price Action Momentum & Credit Spreads only)
         if use_backtest_generator and getattr(self, "allow_legacy_backtest_generator", False):
