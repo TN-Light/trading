@@ -64,6 +64,7 @@
   * **Credit Spread Paper Execution:** Multi-account candidate builder now supports 2-leg credit spreads so Barbell trades open and track P&L seamlessly in paper trading.
   * **Kite 1-Tap Copy Strings with Weekly Expiry:** Formats explicit weekly dates (NIFTY 28 AUG 24200 PE and NIFTY 28 AUG 24050 PE) so searching on Zerodha Kite always pulls up the exact matching ₹37 / ₹12 weekly contracts without monthly expiry mismatch.
   * **Kite Basket Order Instructions:** Clear Telegram execution guidance added: Buy hedge leg first (margin discount) -> Sell main leg.
+  * **PaperCapture Credit Spread Execution Fix:** Mapped top-level `entry_price` = `net_credit`, `strike` = `short_strike`, `stop_loss` = `hard_sl_price`, `target` = `target_decay_price` on `Hedged_Credit_Spread` signals, completely eliminating the `PAPER CAPTURE — signal skipped (no entry_price hint)` error.
 
 ---
 *(Next trading day entry will be appended below)*

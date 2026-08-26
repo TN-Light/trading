@@ -178,10 +178,15 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
     """Generic converter for raw signal dicts in the existing OrderManager
     shape. Used by the live-replay source which subscribes to scanner events.
     """
-    direction = Direction.from_signal_direction(signal.get("direction", ""))
+    is_spread = signal.get("strategy_type") == "credit_spread" or "SPREAD" in str(signal.get("action", ""))
+    dir_str = signal.get("direction", "")
+    direction = Direction.from_signal_direction(dir_str)
+    if is_spread and "CALL" in str(signal.get("spread_type", "")):
+        direction = Direction.SHORT
+
     option_type = signal.get("option_type") or ("CE" if direction == Direction.LONG else "PE")
     symbol = signal.get("symbol", "")
-    strike = float(signal.get("strike") or 0)
+    strike = float(signal.get("strike") or signal.get("short_strike") or 0)
     expiry_in = signal.get("expiry") or ""
     if hasattr(expiry_in, "strftime"):
         expiry_str = expiry_in.strftime("%Y-%m-%d")
@@ -191,15 +196,25 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
         expiry_str = ""
 
     underlying = resolve_underlying(symbol)
-    instrument = signal.get("instrument", "") or ""
-    needs_regen = (
-        not instrument
-        or " " in instrument
-        or instrument != instrument.upper()
-        or not (instrument.endswith("CE") or instrument.endswith("PE"))
-    )
-    if needs_regen and strike > 0 and expiry_str:
-        instrument = api_tradingsymbol(symbol, expiry_str, strike, option_type) or instrument
+    instrument = signal.get("instrument", "") or signal.get("tradingsymbol", "") or ""
+    if is_spread and not instrument:
+        instrument = f"{underlying}_{int(strike)}{option_type}_SPREAD"
+    else:
+        needs_regen = (
+            not is_spread and (
+                not instrument
+                or " " in instrument
+                or instrument != instrument.upper()
+                or not (instrument.endswith("CE") or instrument.endswith("PE"))
+            )
+        )
+        if needs_regen and strike > 0 and expiry_str:
+            instrument = api_tradingsymbol(symbol, expiry_str, strike, option_type) or instrument
+
+    entry_hint = float(signal.get("entry_price") or signal.get("net_credit") or signal.get("entry_premium") or 0)
+    stop_loss = float(signal.get("stop_loss") or signal.get("hard_sl_price") or 0)
+    target = float(signal.get("target") or signal.get("target_decay_price") or 0)
+    score_val = float(signal.get("signal_strength") or signal.get("signal_score") or (3.5 if is_spread else 0.0))
 
     return SignalNotification(
         symbol=symbol,
@@ -209,14 +224,14 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
         strike=strike,
         option_type=option_type,
         expiry=expiry_str,
-        entry_price_hint=float(signal.get("entry_price") or 0),
-        stop_loss=float(signal.get("stop_loss") or 0),
-        target=float(signal.get("target") or 0),
-        signal_score=float(signal.get("signal_strength") or 0),
-        signal_confidence=float(signal.get("confidence") or 0),
+        entry_price_hint=entry_hint,
+        stop_loss=stop_loss,
+        target=target,
+        signal_score=score_val,
+        signal_confidence=float(signal.get("confidence") or (0.75 if is_spread else 0.0)),
         max_bars=int(signal.get("max_bars") or max_bars_default),
         trade_mode=signal.get("trade_mode", "intraday"),
-        strategy=signal.get("strategy", ""),
+        strategy=signal.get("strategy", "Hedged_Credit_Spread" if is_spread else ""),
         bar_timestamp=_parse_bar_timestamp(signal.get("bar_timestamp")),
         metadata={"raw": signal},
     )
