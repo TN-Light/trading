@@ -357,86 +357,11 @@ class LivePaperCapture:
     # -----------------------------------------------------------------
 
     def _alert_position_opened(self, notif, trade_id: str) -> None:
-        if self._telegram is None:
-            return
-        try:
-            side = "BUY CE" if notif.direction.value == "LONG" else "BUY PE"
-
-            # Resolve lot size for trade sizing info
-            lot_size = 0
-            try:
-                from prometheus.utils.indian_market import get_lot_size
-                lot_size = int(get_lot_size(notif.symbol) or 0)
-            except Exception:
-                pass
-
-            order_info = {
-                "symbol": notif.symbol,
-                "side": side,
-                "quantity": lot_size,
-                "order_type": "PAPER MARKET",
-                "order_id": trade_id,
-            }
-            try:
-                self._telegram.alert_order_placed(order_info)
-            except Exception:
-                pass
-            # Kite-searchable copy-paste contract name
-            kite_name = ""
-            try:
-                from prometheus.utils.symbol_format import (
-                    human_search_name, parse_api_tradingsymbol,
-                )
-                parsed = parse_api_tradingsymbol(notif.instrument or "")
-                if parsed and parsed.get("expiry") and parsed.get("strike"):
-                    kite_name = human_search_name(
-                        notif.symbol,
-                        parsed["expiry"],
-                        parsed["strike"],
-                        parsed.get("option_type", ("CE" if notif.direction.value == "LONG" else "PE")),
-                    )
-            except Exception:
-                pass
-            # Build sizing line for manual execution
-            sizing_line = ""
-            cost_line = ""
-            if lot_size > 0:
-                sizing_line = f"\U0001f4e6 <b>Lot Size:</b> <code>{lot_size}</code> (1 Lot = {lot_size} Qty)"
-                if notif.entry_price_hint > 0:
-                    est_cost = notif.entry_price_hint * lot_size
-                    cost_line = f"\U0001f4b0 <b>Est. Premium:</b> <code>Rs {est_cost:,.0f}</code> per lot"
-
-            # Custom follow-up line for paper-capture context:
-            try:
-                lines = [
-                    f"\U0001f9ea <b>PAPER CAPTURE opened</b>",
-                    f"{notif.symbol} {side} {notif.instrument}",
-                ]
-                if kite_name:
-                    lines.append("")
-                    lines.append(f"\U0001f4cb <b>Kite Search:</b>")
-                    lines.append(f"<code>{kite_name}</code>")
-                lines.extend([
-                    "",
-                    f"Entry hint: Rs {notif.entry_price_hint:.2f} | "
-                    f"SL: Rs {notif.stop_loss:.2f} | "
-                    f"Target: Rs {notif.target:.2f}",
-                ])
-                if sizing_line:
-                    lines.append(sizing_line)
-                if cost_line:
-                    lines.append(cost_line)
-                lines.extend([
-                    f"Direction: {notif.direction.value} | "
-                    f"Score: {notif.signal_score:.2f} | "
-                    f"Strategy: {notif.strategy}",
-                    f"ID: <code>{trade_id}</code>",
-                ])
-                self._telegram.send_message("\n".join(lines))
-            except Exception:
-                pass
-        except Exception as e:
-            logger.debug(f"[PaperCapture] _alert_position_opened failed: {e}")
+        # Internal capture logging — main signal alert already sent rank & execution details
+        logger.info(
+            f"[PaperCapture] Tracked position opened: {notif.symbol} {notif.instrument} "
+            f"@{notif.entry_price_hint:.2f} (TradeID: {trade_id})"
+        )
 
     def _alert_position_closed(self, trade) -> None:
         if self._telegram is None:

@@ -90,3 +90,17 @@
 
 ---
 *(Next trading day entry will be appended below)*
+## 📅 Entry 3: Thursday, August 27, 2026 (Morning Session)
+
+### 1. Market Context & System Upgrades
+* **Telegram Clutter Elimination & Unified Signal Ranking:**
+  * Embedded `🥇 RANK #1 SIGNAL (PRIMARY EXECUTION)` and `🥈 RANK #2 SIGNAL (SHADOW PAPER TRADED)` directly into the primary signal alert header.
+  * Eliminated redundant follow-up messages (`RANK #1 TRADE EXECUTED`, `SHADOW SIGNAL OBSERVED`, and raw `PAPER CAPTURE opened`), reducing Telegram message volume from 6+ messages to exactly 1 clean, actionable alert per candidate.
+* **Kite Monthly vs Weekly Search String Resolution:**
+  * Updated `human_search_name` in `symbol_format.py` so that monthly contracts omit the day (e.g. `SENSEX AUG 77400 PE` / `NIFTY AUG 24250 PE`), matching Zerodha Kite's search index 100%.
+  * Weekly contracts retain the explicit day (e.g. `SENSEX 21 AUG 77400 PE` / `NIFTY 28 AUG 24250 PE`).
+* **Live Pricing Transparency:**
+  * Renamed all Telegram label references from `Entry hint` to `Live Entry LTP (Angel One)` to ensure complete user clarity that execution prices are 100% real live market quotes from Angel One SmartAPI with zero fallback formulas.
+
+---
+*(Next trading day entry will be appended below)*

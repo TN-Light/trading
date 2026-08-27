@@ -22,3 +22,19 @@ def test_leaderboard_sorting_and_shadow_partitioning():
     # Verify rank 3 is NIFTY BANK
     assert candidates[2]['symbol'] == 'NIFTY BANK'
     assert candidates[2]['signal_score'] == 3.4
+
+def test_kite_search_name_monthly_vs_weekly():
+    from prometheus.utils.symbol_format import human_search_name
+    from datetime import date
+    
+    # SENSEX Monthly expiry (August 28, 2026 is last Friday of August)
+    monthly_name = human_search_name("SENSEX", date(2026, 8, 28), 77400, "PE")
+    assert monthly_name == "SENSEX AUG 77400 PE"
+    
+    # SENSEX Weekly expiry (August 21, 2026 is not the last Friday)
+    weekly_name = human_search_name("SENSEX", date(2026, 8, 21), 77400, "PE")
+    assert weekly_name == "SENSEX 21 AUG 77400 PE"
+    
+    # NIFTY Monthly expiry
+    nifty_monthly = human_search_name("NIFTY 50", date(2026, 8, 25), 24250, "CE")
+    assert nifty_monthly == "NIFTY AUG 24250 CE"

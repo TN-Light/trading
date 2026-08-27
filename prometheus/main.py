@@ -4841,11 +4841,7 @@ class Prometheus:
                             self._set_daily_state("dry_today_traded_instruments", _today_traded_instruments)
                             _intraday_trades_today += 1
                             self._set_daily_state("dry_intraday_trades_today", _intraday_trades_today)
-                            if isinstance(position, str):
-                                self.telegram.send_message(
-                                    f"🥇 <b>RANK #1 TRADE EXECUTED</b>: {position} ({bar_interval}) | Score: {score:.1f}"
-                                )
-                            else:
+                            if not isinstance(position, str):
                                 ts = self.order_manager.create_trailing_state(
                                     position.position_id
                                 )
@@ -4860,9 +4856,6 @@ class Prometheus:
                                     ts.max_bars = intraday_ts_cfg
                                     self.position_monitor.add_position(ts)
                                     self._handle_state_persist(ts)
-                                self.telegram.send_message(
-                                    f"🥇 <b>RANK #1 TRADE EXECUTED</b>: {position.position_id} ({bar_interval}) | Score: {score:.1f}"
-                                )
                     else:
                         # Rank #2+: Shadow Paper Trading for full outcome observation
                         shadow_trade_id = None
@@ -4874,13 +4867,6 @@ class Prometheus:
                         logger.info(
                             f"🥈 [SHADOW-OBSERVATION] Rank #{rank_idx + 1} signal paper-tracked: "
                             f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
-                        )
-                        self.telegram.send_message(
-                            f"🥈 <b>SHADOW SIGNAL OBSERVED (Rank #{rank_idx + 1})</b>\n"
-                            f"• Symbol: {symbol}\n"
-                            f"• Strategy: {strat}\n"
-                            f"• Score: {score:.1f}\n"
-                            f"• Status: Paper-traded in shadow engine to track live outcome."
                         )
 
                 _last_scan_time = now

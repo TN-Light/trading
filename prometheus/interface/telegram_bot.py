@@ -801,12 +801,22 @@ class TelegramBot:
             else:
                 source_tag = ""
 
+            rank = signal.get("leaderboard_rank")
+            if rank:
+                if rank == 1:
+                    rank_header = "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+                else:
+                    rank_header = f"🥈 <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
+            else:
+                rank_header = ""
+
             text = (
+                f"{rank_header}"
                 f"🛡️ <b>NEW BARBELL SIGNAL: {spread_type}</b>{source_tag}\n"
                 f"<b>Underlying:</b> <code>{symbol}</code>\n\n"
                 f"<b>Legs Breakdown:</b>\n{legs_text}"
                 f"{copy_boxes}\n"
-                f"💰 <b>Net Credit:</b> Rs {net_credit:,.1f}/share\n"
+                f"💰 <b>Net Live Credit (Angel One):</b> Rs {net_credit:,.1f}/share\n"
                 f"🎯 <b>Target Exit (70% Decay):</b> Rs {target_decay:,.1f}\n"
                 f"🛑 <b>Hard Stop Loss (1.5x):</b> Rs {hard_sl:,.1f}\n"
                 f"💼 <b>Est. Margin Required:</b> Rs {margin_req:,.0f}/lot\n"
@@ -919,14 +929,24 @@ class TelegramBot:
         else:
             source_tag = ""
 
+        rank = signal.get("leaderboard_rank")
+        if rank:
+            if rank == 1:
+                rank_header = "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+            else:
+                rank_header = f"🥈 <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
+        else:
+            rank_header = ""
+
         text = (
+            f"{rank_header}"
             f"{emoji} <b>NEW TRADING SIGNAL</b>{source_tag}\n"
             f"{account_header}\n"
             f"<b>Symbol:</b> <code>{symbol}</code>\n"
             f"<b>Action:</b> {action}\n"
             f"<b>Contract:</b> {contract_name}\n"
             f"{copy_box}\n"
-            f"<b>Entry Price:</b> Rs {entry:,.1f}\n"
+            f"<b>Live Entry LTP (Angel One):</b> Rs {entry:,.1f}\n"
             f"<b>Stop Loss:</b> Rs {sl:,.1f}\n"
             f"<b>Target:</b> Rs {target:,.1f}\n\n"
             f"<i>{sizing_line.replace('Sizing: ', 'Quantity: ')}</i>"
