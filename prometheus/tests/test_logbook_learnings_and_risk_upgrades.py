@@ -2,7 +2,7 @@
 Unit tests for the 3 Logbook-driven risk and execution upgrades:
 1. Low-VIX Dynamic Conviction Filter (VIX < 11.5 demands score >= 4.5)
 2. Max Nominal Premium Exposure Cap (Lot cost <= Rs 15,000)
-3. Same-Strike Lockout & Profit-Locked Pyramiding (+10% profit requirement)
+3. Same-Strike Lockout & Profit-Locked Pyramiding (+10% profit requirement OR score >= 5.0 override)
 """
 
 import pytest
@@ -136,8 +136,8 @@ def test_max_nominal_capital_cap_blocks_expensive_contracts():
     assert signal is None
 
 
-def test_same_strike_lockout_blocks_repeat_entries_in_loss():
-    """Repeat entry on same strike must be blocked if active position is not in >= +10% profit."""
+def test_same_strike_lockout_blocks_repeat_entries_in_loss_with_moderate_score():
+    """Repeat entry on same strike must be blocked if active position is not in >= +10% profit and score < 5.0."""
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=14.0)
@@ -161,13 +161,14 @@ def test_same_strike_lockout_blocks_repeat_entries_in_loss():
         "tradingsymbol": "NIFTY01SEP2624200PE",
     }
     
+    # Moderate score 4.0 (< 5.0)
     pa_sig = {
         "symbol": "NIFTY 50",
         "action": "BUY_PE",
         "direction": "bearish",
         "strike": 24200,
         "option_type": "PE",
-        "edge_score": 5.0,
+        "edge_score": 4.0,
         "underlying_price": 24180.0,
     }
     
@@ -175,8 +176,53 @@ def test_same_strike_lockout_blocks_repeat_entries_in_loss():
     p._pa_momentum_scanner.evaluate_bar.return_value = pa_sig
     
     signal = p._get_intraday_signal_for_execution("NIFTY 50", "15minute", False)
-    # Should be blocked because active position is only at 87.0 (< 86.0 * 1.10 = 94.6)
+    # Should be blocked because active position is only at 87.0 and score is 4.0 (< 5.0)
     assert signal is None
+
+
+def test_strong_signal_override_permits_repeat_entry():
+    """Repeat entry on same strike IS allowed when incoming signal has high conviction score >= 5.0."""
+    p = Prometheus()
+    p.mode = "paper"
+    p.data.get_vix = MagicMock(return_value=14.0)
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    
+    p._credit_spread_strategy = MagicMock()
+    p._credit_spread_strategy.evaluate_spread.return_value = None
+    
+    p._today_traded_instruments = {"NIFTY01SEP2624200PE"}
+    
+    # Position monitor has active position entered at 86.0, current LTP is 87.0
+    p.position_monitor = MagicMock()
+    p.position_monitor.get_positions.return_value = {
+        "pos_1": DummyPosState("NIFTY01SEP2624200PE", entry_premium=86.0)
+    }
+    
+    p.data.angelone_options = MagicMock()
+    p.data.angelone_options.get_real_premium.return_value = {
+        "ltp": 87.0,
+        "tradingsymbol": "NIFTY01SEP2624200PE",
+    }
+    
+    # Very Strong signal with edge_score 5.2 (>= 5.0)
+    pa_sig = {
+        "symbol": "NIFTY 50",
+        "action": "BUY_PE",
+        "direction": "bearish",
+        "strike": 24200,
+        "option_type": "PE",
+        "edge_score": 5.2,
+        "underlying_price": 24180.0,
+    }
+    
+    p._pa_momentum_scanner = MagicMock()
+    p._pa_momentum_scanner.evaluate_bar.return_value = pa_sig
+    
+    signal = p._get_intraday_signal_for_execution("NIFTY 50", "15minute", False)
+    # Allowed due to strong signal override
+    assert signal is not None
+    assert signal.get("action") == "BUY_PE"
+    assert signal.get("signal_score") == 5.2
 
 
 def test_same_strike_pyramiding_allowed_when_profit_locked():
@@ -209,7 +255,7 @@ def test_same_strike_pyramiding_allowed_when_profit_locked():
         "direction": "bearish",
         "strike": 24200,
         "option_type": "PE",
-        "edge_score": 5.0,
+        "edge_score": 4.0,
         "underlying_price": 24180.0,
     }
     

@@ -2108,28 +2108,35 @@ class Prometheus:
                         repeat_entry_blocked = False
                         traded_set = getattr(self, "_today_traded_instruments", set())
                         if tradingsymbol and tradingsymbol in traded_set:
-                            has_active_pos = False
-                            if hasattr(self, "position_monitor") and self.position_monitor:
-                                open_positions = self.position_monitor.get_positions()
-                                for pid, pos_state in open_positions.items():
-                                    if pos_state.tradingsymbol == tradingsymbol:
-                                        has_active_pos = True
-                                        # Only allow scale-in if the first position is sitting in >= +10% profit
-                                        if opt_ltp < pos_state.entry_premium * 1.10:
-                                            logger.info(
-                                                f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
-                                                f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {pos_state.entry_premium:.2f})"
-                                            )
-                                            repeat_entry_blocked = True
-                                        break
-
-                            # If it was traded today and is not currently active, block same-strike re-entry
-                            if not has_active_pos:
+                            # Strong Signal Override: High conviction (Score >= 5.0) is permitted to re-enter/scale-in
+                            if edge_score >= 5.0:
                                 logger.info(
-                                    f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
-                                    f"(Strike was already traded today; blocking clustered stop-outs)."
+                                    f"Strong Signal Override: Permitted repeat entry on {tradingsymbol} "
+                                    f"due to high conviction score {edge_score:.1f} >= 5.0"
                                 )
-                                repeat_entry_blocked = True
+                            else:
+                                has_active_pos = False
+                                if hasattr(self, "position_monitor") and self.position_monitor:
+                                    open_positions = self.position_monitor.get_positions()
+                                    for pid, pos_state in open_positions.items():
+                                        if pos_state.tradingsymbol == tradingsymbol:
+                                            has_active_pos = True
+                                            # Only allow scale-in if the first position is sitting in >= +10% profit
+                                            if opt_ltp < pos_state.entry_premium * 1.10:
+                                                logger.info(
+                                                    f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
+                                                    f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {pos_state.entry_premium:.2f} and Score {edge_score:.1f} < 5.0)"
+                                                )
+                                                repeat_entry_blocked = True
+                                            break
+
+                                # If it was traded today and is not currently active, block same-strike re-entry for moderate scores
+                                if not has_active_pos:
+                                    logger.info(
+                                        f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
+                                        f"(Strike was already traded today and score {edge_score:.1f} < 5.0; blocking clustered stop-outs)."
+                                    )
+                                    repeat_entry_blocked = True
 
                         if not repeat_entry_blocked:
                             if tradingsymbol:
