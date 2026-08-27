@@ -900,16 +900,24 @@ class TelegramBot:
         }
         und = INDEX_MAP.get(symbol, symbol.upper())
 
-        # Resolve Kite tradingsymbol unconditionally
-        tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument") or ""
-        if not tradingsymbol and strike and option_type:
-            try:
-                from prometheus.utils.indian_market import generate_tradingsymbol
-                tradingsymbol = generate_tradingsymbol(und, expiry, strike, option_type)
-            except Exception as e:
-                logger.debug(f"Could not generate tradingsymbol fallback: {e}")
+        # Resolve Kite search name with exact expiry month/date
+        from prometheus.utils.symbol_format import (
+            human_search_name, human_search_name_from_api_symbol
+        )
+        kite_search = ""
+        if tradingsymbol:
+            kite_search = human_search_name_from_api_symbol(tradingsymbol)
+        if not kite_search or kite_search == tradingsymbol:
+            if expiry and strike and option_type:
+                kite_search = human_search_name(symbol, expiry, strike, option_type)
+            elif strike and option_type:
+                from prometheus.utils.indian_market import get_expiry_date
+                exp_d = get_expiry_date(symbol)
+                if exp_d:
+                    kite_search = human_search_name(symbol, exp_d, strike, option_type)
+                else:
+                    kite_search = f"{und} {int(float(strike))} {option_type}"
 
-        kite_search = f"{und} {int(float(strike))} {option_type}" if strike and option_type else tradingsymbol
         copy_box = (
             f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
             f"<code>{kite_search}</code>\n"
