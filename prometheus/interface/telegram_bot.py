@@ -899,6 +899,7 @@ class TelegramBot:
             "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
         }
         und = INDEX_MAP.get(symbol, symbol.upper())
+        tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument") or ""
 
         # Resolve Kite search name with exact expiry month/date
         from prometheus.utils.symbol_format import (
