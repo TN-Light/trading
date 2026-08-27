@@ -126,5 +126,17 @@
 3. **Actionable Rule — Strike-Level Lockout:**
    * Once a position is opened in a specific option contract, subsequent entries in the SAME exact strike must be blocked unless the existing position is already sitting in $\ge +10\%$ profit and risk is moved to Break-Even.
 
+### 3. Engine Upgrades Deployed Post-Session (Commit 72-Test Verified)
+1. **Low-VIX Dynamic Conviction Filter (`main.py:2060`):**
+   * Automatically checks India VIX at each scan cycle.
+   * When $\text{India VIX} < 11.5$, Option Buying momentum score threshold is raised from $3.5$ to **$4.5+$** (only true explosive volume expansion triggers buying).
+   * Range-bound signals automatically fall back to **Hedged Credit Spreads** to capture Theta decay.
+2. **Max Nominal Capital Exposure Cap (`main.py:2070`):**
+   * Single-lot option premium allocation is hard-capped at **₹15,000**.
+   * Expensive monthly contracts (such as BankNifty @ ₹924 LTP with ₹27,720 lot cost) are safely suppressed from dominating account risk.
+3. **Same-Strike Lockout & Profit-Locked Pyramiding (`main.py:2090`):**
+   * Block repeat entries on the same strike if the active trade is sitting in $< +10\%$ profit.
+   * Scale-in is strictly permitted only when the existing trade has achieved $\ge +10\%$ gain with risk moved to Break-Even.
+
 ---
 *(Next trading day entry will be appended below)*

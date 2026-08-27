@@ -2048,7 +2048,10 @@ class Prometheus:
                         logger.debug(f"Live premium fetch error for {symbol} {strike}{opt_type}: {e}")
 
                 if opt_ltp > 0:
-                    # Option B: Low-VIX Regime Adaptive Brackets
+                    lot_cost = opt_ltp * lot_sz
+                    edge_score = float(pa_sig.get("edge_score", 0) or 0.0)
+
+                    # 1. Option B: Low-VIX Regime Adaptive Filter & Brackets
                     current_vix = 15.0
                     try:
                         vix_val = self.data.get_vix()
@@ -2057,8 +2060,17 @@ class Prometheus:
                     except Exception:
                         pass
 
-                    is_low_vix = (current_vix < 12.0)
+                    is_low_vix = (current_vix < 11.5)
                     if is_low_vix:
+                        # Logbook Learning: In extreme low-VIX (< 11.5), demand explosive momentum (Score >= 4.5)
+                        if edge_score < 4.5:
+                            logger.info(
+                                f"Low-VIX Gate: Suppressed Option Buying on {symbol} "
+                                f"(VIX {current_vix:.2f} < 11.5 and Score {edge_score:.1f} < 4.5). "
+                                f"Prioritizing Hedged Credit Spreads for Range Theta Decay."
+                            )
+                            opt_ltp = 0.0
+
                         sl_price = round(max(1.0, opt_ltp * 0.85), 2)  # -15% tight risk bracket
                         tgt_price = round(opt_ltp * 1.22, 2)            # +22% quick scalp target
                         pa_sig["low_vix_mode"] = True
@@ -2067,68 +2079,77 @@ class Prometheus:
                         tgt_price = round(opt_ltp * 1.35, 2)            # +35% normal target
                         pa_sig["low_vix_mode"] = False
 
-                    pa_sig["entry_price"] = opt_ltp
-                    pa_sig["stop_loss"] = sl_price
-                    pa_sig["target"] = tgt_price
-                    pa_sig["risk_reward"] = round((tgt_price - opt_ltp) / max(opt_ltp - sl_price, 0.1), 2)
-                    pa_sig["strike"] = strike
-                    pa_sig["option_type"] = opt_type
-                    pa_sig["expiry"] = expiry_str
-                    pa_sig["underlying_price"] = spot_price
-                    pa_sig["spot_price"] = spot_price
-                    pa_sig["timeframe"] = "intraday"
-                    pa_sig["trade_mode"] = "intraday"
-                    pa_sig["lot_size"] = lot_sz
-                    pa_sig["lots"] = 1
-                    pa_sig["quantity"] = lot_sz
-                    pa_sig["lot_cost"] = opt_ltp * lot_sz
+                    # 2. Max Nominal Premium Exposure Cap (Rs 15,000 max lot cost)
+                    if opt_ltp > 0 and lot_cost > 15000.0:
+                        logger.info(
+                            f"Capital Cap Gate: Skipped Option Buying on {symbol} {strike}{opt_type} "
+                            f"(Lot Cost Rs {lot_cost:,.0f} exceeds max nominal threshold Rs 15,000)."
+                        )
+                        opt_ltp = 0.0
 
-                    # ── Higher Momentum & Pyramiding Gate for Repeat Strike Entries ──
-                    repeat_entry_blocked = False
-                    traded_set = getattr(self, "_today_traded_instruments", set())
-                    if tradingsymbol and tradingsymbol in traded_set:
-                        edge_score = float(pa_sig.get("edge_score", 0) or 0.0)
+                    if opt_ltp > 0:
+                        pa_sig["entry_price"] = opt_ltp
+                        pa_sig["stop_loss"] = sl_price
+                        pa_sig["target"] = tgt_price
+                        pa_sig["risk_reward"] = round((tgt_price - opt_ltp) / max(opt_ltp - sl_price, 0.1), 2)
+                        pa_sig["strike"] = strike
+                        pa_sig["option_type"] = opt_type
+                        pa_sig["expiry"] = expiry_str
+                        pa_sig["underlying_price"] = spot_price
+                        pa_sig["spot_price"] = spot_price
+                        pa_sig["timeframe"] = "intraday"
+                        pa_sig["trade_mode"] = "intraday"
+                        pa_sig["lot_size"] = lot_sz
+                        pa_sig["lots"] = 1
+                        pa_sig["quantity"] = lot_sz
+                        pa_sig["lot_cost"] = lot_cost
 
-                        # 1. Block averaging down: check if existing open position is in loss
-                        if hasattr(self, "position_monitor") and self.position_monitor:
-                            open_positions = self.position_monitor.get_positions()
-                            for pid, pos_state in open_positions.items():
-                                if pos_state.tradingsymbol == tradingsymbol:
-                                    if opt_ltp < pos_state.entry_premium:
-                                        logger.info(
-                                            f"Scale-In Gate: Blocked repeat entry on {tradingsymbol} "
-                                            f"(Existing position in loss: LTP {opt_ltp:.2f} < Entry {pos_state.entry_premium:.2f})"
-                                        )
-                                        repeat_entry_blocked = True
+                        # 3. ── Same-Strike Lockout & Profit-Locked Pyramiding Gate ──
+                        repeat_entry_blocked = False
+                        traded_set = getattr(self, "_today_traded_instruments", set())
+                        if tradingsymbol and tradingsymbol in traded_set:
+                            has_active_pos = False
+                            if hasattr(self, "position_monitor") and self.position_monitor:
+                                open_positions = self.position_monitor.get_positions()
+                                for pid, pos_state in open_positions.items():
+                                    if pos_state.tradingsymbol == tradingsymbol:
+                                        has_active_pos = True
+                                        # Only allow scale-in if the first position is sitting in >= +10% profit
+                                        if opt_ltp < pos_state.entry_premium * 1.10:
+                                            logger.info(
+                                                f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
+                                                f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {pos_state.entry_premium:.2f})"
+                                            )
+                                            repeat_entry_blocked = True
                                         break
 
-                        # 2. Require higher momentum confirmation (edge_score >= 5.0 vs normal 3.5)
-                        if not repeat_entry_blocked and edge_score < 5.0:
-                            logger.info(
-                                f"Scale-In Gate: Blocked repeat entry on {tradingsymbol} "
-                                f"(Score {edge_score:.1f} < 5.0: Higher Momentum Gate required for same strike)"
-                            )
-                            repeat_entry_blocked = True
+                            # If it was traded today and is not currently active, block same-strike re-entry
+                            if not has_active_pos:
+                                logger.info(
+                                    f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
+                                    f"(Strike was already traded today; blocking clustered stop-outs)."
+                                )
+                                repeat_entry_blocked = True
 
-                    if not repeat_entry_blocked:
-                        if tradingsymbol:
-                            pa_sig["tradingsymbol"] = tradingsymbol
-                            pa_sig["instrument"] = tradingsymbol
-
-                        execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
-                        if execution_signal:
-                            execution_signal["trade_mode"] = "intraday"
-                            execution_signal.setdefault("timeframe", "intraday")
-                            execution_signal["strategy_type"] = "option_buying"
-                            execution_signal["signal_score"] = float(pa_sig.get("edge_score", 3.8) or 3.8)
+                        if not repeat_entry_blocked:
                             if tradingsymbol:
-                                execution_signal["tradingsymbol"] = tradingsymbol
-                                execution_signal["instrument"] = tradingsymbol
-                            logger.info(
-                                f"PriceActionMomentum signal generated for {symbol}: "
-                                f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
-                                f"[{execution_signal.get('tradingsymbol', '')}]"
-                            )
+                                pa_sig["tradingsymbol"] = tradingsymbol
+                                pa_sig["instrument"] = tradingsymbol
+
+                            execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
+                            if execution_signal:
+                                execution_signal["trade_mode"] = "intraday"
+                                execution_signal.setdefault("timeframe", "intraday")
+                                execution_signal["strategy_type"] = "option_buying"
+                                execution_signal["signal_score"] = float(pa_sig.get("edge_score", 3.8) or 3.8)
+                                if tradingsymbol:
+                                    execution_signal["tradingsymbol"] = tradingsymbol
+                                    execution_signal["instrument"] = tradingsymbol
+                                logger.info(
+                                    f"PriceActionMomentum signal generated for {symbol}: "
+                                    f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
+                                    f"[{execution_signal.get('tradingsymbol', '')}]"
+                                )
                 else:
                     logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping Option Buying signal")
         except Exception as e:
