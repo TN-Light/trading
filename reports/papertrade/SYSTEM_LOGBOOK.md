@@ -102,5 +102,29 @@
 * **Live Pricing Transparency:**
   * Renamed all Telegram label references from `Entry hint` to `Live Entry LTP (Angel One)` to ensure complete user clarity that execution prices are 100% real live market quotes from Angel One SmartAPI with zero fallback formulas.
 
+### 2. End-of-Day Trade Performance & Forensic Breakdown
+* **Total Trades Recorded:** 6 trades
+* **Total Realized Net P&L:** **-₹4,458.05**
+* **Overall Win Rate:** 0.0% (0 Wins / 6 Losses)
+
+#### Trade Log:
+| Trade ID | Symbol | Contract | Strategy | Entry $\rightarrow$ Exit | Net P&L | Return % | Reason |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `PAPER-FEB6D7` | **NIFTY 50** | `24200 PE` | PriceAction Momentum | ₹86.10 $\rightarrow$ ₹73.18 | -₹840.84 | -15.0% | square_off / SL |
+| `PAPER-95F9E7` | **NIFTY 50** | `24200 PE` | PriceAction Momentum | ₹87.55 $\rightarrow$ ₹74.42 | -₹854.50 | -15.0% | square_off / SL |
+| `PAPER-EBA4C3` | **NIFTY 50** | `24200 PE` | PriceAction Momentum | ₹86.00 $\rightarrow$ ₹73.10 | -₹839.53 | -15.0% | square_off / SL |
+| `PAPER-4D0422` | **NIFTY 50** | `24200 PE` | PriceAction Momentum | ₹85.35 $\rightarrow$ ₹72.55 | -₹833.03 | -15.0% | square_off / SL |
+| `PAPER-1D6885` | **NIFTY 50** | `24150 PE` | PriceAction Momentum | ₹75.45 $\rightarrow$ ₹64.13 | -₹736.71 | -15.0% | square_off / SL |
+| `PAPER-5A1CF7` | **SENSEX** | `77400 PE` | PriceAction Momentum | ₹117.70 $\rightarrow$ ₹100.05 | -₹353.44 | -15.0% | square_off / SL |
+
+#### Critical Engineering Learnings:
+1. **The Midday Mean-Reversion Squeeze (12:30 - 13:30):**
+   * NIFTY made an initial morning drop from 24,201 to 24,133, triggering 5 bearish PE breakdown trades.
+   * Between 12:30 PM and 1:15 PM, NIFTY staged a sharp counter-trend pullback back up to 24,199 (+65 points), hitting the tight $-15\%$ stop loss on all PE positions before collapsing back down to 24,021 by 3:15 PM.
+2. **Pyramiding Without Profit-Locking:**
+   * 5 consecutive trades entered the exact same instrument (`NIFTY01SEP2624200PE`) at nearly identical prices (₹85 - ₹87) within 45 minutes. When the midday mean-reversion squeeze occurred, all 5 hit SL simultaneously for $-₹840 \times 5 = -₹4,104$ (92% of the day's loss).
+3. **Actionable Rule — Strike-Level Lockout:**
+   * Once a position is opened in a specific option contract, subsequent entries in the SAME exact strike must be blocked unless the existing position is already sitting in $\ge +10\%$ profit and risk is moved to Break-Even.
+
 ---
 *(Next trading day entry will be appended below)*
