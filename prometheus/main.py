@@ -9177,15 +9177,32 @@ class Prometheus:
     def _send_daily_summary(self):
         """Send end-of-day summary."""
         state = self.risk.get_portfolio_state()
-        # Compute winning trades from PaperTrader history
+        
+        # Query true daily P&L and trade counts from SQLite live ledger (source of truth)
+        daily_pnl = state.realized_pnl_today
+        total_trades = state.trades_today
         winning = 0
-        if isinstance(self.broker, PaperTrader):
-            winning = sum(1 for t in self.broker.trade_history if t.get("net_pnl", 0) > 0)
+        try:
+            import sqlite3
+            from datetime import date
+            today_str = date.today().strftime("%Y-%m-%d")
+            conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
+            c = conn.cursor()
+            c.execute("SELECT net_pnl FROM paper_trades WHERE recorded_at >= ?", (today_str,))
+            rows = c.fetchall()
+            if rows:
+                total_trades = len(rows)
+                daily_pnl = sum(r[0] for r in rows if r[0] is not None)
+                winning = sum(1 for r in rows if r[0] is not None and r[0] > 0)
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to query SQLite for daily summary: {e}")
+
         self.telegram.alert_daily_summary({
-            "daily_pnl": state.realized_pnl_today,
-            "total_trades": state.trades_today,
+            "daily_pnl": daily_pnl,
+            "total_trades": total_trades,
             "winning_trades": winning,
-            "equity": state.capital,
+            "equity": state.capital + daily_pnl,
             "intraday_guardrail_audit": self._get_intraday_guardrail_audit_line(),
         })
 
@@ -9807,47 +9824,53 @@ class Prometheus:
         return text
 
     def _tg_cmd_pnl(self, args: str = "") -> str:
-        """Handle /pnl command — shows all accounts if multi-account is active."""
-        # Multi-account P&L
+        """Handle /pnl command — surfaces true realized P&L from SQLite live ledger."""
+        state = self.risk.get_portfolio_state()
+        
+        # Query true daily P&L and trade counts from SQLite live ledger (source of truth)
+        realized_pnl = state.realized_pnl_today
+        trades_count = state.trades_today
+        wins_count = 0
+        try:
+            import sqlite3
+            from datetime import date
+            today_str = date.today().strftime("%Y-%m-%d")
+            conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
+            c = conn.cursor()
+            c.execute("SELECT net_pnl FROM paper_trades WHERE recorded_at >= ?", (today_str,))
+            rows = c.fetchall()
+            if rows:
+                trades_count = len(rows)
+                realized_pnl = sum(r[0] for r in rows if r[0] is not None)
+                wins_count = sum(1 for r in rows if r[0] is not None and r[0] > 0)
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to query SQLite for /pnl: {e}")
+
+        emoji = "\U0001f7e2" if realized_pnl >= 0 else "\U0001f534"
+        used_pct = abs(realized_pnl) / self.risk.max_daily_loss * 100 if self.risk.max_daily_loss > 0 else 0
+        wr_pct = (wins_count / trades_count * 100) if trades_count > 0 else 0.0
+
+        # Multi-account P&L section
+        multi_section = ""
         if self.multi_account is not None:
-            text = (
-                f"\U0001f4b0 <b>TODAY'S P&amp;L</b>\n"
-                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
-            )
-            total_pnl = 0
+            multi_section = "\n<b>Accounts Breakdown:</b>\n"
             for label, stack in self.multi_account.stacks.items():
                 s = stack.get_summary()
-                risk_state = stack.risk.get_portfolio_state()
-                pnl = risk_state.realized_pnl_today
-                total_pnl += pnl
-                emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-                text += (
-                    f"{emoji} <b>{s['label']}</b>\n"
-                    f"    Realized  <code>Rs {pnl:+,.0f}</code>\n"
-                    f"    Trades <code>{risk_state.trades_today}</code>  \u2502  "
-                    f"Equity <code>Rs {s['equity']:,.0f}</code>\n\n"
+                multi_section += (
+                    f"  • <b>{s['label']}</b>: Rs {s['equity']:,.0f} "
+                    f"({s['return_pct']:+.1f}%)\n"
                 )
-            summary_emoji = "\U0001f7e2" if total_pnl >= 0 else "\U0001f534"
-            text += (
-                f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                f"{summary_emoji} <b>TOTAL:  <code>Rs {total_pnl:+,.0f}</code></b>"
-            )
-            return text
-
-        # Single account fallback
-        state = self.risk.get_portfolio_state()
-        pnl = state.realized_pnl_today
-        emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
-        used_pct = abs(pnl) / self.risk.max_daily_loss * 100 if self.risk.max_daily_loss > 0 else 0
 
         return (
-            f"\U0001f4b0 <b>TODAY'S P&amp;L</b>\n"
+            f"\U0001f4b0 <b>TODAY'S REALIZED P&amp;L</b>\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
-            f"{emoji} Realized:  <code>Rs {pnl:+,.0f}</code>\n"
-            f"Trades:     <code>{state.trades_today}</code>\n"
-            f"Capital:    <code>Rs {state.capital:,.0f}</code>\n\n"
+            f"{emoji} <b>Net P&amp;L:  <code>Rs {realized_pnl:+,.2f}</code></b>\n"
+            f"Trades:     <code>{trades_count}</code> (Won: {wins_count}, WR: {wr_pct:.0f}%)\n"
+            f"Portfolio:  <code>Rs {state.capital + realized_pnl:,.0f}</code>\n\n"
             f"Daily limit: <code>Rs {self.risk.max_daily_loss:,.0f}</code>\n"
-            f"Used:        <code>{used_pct:.0f}%</code>"
+            f"Loss used:   <code>{used_pct:.0f}%</code>"
+            f"{multi_section}"
         )
 
     def _tg_cmd_regime(self, args: str = "") -> str:
