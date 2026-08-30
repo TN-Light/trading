@@ -137,6 +137,53 @@
 3. **Same-Strike Lockout & Profit-Locked Pyramiding (`main.py:2090`):**
    * Block repeat entries on the same strike if the active trade is sitting in $< +10\%$ profit.
    * Scale-in is strictly permitted only when the existing trade has achieved $\ge +10\%$ gain with risk moved to Break-Even.
+   * Strong Signal Override: High conviction setups (Score $\ge 5.0$) are permitted to scale-in dynamically.
+
+---
+
+## 📅 Entry 4: Friday, August 28, 2026
+
+### 1. Market Context & Macro Regime
+* **India VIX:** 10.76 - 10.78 (Extreme low-volatility consolidation regime).
+* **Expiry Day:** SENSEX Weekly Expiry (0DTE).
+* **Price Action Dynamics:**
+  * **Morning (09:15 - 11:00 AM):** Flat horizontal consolidation within a narrow 28-point range (NIFTY 24,141 - 24,169).
+  * **Midday (11:15 - 13:15 PM):** Slow low-volume drift to 24,076 followed by flat 2-hour consolidation.
+  * **Afternoon (13:30 - 15:15 PM):** Sharp counter-trend short-covering squeeze; NIFTY rallied +80 points from 24,095 to 24,175, and SENSEX surged +228 points from 77,036 to 77,264 into market close.
+
+---
+
+### 2. Full-Day Trade Performance & Forensic Breakdown
+* **Total Trades Recorded:** 6 trades
+* **Total Realized Net P&L:** **🟢 +₹1,850.39 (PROFITABLE SESSION)**
+* **Overall Win Rate:** 33.3% (2 Wins / 4 Losses)
+
+#### Trade Log:
+| Trade ID | Symbol | Contract | Strategy | Entry $\rightarrow$ Exit | Net P&L | Return % | Reason |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `PAPER-D23A8B` | **NIFTY 50** | `24200CE / 24350CE` | Hedged Credit Spread | ₹63.90 $\rightarrow$ ₹95.85 | **+₹2,075.71** | **+50.0%** | square_off (Max Decay) |
+| `PAPER-684054` | **NIFTY 50** | `24200CE / 24350CE` | Hedged Credit Spread | ₹71.90 $\rightarrow$ ₹107.85 | **+₹2,335.58** | **+50.0%** | square_off (Max Decay) |
+| `PAPER-AE4368` | **NIFTY 50** | `24100 PE` | PriceAction Momentum | ₹68.50 $\rightarrow$ ₹58.23 | -₹668.37 | -15.0% | square_off / SL |
+| `PAPER-58C16D` | **NIFTY 50** | `24100 PE` | PriceAction Momentum | ₹64.25 $\rightarrow$ ₹54.61 | -₹627.37 | -15.0% | square_off / SL |
+| `PAPER-AA4785` | **NIFTY 50** | `24100 PE` | PriceAction Momentum | ₹64.20 $\rightarrow$ ₹54.57 | -₹626.72 | -15.0% | square_off / SL |
+| `PAPER-0F84F0` | **NIFTY 50** | `24100 PE` | PriceAction Momentum | ₹65.40 $\rightarrow$ ₹55.59 | -₹638.44 | -15.0% | square_off / SL |
+
+#### Performance by Strategy:
+| Strategy | Trades | Win Rate | Net P&L | Strategic Takeaway |
+| :--- | :--- | :--- | :--- | :--- |
+| **Hedged Credit Spreads (Selling)** | 2 | **100.0% (2W / 0L)** | **+₹4,411.29** | Flawless Theta capture in low-VIX consolidation; both positions achieved 50% target decay. |
+| **PriceAction Momentum (Buying)** | 4 | **0.0% (0W / 4L)** | **-₹2,560.90** | Afternoon breakdown reversed due to Friday expiry short-covering squeeze; stopped out at -15%. |
+
+---
+
+### 3. Critical Quantitative Insights:
+1. **The Barbell Engine Proves Its Profitability Again:**
+   * In a choppy session where Option Buying lost -₹2,560, the Hedged Credit Spread strategy generated **+₹4,411 in pure Theta profit**, delivering a **net profitable green day (+₹1,850.39)** for the portfolio.
+2. **Cumulative Weekly Credit Spread Record:**
+   * Wednesday + Friday Credit Spreads: **10 Trades, 10 Wins (100% Win Rate), +₹15,610.54 Total Profit**.
+   * Demonstrates that Option Selling in low-VIX environments is our highest-expectancy edge.
+3. **Friday Expiry Afternoon Dynamics:**
+   * After 13:30 PM on expiry days, breakdown moves frequently trigger violent short-covering squeezes back to VWAP. Option Buying entries after 13:30 on low-VIX days require heightened momentum confirmation to prevent late-session whip-saws.
 
 ---
 *(Next trading day entry will be appended below)*
