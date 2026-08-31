@@ -186,4 +186,50 @@
    * After 13:30 PM on expiry days, breakdown moves frequently trigger violent short-covering squeezes back to VWAP. Option Buying entries after 13:30 on low-VIX days require heightened momentum confirmation to prevent late-session whip-saws.
 
 ---
+
+## 📅 Entry 5: Monday, August 31, 2026
+
+### 1. Market Context & Macro Regime
+* **India VIX:** 11.22 - 11.25 (Persistent low-volatility environment).
+* **Expiry Day:** Non-expiry session.
+* **Price Action Dynamics:**
+  * **Morning (09:15 - 10:45 AM):** Sharp morning bearish impulse down to Opening Range Low (SENSEX low 76,842, NIFTY low 24,013) triggering Put Buying signals.
+  * **Midday (11:00 AM - 13:15 PM):** Aggressive counter-trend V-reversal short covering; SENSEX rallied **+180 points** (76,842 $\rightarrow$ 77,022) and NIFTY surged **+67 points** (24,013 $\rightarrow$ 24,080).
+  * **Afternoon (13:30 - 15:15 PM):** Slow drift into close; all positions exited at automated 15:15 square-off.
+
+---
+
+### 2. Full-Day Trade Performance & Forensic Breakdown
+* **Total Trades Recorded:** 4 trades
+* **Total Realized Net P&L:** **🔴 -₹4,459.89**
+* **Overall Win Rate:** 0.0% (0 Wins / 4 Losses)
+
+#### Trade Log:
+| Trade ID | Symbol | Contract Traded | Strategy | Entry $\rightarrow$ Exit Price | Net P&L | Return % | Reason |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `PAPER-488B02` | **SENSEX** | `SENSEX26SEP76800PE` | PriceAction Momentum | ₹575.70 $\rightarrow$ ₹489.35 | **-₹1,729.13** | -15.0% | square_off / SL |
+| `PAPER-4F5CE1` | **SENSEX** | `SENSEX26SEP76800PE` | PriceAction Momentum | ₹565.90 $\rightarrow$ ₹481.01 | **-₹1,699.89** | -15.0% | square_off / SL |
+| `PAPER-477757` | **NIFTY 50** | `NIFTY01SEP2624000PE` | PriceAction Momentum | ₹53.15 $\rightarrow$ ₹45.18 | **-₹518.69** | -15.0% | square_off / SL |
+| `PAPER-5901FF` | **NIFTY 50** | `NIFTY01SEP2624000PE` | PriceAction Momentum | ₹52.45 $\rightarrow$ ₹44.58 | **-₹512.18** | -15.0% | square_off / SL |
+
+#### Performance by Symbol:
+| Symbol | Trades | Win Rate | Gross Loss | Net Realized P&L | % of Day's Loss |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **SENSEX (Monthly Contract)** | 2 | 0.0% | -₹3,429.02 | <font color="#ef4444">**-₹3,429.02**</font> | **76.9%** |
+| **NIFTY 50 (Weekly Contract)** | 2 | 0.0% | -₹1,030.87 | <font color="#ef4444">**-₹1,030.87**</font> | **23.1%** |
+
+---
+
+### 3. Critical Quantitative Learnings & Actionable Upgrades:
+1. **The Monthly Option Risk Asymmetry:**
+   * SENSEX was traded using a deep monthly contract @ ₹575 LTP (Lot Cost ₹11,514), causing **77% of the day's total loss** across just 2 trades (-₹3,429).
+   * In contrast, NIFTY weekly options @ ₹53 LTP (Lot Cost ₹3,445) risked only ₹515 per trade.
+   * *Actionable Rule:* Prioritize weekly option expiries for intraday momentum buying whenever available, and cap single-contract premium to under ₹250 LTP for index options.
+2. **The Consecutive-Bar Double Entry Trap:**
+   * At 10:22 & 10:36 (SENSEX) and 10:51 & 11:06 (NIFTY), the strong-signal override allowed 2 entries on consecutive 15-minute candles into the exact same strike at identical price levels.
+   * *Actionable Rule:* Enforce a minimum **30-minute spacing cooldown** between repeat entries on the same underlying symbol even when Score $\ge 5.0$, preventing immediate double-allocation before the trade develops.
+3. **Midday Mean-Reversion Filter in Low-VIX Regimes:**
+   * When India VIX < 11.5, morning breakouts between 10:15 and 11:15 have a high failure rate due to lack of volume follow-through.
+
+---
 *(Next trading day entry will be appended below)*
