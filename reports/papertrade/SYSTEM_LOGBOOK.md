@@ -232,4 +232,52 @@
    * When India VIX < 11.5, morning breakouts between 10:15 and 11:15 have a high failure rate due to lack of volume follow-through.
 
 ---
+
+## 📅 Entry 6: Tuesday, September 1, 2026
+
+### 1. Market Context & Macro Regime
+* **India VIX:** 11.19 (Low-volatility consolidation regime).
+* **Expiry Day:** NIFTY 50 & NIFTY MIDCAP SELECT weekly expiry session (0DTE).
+* **Price Action Dynamics:**
+  * **Morning (09:15 - 11:30 AM):** Flat range consolidation within a tight range; early 9:45 AM PE breakout attempt quickly stalled.
+  * **Midday - Afternoon (11:30 - 15:15 PM):** Pure horizontal consolidation with heavy Theta decay across all weekly CE/PE strikes.
+
+---
+
+### 2. Full-Day Trade Performance & Forensic Breakdown
+* **Total Trades Recorded:** 6 trades
+* **Total Realized Net P&L:** **🟢 +₹6,877.22 (STRONG PROFITABLE SESSION)**
+* **Overall Win Rate:** **83.3% (5 Wins / 1 Loss)**
+
+#### Trade Log:
+| Trade ID | Symbol | Contract Traded | Strategy | Entry $\rightarrow$ Exit Price | Net P&L | Return % | Reason |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `PAPER-783225` | **NIFTY 50** | `NIFTY01SEP2624000PE` | Expiry FastTrigger | ₹25.75 $\rightarrow$ ₹21.89 | -₹251.21 | -15.0% | automated square_off / SL |
+| `PAPER-EEE29A` | **NIFTY 50** | `24050CE / 24200CE` | Hedged Credit Spread | ₹23.55 $\rightarrow$ ₹35.33 | **+₹765.32** | **+50.0%** | square_off (Max Decay) |
+| `PAPER-042027` | **NIFTY 50** | `24100CE / 24250CE` | Hedged Credit Spread | ₹22.50 $\rightarrow$ ₹33.75 | **+₹730.88** | **+50.0%** | square_off (Max Decay) |
+| `PAPER-A333DF` | **NIFTY 50** | `24100CE / 24250CE` | Hedged Credit Spread | ₹24.05 $\rightarrow$ ₹36.08 | **+₹781.56** | **+50.0%** | square_off (Max Decay) |
+| `PAPER-DFD33B` | **NIFTY BANK** | `57500CE / 57800CE` | Hedged Credit Spread | ₹162.35 $\rightarrow$ ₹243.52 | **+₹2,433.88** | **+50.0%** | square_off (Max Decay) |
+| `PAPER-365014` | **NIFTY BANK** | `57600CE / 57900CE` | Hedged Credit Spread | ₹161.20 $\rightarrow$ ₹241.80 | **+₹2,416.79** | **+50.0%** | square_off (Max Decay) |
+
+#### Performance by Strategy:
+| Strategy | Trades | Win Rate | Gross Profit | Gross Loss | Net Realized P&L | Key Observation |
+| :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **Hedged Credit Spreads (Selling)** | 5 | **100.0% (5W / 0L)** | **+₹7,128.43** | ₹0.00 | <font color="#22c55e">**+₹7,128.43**</font> | Flawless 50% target Theta capture across NIFTY and BankNifty. |
+| **Expiry FastTrigger (Buying)** | 1 | **0.0% (0W / 1L)** | ₹0.00 | -₹251.21 | <font color="#ef4444">**-₹251.21**</font> | Morning breakout stalled in low-VIX chop; exited at -15% SL. |
+| **Total Combined Portfolio** | **6** | **83.3%** | **+₹7,128.43** | **-₹251.21** | <font color="#22c55e">**+₹6,877.22**</font> | **Barbell Strategy delivered exceptional net gains.** |
+
+---
+
+### 3. Quantitative Insights: Why Do Rank #1 Option Buying Setups Get Stopped Out?
+1. **Rank #1 Measures Technical Confluence, Not Macro Follow-Through:**
+   * A Rank #1 signal indicates 100% technical indicator alignment at that specific candle (ORB Breakdown + Below VWAP + SuperTrend Bearish + EMA Cross).
+   * However, in an **ultra-low volatility regime (India VIX < 11.5)**, the market lacks institutional expansion volume. Breakouts frequently travel only 15-20 points before encountering counter-trend mean-reversion.
+2. **Theta Bleed vs Theta Harvest:**
+   * When a breakout stalls in low VIX:
+     * The **Option Buyer** suffers Theta bleed and IV crush, triggering the tight $-15\%$ stop-loss.
+     * The **Option Seller (Credit Spreads)** captures the decay, generating **100% win rates (+₹7,128 today, +₹15,610 over last 3 sessions)**.
+3. **Cumulative Credit Spread Record (Last 3 Sessions):**
+   * Wednesday (8W/0L: +₹11,199) + Friday (2W/0L: +₹4,411) + Tuesday (5W/0L: +₹7,128) = **15 Trades, 15 Wins (100% Win Rate), +₹22,738.97 Total Realized Profit**.
+
+---
 *(Next trading day entry will be appended below)*
