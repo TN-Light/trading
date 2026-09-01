@@ -178,14 +178,20 @@ class PositionTracker:
 
         costs = self.cost_model.cost_for_notional(pos.entry_price * pos.quantity) \
               + self.cost_model.cost_for_notional(exit_price * pos.quantity)
-        # Every option position in this subsystem is LONG THE PREMIUM (bought
-        # CE for bullish, bought PE for bearish). PnL is symmetric in both
-        # cases: profit when premium rallies, loss when premium falls. The
-        # old code branched on `Direction.SHORT` to flip the math — wrong,
-        # because SHORT here means "bearish underlying view" not "short the
-        # option". (Fix 2026-07-18: previously bearish-PE trades had their
-        # PnL sign inverted — winners booked as losses and vice versa.)
-        gross = (exit_price - pos.entry_price) * pos.quantity
+        
+        is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
+        if is_spread:
+            # For Credit Spreads (Option Selling):
+            # entry_price is the net credit collected at entry.
+            # exit_price is the cost to buy back / close the spread.
+            # Realized PnL = (entry_credit - exit_cost) * quantity
+            gross = (pos.entry_price - exit_price) * pos.quantity
+        else:
+            # Standard single-leg option buying:
+            # Every option position in this subsystem is LONG THE PREMIUM (bought
+            # CE for bullish, bought PE for bearish). PnL is symmetric in both
+            # cases: profit when premium rallies, loss when premium falls.
+            gross = (exit_price - pos.entry_price) * pos.quantity
         net = gross - costs
         notional_in = pos.entry_price * pos.quantity
         ret_pct = (net / notional_in * 100.0) if notional_in > 0 else 0.0
@@ -401,20 +407,43 @@ class PositionTracker:
         """
         sl = pos.stop_loss
         tgt = pos.target
+        is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
+
         # Look up the real option LTP. Failures are non-fatal — we'll fall
         # through to session_end / square_off below.
-        try:
-            ltp = self.fill_sim.feed.get_ltp(pos.instrument)
-        except Exception:
-            ltp = 0.0
+        ltp = 0.0
+        if is_spread and "/" in pos.instrument:
+            parts = pos.instrument.split("/")
+            if len(parts) == 2:
+                try:
+                    s_ltp = float(self.fill_sim.feed.get_ltp(parts[0].strip()) or 0.0)
+                    l_ltp = float(self.fill_sim.feed.get_ltp(parts[1].strip()) or 0.0)
+                    if s_ltp > 0 or l_ltp > 0:
+                        ltp = round(max(0.0, s_ltp - l_ltp), 2)
+                except Exception:
+                    ltp = 0.0
+        else:
+            try:
+                ltp = self.fill_sim.feed.get_ltp(pos.instrument)
+            except Exception:
+                ltp = 0.0
         ltp = float(ltp or 0.0)
 
         if ltp > 0:
-            # We have a real LTP for the option. Evaluate SL/target with it.
-            if ltp <= sl:
-                return sl, ExitReason.STOP_LOSS
-            if ltp >= tgt:
-                return ltp, ExitReason.TARGET
+            if is_spread:
+                # For credit spreads (selling):
+                # Target decay: spread price fell to or below target (e.g. <= 50% or 30% of entry credit)
+                if tgt > 0 and ltp <= tgt:
+                    return ltp, ExitReason.TARGET
+                # Stop loss: spread price rose to or above stop loss threshold (e.g. >= 1.5x entry credit)
+                if sl > 0 and ltp >= sl:
+                    return ltp, ExitReason.STOP_LOSS
+            else:
+                # We have a real LTP for the option. Evaluate SL/target with it.
+                if sl > 0 and ltp <= sl:
+                    return sl, ExitReason.STOP_LOSS
+                if tgt > 0 and ltp >= tgt:
+                    return ltp, ExitReason.TARGET
         # Otherwise no LTP — skip SL/target evaluation this bar (don't
         # fabricate an exit price from the underlying snapshot).
 

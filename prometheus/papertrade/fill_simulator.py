@@ -114,6 +114,19 @@ class FillSimulator:
                 computed by signal_path); used as the final fallback if no
                 quote and no hint.
         """
+        # Multi-leg spread support (e.g. "SHORT_LEG/LONG_LEG")
+        if "/" in instrument:
+            parts = instrument.split("/")
+            if len(parts) == 2:
+                short_leg, long_leg = parts[0].strip(), parts[1].strip()
+                s_ltp = float(self.feed.get_ltp(short_leg) or 0.0)
+                l_ltp = float(self.feed.get_ltp(long_leg) or 0.0)
+                if s_ltp > 0 or l_ltp > 0:
+                    spread_val = round(max(0.0, s_ltp - l_ltp), 2)
+                    slip = spread_val * self.slippage_bps / 10000.0
+                    fp = round(spread_val + slip if side == "BUY" else max(0.0, spread_val - slip), 2)
+                    return FillResult(fp, "live_spread_2leg")
+
         # Priority 1: live bid/ask (worst-case real-world fill)
         if self.use_bid_ask:
             quote = None
