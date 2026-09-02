@@ -100,7 +100,22 @@ class CreditSpreadStrategy:
             # Market is already trending strongly — skip credit spread
             return None
 
-        # Check SuperTrend & VWAP for slight directional bias
+        # Check VWAP and EMAs for rigorous alignment
+        vwap_df = calculate_vwap(df)
+        if isinstance(vwap_df, pd.DataFrame) and "vwap" in vwap_df.columns:
+            vwap_val = vwap_df["vwap"].iloc[-1]
+        elif isinstance(vwap_df, pd.Series):
+            vwap_val = vwap_df.iloc[-1]
+        else:
+            vwap_val = close
+        vwap = float(vwap_val) if pd.notna(vwap_val) else close
+        
+        ema9_s = df["close"].ewm(span=9, adjust=False).mean()
+        ema21_s = df["close"].ewm(span=21, adjust=False).mean()
+        ema9 = float(ema9_s.iloc[-1]) if len(ema9_s) > 0 else close
+        ema21 = float(ema21_s.iloc[-1]) if len(ema21_s) > 0 else close
+
+        # Check SuperTrend
         st_df = calculate_supertrend(df, period=10, multiplier=3.0)
         st_dir = int(st_df["supertrend_direction"].iloc[-1]) if len(st_df) > 0 else 0
 
@@ -111,23 +126,43 @@ class CreditSpreadStrategy:
         expiry_date = get_expiry_date(symbol)
         expiry_str = expiry_date.strftime("%Y-%m-%d") if expiry_date else ""
 
-        # ── 2. Select Spread Type ──
-        midpoint = (today_high + today_low) / 2.0
+        # ── 2. Select Spread Type with Structural Safety & Trend Alignment ──
+        # Bear Call Spread requires: Below VWAP and not in a rapid bullish rebound
+        # Bull Put Spread requires: Above VWAP and not in a rapid bearish collapse
+        is_bearish = (close < vwap) and (ema9 <= ema21)
+        is_bullish = (close > vwap) and (ema9 >= ema21)
         
-        if close >= midpoint or st_dir == -1:
-            # Bear Call Spread (Expect price to stay below short call)
+        # If trend is neutral/choppy within range:
+        if not is_bearish and not is_bullish:
+            midpoint = (today_high + today_low) / 2.0
+            if close >= midpoint or st_dir == -1:
+                is_bearish = True  # Near or above range midpoint -> sell Bear Call Spread above resistance
+            else:
+                is_bullish = True  # Below range midpoint -> sell Bull Put Spread below support
+
+        # Dynamic Strike Buffer (Ensure Short Strike is OUTSIDE day's key level)
+        otm_steps = self.strike_otm_steps
+        
+        if is_bearish:
+            # Bear Call Spread: Place short strike above today's high / resistance
             spread_type = "BEAR_CALL_SPREAD"
-            short_strike = atm_strike + (self.strike_otm_steps * interval)
+            high_strike = get_atm_strike(today_high, symbol) + interval
+            calculated_strike = atm_strike + (otm_steps * interval)
+            short_strike = max(high_strike, calculated_strike)
             long_strike = short_strike + (self.hedge_otm_steps * interval)
             opt_str = "CE"
             action = "SELL_CALL_SPREAD"
-        else:
-            # Bull Put Spread (Expect price to stay above short put)
+        elif is_bullish:
+            # Bull Put Spread: Place short strike below today's low / support
             spread_type = "BULL_PUT_SPREAD"
-            short_strike = atm_strike - (self.strike_otm_steps * interval)
+            low_strike = get_atm_strike(today_low, symbol) - interval
+            calculated_strike = atm_strike - (otm_steps * interval)
+            short_strike = min(low_strike, calculated_strike)
             long_strike = short_strike - (self.hedge_otm_steps * interval)
             opt_str = "PE"
             action = "SELL_PUT_SPREAD"
+        else:
+            return None
 
         # Generate Kite Tradingsymbols
         sym_map = {
