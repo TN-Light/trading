@@ -280,4 +280,41 @@
    * Wednesday (8W/0L: +₹11,199) + Friday (2W/0L: +₹4,411) + Tuesday (5W/0L: +₹7,128) = **15 Trades, 15 Wins (100% Win Rate), +₹22,738.97 Total Realized Profit**.
 
 ---
+
+## 📅 Entry 7: Wednesday, September 2, 2026
+
+### 1. Market Context & Macro Regime
+* **India VIX:** 11.59 (Low-to-moderate volatility regime).
+* **Expiry Day:** Non-expiry session.
+* **Price Action Dynamics:**
+  * **Morning (09:15 - 12:00 PM):** Morning downward drift reaching day's low at 23,834 on NIFTY and 57,013 on BANKNIFTY.
+  * **Midday Bear Call Entries (12:03 - 12:33 PM):** Bear Call Spreads initiated on NIFTY (`23850CE / 24000CE` and `23900CE / 24050CE`).
+  * **Afternoon Trend Squeeze (12:45 - 15:15 PM):** Powerful institutional upward trending rally; NIFTY surged **+80 points** from 23,834 to 23,914 (spiking to 24,124 into the close) and BANKNIFTY surged **+450 points** (57,013 to 57,470).
+  * **Outcome:** The sustained upward breakout breached the short call strikes (`23850` and `23900`), triggering the defined-risk stop-loss (-50% of credit) on all 3 spreads at square-off.
+
+---
+
+### 2. Full-Day Trade Performance & Forensic Breakdown
+* **Total Trades Recorded:** 3 trades
+* **Total Realized Net P&L:** **🔴 -₹6,412.85**
+* **Overall Win Rate:** 0.0% (0 Wins / 3 Losses)
+
+#### Trade Log:
+| Trade ID | Symbol | Contract Traded | Strategy | Entry $\rightarrow$ Exit Price | Net P&L | Return % | Reason |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `PAPER-C41665` | **NIFTY 50** | `23850CE / 24000CE` | Hedged Credit Spread | ₹67.25 $\rightarrow$ ₹100.88 | **-₹2,187.04** | -50.0% | square_off / SL |
+| `PAPER-8A73DE` | **NIFTY 50** | `23900CE / 24050CE` | Hedged Credit Spread | ₹63.45 $\rightarrow$ ₹95.18 | **-₹2,063.48** | -50.0% | square_off / SL |
+| `PAPER-D44444` | **NIFTY 50** | `23900CE / 24050CE` | Hedged Credit Spread | ₹66.50 $\rightarrow$ ₹99.75 | **-₹2,162.33** | -50.0% | square_off / SL |
+
+---
+
+### 3. Critical Quantitative Insights:
+1. **Defined-Risk Stop Loss Worked Perfectly:**
+   * On an aggressive +80-point trend trending against a short call position, naked selling would have generated severe uncapped losses (-₹15,000+).
+   * Because of the **Long Hedge Leg (`24000CE` / `24050CE`)**, total risk was strictly capped at **-₹6,412.85 (-6.4% on ₹100k capital)**.
+2. **Directional Spread Timing Consideration:**
+   * Bear Call Spreads require the market to remain below the short strike. When NIFTY reversed strongly at 12:30 PM from 23,834 and crossed VWAP upwards, initiating Bear Call Spreads after the morning low formed created a headwind against the afternoon momentum.
+   * *Actionable Rule:* Do not initiate Bear Call Spreads if spot price is crossing above the 20-EMA and VWAP on the 15-minute timeframe.
+
+---
 *(Next trading day entry will be appended below)*
