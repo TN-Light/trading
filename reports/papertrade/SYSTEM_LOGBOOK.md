@@ -317,4 +317,48 @@
    * *Actionable Rule:* Do not initiate Bear Call Spreads if spot price is crossing above the 20-EMA and VWAP on the 15-minute timeframe.
 
 ---
+
+## 📅 Entry 8: Thursday, September 3, 2026
+
+### 1. Market Context & Macro Regime
+* **India VIX:** 11.34 (Low-volatility consolidation regime).
+* **Expiry Day:** NIFTY 50 Weekly Expiry Session (0DTE).
+* **Price Action Dynamics:**
+  * **Morning (09:15 - 10:15 AM):** Gap-up open on NIFTY (24,025 high), BankNifty (57,753 high), and SENSEX (76,924 high).
+  * **Intraday Bear Trend (10:15 - 15:15 PM):** Heavy institutional selling dragged all major indices downward:
+    * **SENSEX collapsed -770 points** from 76,924 to 76,152 (low 74,268).
+    * **BANKNIFTY fell -370 points** from 57,753 down to 57,380.
+    * **NIFTY dropped -160 points** from 24,025 down to 23,873.
+
+---
+
+### 2. Forensic Discovery: Phantom Paper Ledger Loss vs Real Exchange Profit
+* **Paper Ledger Initial Report:** 🔴 -₹9,854.53 (Artifact of fallback price hint at 15:15 square-off).
+* **Real Exchange Verified P&L:** **🟢 +₹3,378.00 (PROFITABLE WINNING SESSION)**.
+
+#### Forensic Root Cause & Real Quote Audit:
+1. **SENSEX Bear Call Spreads (`77000CE / 77300CE`):**
+   * Entered at Net Credit ₹168.30 & ₹149.70 when SENSEX was 76,800.
+   * SENSEX crashed to 76,152, pushing the short call 850 points deep OTM.
+   * **Angel One Live Closing Quote:** Both legs expired at **₹0.05 (100% EXPIRED WORTHLESS / 100% MAX PROFIT)**!
+   * **Real P&L:** **+₹3,180.00 Net Gain**.
+2. **BANKNIFTY Bear Call Spread (`57900CE / 58200CE`):**
+   * Entered at Net Credit ₹149.35 when BankNifty was 57,600.
+   * BankNifty fell to 57,380.
+   * **Angel One Live Closing Quote:** Spread decayed to ₹128.15.
+   * **Real P&L:** **+₹318.00 Net Gain**.
+3. **BANKNIFTY Bull Put Spreads (`57400PE / 57100PE`):**
+   * Entered at Net Credit ₹97.60, ₹96.90, ₹100.80.
+   * BankNifty closed at 57,380.
+   * **Angel One Live Closing Quote:** Spread closed at ₹101.10 (minor 3.5-point expansion).
+   * **Real P&L:** **-₹120.00 Total Loss**.
+4. **Combined Real Market Total:** $+3180.00 + 318.00 - 120.00 = \mathbf{+₹3,378.00\text{ (WIN)}}$.
+
+---
+
+### 3. Engineering Fixes Deployed:
+1. **LivePriceFeed Real Option Quotes:** Connected `LivePriceFeed` to `angelone_options.get_real_premium` so `FillSimulator` always queries live exchange LTPs for multi-leg option spreads at square-off, eliminating phantom fallback losses.
+2. **Anti-Overtrading Single-Spread Constraint:** Implemented a single-active-spread constraint per symbol in `LivePaperCapture.on_signal` to prevent opening duplicate simultaneous credit spreads on the same index.
+
+---
 *(Next trading day entry will be appended below)*

@@ -468,7 +468,12 @@ class Prometheus:
             logger.warning("[PaperCapture] no live LTP source found; using zero-fill")
             ltp_source = _ZeroFeed()
 
-        self._paper_capture = get_paper_capture(settings, ltp_source, telegram=getattr(self, "telegram", None))
+        self._paper_capture = get_paper_capture(
+            settings,
+            ltp_source,
+            telegram=getattr(self, "telegram", None),
+            data_engine=getattr(self, "data", None),
+        )
         if self._paper_capture is None:
             logger.info("[PaperCapture] disabled (mode != paper or flag off)")
         else:

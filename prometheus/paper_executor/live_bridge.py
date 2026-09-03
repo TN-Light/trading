@@ -36,22 +36,57 @@ class LivePriceFeed:
     AngelOne fetcher, or the simulated PaperTrader). Both expose
     ``get_ltp(instrument)`` -- we forward to that.
 
-    Pass-through only -- the live engine controls the caching/throttle. We
-    do NOT cache here (the upstream object already does).
+    Falls back to direct Angel One live option quotes when the primary feed
+    does not have the individual option leg in memory.
     """
 
-    def __init__(self, ltp_source: Any):
-        # ``ltp_source`` is anything exposing ``get_ltp(instrument) -> float``.
-        # In production that's ``self.broker`` OR ``self.data.angelone``.
+    def __init__(self, ltp_source: Any, data_engine: Any = None):
         self._ltp = ltp_source
+        self._data_engine = data_engine
 
     def get_ltp(self, instrument: str) -> float:
         try:
             v = self._ltp.get_ltp(instrument)
-            return float(v) if v is not None else 0.0
+            if v is not None and float(v) > 0.0:
+                return float(v)
         except Exception as e:
-            logger.debug(f"LivePriceFeed.get_ltp({instrument}) failed: {e}")
-            return 0.0
+            logger.debug(f"LivePriceFeed.get_ltp({instrument}) failed on primary source: {e}")
+
+        # Real option quote fallback via Angel One
+        if self._data_engine and getattr(self._data_engine, "angelone_options", None):
+            try:
+                sym, strike, opt_type = self._parse_option_instrument(instrument)
+                if sym and strike and opt_type:
+                    q = self._data_engine.angelone_options.get_real_premium(sym, strike, opt_type)
+                    if q and "ltp" in q and q["ltp"] is not None:
+                        return float(q["ltp"])
+            except Exception as e:
+                logger.debug(f"LivePriceFeed option fallback error for {instrument}: {e}")
+
+        return 0.0
+
+    @staticmethod
+    def _parse_option_instrument(ts: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
+        """Extract symbol, strike, and option_type from standard Indian option tradingsymbol."""
+        import re
+        opt_type = "CE" if ts.endswith("CE") else ("PE" if ts.endswith("PE") else None)
+        if not opt_type:
+            return None, None, None
+        
+        sym_map = {
+            "BANKNIFTY": "NIFTY BANK",
+            "MIDCPNIFTY": "NIFTY MIDCAP SELECT",
+            "FINNIFTY": "NIFTY FIN SERVICE",
+            "NIFTY": "NIFTY 50",
+            "SENSEX": "SENSEX",
+        }
+        for prefix, sym in sym_map.items():
+            if ts.startswith(prefix):
+                m = re.search(r'(\d+)(?:CE|PE)$', ts)
+                if m:
+                    strike = int(m.group(1))
+                    return sym, strike, opt_type
+        return None, None, None
 
     def get_quote(self, instrument: str):
         # Bid/ask not always available; the FillSimulator falls back to LTP.
@@ -122,7 +157,7 @@ class LivePaperCapture:
     ``reports/papertrade/live_ledger.sqlite`` for trade history.
     """
 
-    def __init__(self, config: CaptureConfig, ltp_source: Any, telegram: Any = None):
+    def __init__(self, config: CaptureConfig, ltp_source: Any, telegram: Any = None, data_engine: Any = None):
         self.config = config
         self.enabled = bool(config.enabled)
         # Optional telegram forwarder — passed in by Prometheus.init_paper_capture.
@@ -132,6 +167,7 @@ class LivePaperCapture:
         # mutate its state. Paper-capture activity must never interfere with
         # the live dispatch path's use of the same singleton.
         self._telegram = telegram
+        self._data_engine = data_engine
         # Capture every closed trade so we can alert after each process_bar.
         # The wrapped process_bar (below) emits a callback per close.
         self._on_close_listeners = []
@@ -140,7 +176,7 @@ class LivePaperCapture:
         Path(config.csv_path).parent.mkdir(parents=True, exist_ok=True)
         Path(config.sqlite_path).parent.mkdir(parents=True, exist_ok=True)
 
-        self._feed = LivePriceFeed(ltp_source)
+        self._feed = LivePriceFeed(ltp_source, data_engine=data_engine)
         self._recorder = TradeRecorder(
             sqlite_path=config.sqlite_path,
             csv_path=config.csv_path,
@@ -258,6 +294,15 @@ class LivePaperCapture:
         except Exception as e:
             logger.warning(f"[PaperCapture] signal convert failed: {e}")
             return None
+
+        # Anti-Overtrading Guard: Never open concurrent duplicate spreads on the same symbol
+        is_spread = "/" in (notif.instrument or "") or "SPREAD" in getattr(notif, "strategy", "").upper()
+        if is_spread:
+            for open_pos in self._engine.tracker.open_positions.values():
+                if open_pos.symbol == notif.symbol and ("/" in (open_pos.instrument or "") or "SPREAD" in getattr(open_pos, "strategy", "").upper()):
+                    logger.info(f"[PaperCapture] Skipping spread on {notif.symbol} — an active spread is already open ({open_pos.trade_id})")
+                    return None
+
         try:
             trade_id = self._engine.process_new_signal(notif)
             if trade_id:
@@ -639,7 +684,7 @@ def is_paper_capture_enabled(settings: Optional[dict] = None) -> bool:
     return bool((settings.get("paper_capture", {}) or {}).get("enabled", False))
 
 
-def get_paper_capture(settings: Optional[dict] = None, ltp_source: Any = None, telegram: Any = None):
+def get_paper_capture(settings: Optional[dict] = None, ltp_source: Any = None, telegram: Any = None, data_engine: Any = None):
     """Factory called from main.py once at startup.
 
     Returns a LivePaperCapture if enabled, else None.
@@ -652,6 +697,7 @@ def get_paper_capture(settings: Optional[dict] = None, ltp_source: Any = None, t
             ``send_message``, ``alert_order_placed``, ``alert_target_hit``,
             ``alert_stop_loss_hit``, ``alert_trade_closed``). If None,
             telegram alerts are silently skipped.
+        data_engine: optional DataEngine instance with AngelOneOptionChain for real option quotes.
     """
     if not is_paper_capture_enabled(settings):
         return None
@@ -659,4 +705,5 @@ def get_paper_capture(settings: Optional[dict] = None, ltp_source: Any = None, t
         CaptureConfig.from_settings(settings),
         ltp_source,
         telegram=telegram,
+        data_engine=data_engine,
     )
