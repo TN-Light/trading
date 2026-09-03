@@ -47,17 +47,46 @@ DEFAULT_SESSION_CLOSE_TIME = time(15, 30)
 
 
 class CostModel:
-    """Simple Zerodha-style options cost model.
-
-    For paper-trade evaluation we apply a flat per-side cost on notional
-    rather than dragging in the full ``ZerodhaCostModel`` — strategy
-    evaluation doesn't benefit from sub-paisa precision, and the cost
-    model's churn would couple us to the production engine.
+    """Zerodha-calibrated options cost model with realistic statutory taxes & fees.
+    
+    Itemized charges modeled:
+    - Brokerage: Rs 20 per executed order (Rs 40 roundtrip for single-leg, Rs 80 for 2-leg spread)
+    - STT: 0.10% on Sell premium turnover (revised Union budget rate)
+    - Exchange Transaction Charges: 0.053% on Buy + Sell turnover (NSE/BSE options)
+    - GST: 18% on (Brokerage + Txn charges + SEBI charges)
+    - SEBI Turnover Fee: Rs 10 per crore
+    - Stamp Duty: 0.003% on Buy side
+    - Conservative Safety Multiplier: 1.25x (+25% extra cost padding for competitive edge)
     """
 
-    def __init__(self, cost_per_side_bps: float = 1.0):
-        # 1 bps = 0.01% per side; STT + brokerage + GST + stamp duty approx
+    def __init__(self, cost_per_side_bps: float = 1.0, conservative_multiplier: float = 1.25):
         self.cost_per_side_bps = float(cost_per_side_bps)
+        self.conservative_multiplier = float(conservative_multiplier)
+
+    def calculate_trade_cost(self, entry_notional: float, exit_notional: float, is_spread: bool = False) -> float:
+        """Calculate complete Zerodha round-trip fees + statutory taxes with conservative buffer."""
+        if self.cost_per_side_bps == 0.0:
+            return 0.0
+
+        # Orders executed: single leg = 2 orders (buy+sell), spread = 4 orders (2 legs in, 2 legs out)
+        num_orders = 4 if is_spread else 2
+        brokerage = num_orders * 20.0
+        
+        # STT is charged on the sell side turnover
+        sell_turnover = entry_notional if is_spread else exit_notional
+        buy_turnover = exit_notional if is_spread else entry_notional
+        
+        stt = sell_turnover * 0.0010  # 0.10% on sell turnover
+        txn_charges = (buy_turnover + sell_turnover) * 0.00053  # 0.053% NSE exchange fee
+        sebi_charges = (buy_turnover + sell_turnover) * 0.000001  # Rs 10 per crore
+        stamp_duty = buy_turnover * 0.00003  # 0.003% on buy side
+        
+        gst = (brokerage + txn_charges + sebi_charges) * 0.18  # 18% GST
+        
+        base_cost = brokerage + stt + txn_charges + gst + sebi_charges + stamp_duty
+        # Apply conservative safety padding (+25%) so paper/backtest performance is strictly harder than live
+        total_padded_cost = base_cost * self.conservative_multiplier
+        return round(total_padded_cost, 2)
 
     def cost_for_notional(self, notional: float) -> float:
         return notional * self.cost_per_side_bps / 10000.0
@@ -174,12 +203,17 @@ class PositionTracker:
                 )
                 self.open_positions[trade_id] = pos
                 return None
-            exit_price = fill.fill_price
-
-        costs = self.cost_model.cost_for_notional(pos.entry_price * pos.quantity) \
-              + self.cost_model.cost_for_notional(exit_price * pos.quantity)
-        
         is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
+        if hasattr(self.cost_model, "calculate_trade_cost"):
+            costs = self.cost_model.calculate_trade_cost(
+                entry_notional=pos.entry_price * pos.quantity,
+                exit_notional=exit_price * pos.quantity,
+                is_spread=is_spread,
+            )
+        else:
+            costs = self.cost_model.cost_for_notional(pos.entry_price * pos.quantity) \
+                  + self.cost_model.cost_for_notional(exit_price * pos.quantity)
+        
         if is_spread:
             # For Credit Spreads (Option Selling):
             # entry_price is the net credit collected at entry.
