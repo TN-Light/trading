@@ -265,8 +265,14 @@ class CreditSpreadStrategy:
             }
         ]
 
-        # Estimated defined-risk margin (~₹35,000 for NIFTY, ~₹45,000 for BANKNIFTY)
-        margin_required = max_loss + 10000.0
+        # Realistic NSE/BSE SPAN + Exposure Margin for hedged spreads
+        # Scaled by strike gap, lot size, and exchange base requirement
+        if "BANK" in symbol:
+            margin_required = 22000.0 + (strike_width * lot_size * 1.5)
+        elif "SENSEX" in symbol:
+            margin_required = 15000.0 + (strike_width * lot_size * 1.2)
+        else:  # NIFTY 50 / FINNIFTY
+            margin_required = 18000.0 + (strike_width * lot_size * 1.8)
 
         return {
             "strategy": "Hedged_Credit_Spread",
