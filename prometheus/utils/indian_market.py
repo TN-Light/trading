@@ -72,7 +72,7 @@ WEEKLY_EXPIRY_DAYS = {
     "NIFTY 50": "Thursday",       # Legacy default; date-aware override applied below
     "NIFTY BANK": "Wednesday",    # Legacy default; date-aware override applied below
     "NIFTY FIN SERVICE": "Tuesday",  # Legacy/default
-    "SENSEX": "Friday",           # BSE SENSEX weekly options expire on Friday
+    "SENSEX": "Thursday",         # BSE SENSEX weekly options expire on Thursday
     "BANKEX": "Monday",           # BSE BANKEX weekly options expire on Monday
     "NIFTY": "Thursday",
     "BANKNIFTY": "Wednesday",
