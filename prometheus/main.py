@@ -4813,6 +4813,13 @@ class Prometheus:
                 if hasattr(self, "position_monitor") and self.position_monitor:
                     for s in self.position_monitor.get_positions().values():
                         active_pos_symbols.add(s.symbol)
+                if getattr(self, "paper_capture", None) and hasattr(self.paper_capture, "open_positions_view"):
+                    try:
+                        for p_pos in self.paper_capture.open_positions_view():
+                            if hasattr(p_pos, "symbol") and p_pos.symbol:
+                                active_pos_symbols.add(p_pos.symbol)
+                    except Exception:
+                        pass
 
                 # 1. Collect all candidates across all instruments
                 candidates = []

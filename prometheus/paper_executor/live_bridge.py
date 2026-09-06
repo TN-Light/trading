@@ -55,6 +55,22 @@ class LivePriceFeed:
         # Real option quote fallback via Angel One
         if self._data_engine and getattr(self._data_engine, "angelone_options", None):
             try:
+                # Handle 2-leg credit spreads (e.g. NIFTY2690824000CE/NIFTY2690824150CE)
+                if "/" in instrument:
+                    legs = [l.strip() for l in instrument.split("/") if l.strip()]
+                    if len(legs) == 2:
+                        sym1, strike1, opt1 = self._parse_option_instrument(legs[0])
+                        sym2, strike2, opt2 = self._parse_option_instrument(legs[1])
+                        if sym1 and strike1 and opt1 and sym2 and strike2 and opt2:
+                            q1 = self._data_engine.angelone_options.get_real_premium(sym1, strike1, opt1)
+                            q2 = self._data_engine.angelone_options.get_real_premium(sym2, strike2, opt2)
+                            if q1 and "ltp" in q1 and q2 and "ltp" in q2:
+                                ltp1 = float(q1.get("ltp", 0.0) or 0.0)
+                                ltp2 = float(q2.get("ltp", 0.0) or 0.0)
+                                spread_val = max(0.05, ltp1 - ltp2)
+                                return spread_val
+
+                # Single-leg option quote
                 sym, strike, opt_type = self._parse_option_instrument(instrument)
                 if sym and strike and opt_type:
                     q = self._data_engine.angelone_options.get_real_premium(sym, strike, opt_type)
@@ -65,9 +81,16 @@ class LivePriceFeed:
 
         return 0.0
 
-    @staticmethod
-    def _parse_option_instrument(ts: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
+    def _parse_option_instrument(self, ts: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
         """Extract symbol, strike, and option_type from standard Indian option tradingsymbol."""
+        ao = getattr(self._data_engine, "angelone_options", None) if self._data_engine else None
+        if ao and hasattr(ao, "UNDERLYING_MAP") and hasattr(ao, "_parse_tradingsymbol"):
+            for sym_key, underlying in ao.UNDERLYING_MAP.items():
+                if ts.startswith(underlying):
+                    parsed = ao._parse_tradingsymbol(ts, underlying)
+                    if parsed and "strike" in parsed and "option_type" in parsed:
+                        return sym_key, int(parsed["strike"]), parsed["option_type"]
+
         import re
         opt_type = "CE" if ts.endswith("CE") else ("PE" if ts.endswith("PE") else None)
         if not opt_type:
@@ -295,12 +318,18 @@ class LivePaperCapture:
             logger.warning(f"[PaperCapture] signal convert failed: {e}")
             return None
 
-        # Anti-Overtrading Guard: Never open concurrent duplicate spreads on the same symbol
+        # Anti-Overtrading Guard: Never open concurrent duplicate positions on the same symbol
         is_spread = "/" in (notif.instrument or "") or "SPREAD" in getattr(notif, "strategy", "").upper()
-        if is_spread:
-            for open_pos in self._engine.tracker.open_positions.values():
-                if open_pos.symbol == notif.symbol and ("/" in (open_pos.instrument or "") or "SPREAD" in getattr(open_pos, "strategy", "").upper()):
+        for open_pos in self._engine.tracker.open_positions.values():
+            if open_pos.symbol == notif.symbol:
+                if is_spread and ("/" in (open_pos.instrument or "") or "SPREAD" in getattr(open_pos, "strategy", "").upper()):
                     logger.info(f"[PaperCapture] Skipping spread on {notif.symbol} — an active spread is already open ({open_pos.trade_id})")
+                    return None
+                if not is_spread and open_pos.direction == notif.direction:
+                    logger.info(
+                        f"[PaperCapture] Skipping duplicate {notif.direction.value} position on {notif.symbol} — "
+                        f"active trade ({open_pos.trade_id} {open_pos.instrument}) is already open"
+                    )
                     return None
 
         try:

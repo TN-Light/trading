@@ -131,3 +131,45 @@ def test_option_buying_pnl_still_correct():
     assert trade.gross_pnl == 750.0
     assert trade.net_pnl == 750.0
     assert trade.return_pct == 30.0
+
+
+def test_live_price_feed_resolves_spread_and_single_legs():
+    from prometheus.paper_executor.live_bridge import LivePriceFeed
+    
+    mock_data_engine = MagicMock()
+    mock_ao = MagicMock()
+    mock_ao.UNDERLYING_MAP = {"NIFTY 50": "NIFTY", "SENSEX": "SENSEX"}
+    
+    def mock_parse(ts, underlying):
+        if "24000CE" in ts:
+            return {"strike": 24000.0, "option_type": "CE", "expiry_str": "2026-09-08"}
+        if "24150CE" in ts:
+            return {"strike": 24150.0, "option_type": "CE", "expiry_str": "2026-09-08"}
+        if "23950CE" in ts:
+            return {"strike": 23950.0, "option_type": "CE", "expiry_str": "2026-09-08"}
+        return None
+    
+    mock_ao._parse_tradingsymbol = mock_parse
+    
+    def mock_prem(sym, strike, opt_type):
+        if strike == 24000 and opt_type == "CE":
+            return {"ltp": 69.05}
+        if strike == 24150 and opt_type == "CE":
+            return {"ltp": 22.60}
+        if strike == 23950 and opt_type == "CE":
+            return {"ltp": 94.15}
+        return None
+    
+    mock_ao.get_real_premium = mock_prem
+    mock_data_engine.angelone_options = mock_ao
+    
+    feed = LivePriceFeed(ltp_source=MagicMock(get_ltp=lambda x: None), data_engine=mock_data_engine)
+    
+    # 1. Test 2-leg spread LTP calculation (69.05 - 22.60 = 46.45)
+    spread_ltp = feed.get_ltp("NIFTY2690824000CE/NIFTY2690824150CE")
+    assert round(spread_ltp, 2) == 46.45
+    
+    # 2. Test single-leg option LTP
+    single_ltp = feed.get_ltp("NIFTY08SEP2623950CE")
+    assert single_ltp == 94.15
+
