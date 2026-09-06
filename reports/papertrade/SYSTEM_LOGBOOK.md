@@ -373,34 +373,40 @@
 
 ---
 
-### 2. Forensic Trade Performance Breakdown
+### 2. Forensic Trade Performance Breakdown (Verified with Exchange Closes)
 
-#### 🟢 Strategy 1: Hedged Credit Spreads (Option Selling — 100% Win Rate)
-| Trade ID | Symbol | Spread Contract | Direction | Entry Net Credit | 15:15 Exit Price | Realized Net P&L | Return % | Strategic Outcome |
+#### 🟢 Strategy 1: Hedged Credit Spreads (Option Selling)
+*Note: Friday Sep 04 was Day 1 of new weekly cycles (Nifty exp Sep 08, Sensex exp Sep 10). Spreads did NOT expire to ₹0; they experienced modest intraday theta decay.*
+
+| Trade ID | Symbol | Spread Contract | Direction | Entry Net Credit | 15:15 Real Exit Price | Realized Net P&L | Return % | Strategic Outcome |
 | :--- | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
-| `PAPER-E70F62` | **NIFTY 50** | `24000CE / 24150CE` | Bear Call Spread | ₹59.40 | ₹0.00 | **+₹3,735.15** | **+96.7%** | NIFTY closed at 23,897 (102 pts below short strike). Full decay achieved! |
-| `PAPER-6BE2E6` | **SENSEX** | `76900CE / 77200CE` | Bear Call Spread | ₹147.25 | ₹0.00 | **+₹2,821.01** | **+95.8%** | SENSEX closed at 76,515 (385 pts below short strike). Full decay achieved! |
-| **Credit Spreads Total** | | | | | | <font color="#22c55e">**+₹6,556.16**</font> | **+96.3%** | **2 Trades / 2 Wins (100% Win Rate)** |
+| `PAPER-E70F62` | **NIFTY 50** | `24000CE / 24150CE` | Bear Call Spread | ₹59.40 | ₹46.45 (69.05 - 22.60) | **+₹715.90** | **+12.0%** | NIFTY closed at 23,897 (below 24000). Decayed ₹12.95 pts into close. |
+| `PAPER-6BE2E6` | **SENSEX** | `76900CE / 77200CE` | Bear Call Spread | ₹147.25 | ₹120.40 (330.50 - 210.10) | **+₹413.01** | **+14.0%** | SENSEX closed at 76,515 (below 76900). Decayed ₹26.85 pts into close. |
+| **Credit Spreads Total** | | | | | | <font color="#22c55e">**+₹1,128.91**</font> | **+12.8%** | **2 Trades / 2 Wins (Modest Theta Gain)** |
 
-#### 🔴 Strategy 2: Legacy Single-Leg Option Buying (`PriceAction_Momentum`)
-| Trade ID | Symbol | Contract Traded | Entry Price | Paper Sim Exit | Real Exchange Close | Paper Ledger P&L | Real Exchange Net P&L | Note |
-| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| `PAPER-76CDBB` | **NIFTY 50** | `NIFTY 23950 CE` | ₹130.50 | ₹0.00 | **₹94.15** | -₹8,548.46 | **-₹2,428.71** | Afternoon index pullback from 24,005 to 23,897 |
-| `PAPER-E8EECF` | **NIFTY 50** | `NIFTY 23950 CE` | ₹130.40 | ₹0.00 | **₹94.15** | -₹8,541.96 | **-₹2,422.21** | Consecutive momentum buy before reversal |
-| `PAPER-961B8A` | **NIFTY 50** | `NIFTY 24000 CE` | ₹100.75 | ₹0.00 | **₹69.05** | -₹6,613.12 | **-₹2,124.87** | Top-of-range momentum expansion attempt |
-| `PAPER-69DB9F` | **SENSEX** | `SENSEX 76700 PE` | ₹572.17 | ₹560.00 | **₹560.00** | -₹334.59 | **-₹334.59** | Expiry FastTrigger scalp |
+#### 🔴 Strategy 2: Single-Leg Option Buying (`PriceAction_Momentum` & `Expiry_FastTrigger`)
+| Trade ID | Symbol | Contract Traded | Entry Price | Real Exchange Close | Real Gross P&L | Real Net P&L | Note |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| `PAPER-76CDBB` | **NIFTY 50** | `NIFTY 23950 CE` | ₹130.50 | **₹94.15** | -₹2,362.75 | **-₹2,428.71** | Bought at morning breakout; pulled back with index from 24,005 to 23,897 |
+| `PAPER-E8EECF` | **NIFTY 50** | `NIFTY 23950 CE` | ₹130.40 | **₹94.15** | -₹2,356.25 | **-₹2,422.21** | Consecutive momentum buy before afternoon reversal |
+| `PAPER-961B8A` | **NIFTY 50** | `NIFTY 24000 CE` | ₹100.75 | **₹69.05** | -₹2,060.50 | **-₹2,124.87** | Top of range momentum expansion attempt |
+| `PAPER-69DB9F` | **SENSEX** | `SENSEX 76700 PE` | ₹572.17 | **₹560.00** | -₹243.43 | **-₹334.59** | Expiry FastTrigger scalp |
+| **Option Buying Total** | | | | | | <font color="#ef4444">**-₹7,310.38**</font> | **4 Trades / 4 Losses** |
+
+#### 📊 Combined Friday Portfolio Total:
+* **Option Selling (Credit Spreads):** +₹1,128.91
+* **Option Buying:** -₹7,310.38
+* **Actual Net P&L for Friday Sep 04:** **🔴 -₹6,181.47**
 
 ---
 
 ### 3. Quantitative Insights & Forensic Discoveries:
-1. **The Simulation Artifact Explained:**
-   * In the raw SQLite paper trading ledger, single-leg option buys held until 15:15 square-off defaulted to `0.00` in the fallback simulator, artificially displaying a phantom **-₹23,700 loss**.
-   * On the live exchange (Angel One quotes verified), `23950 CE` closed at **₹94.15** and `24000 CE` closed at **₹69.05**.
-2. **Hedged Credit Spreads Completely Dominated (+₹6,556.16 Profit):**
-   * While directional momentum buying suffered when NIFTY pulled back 107 points in the afternoon, **Hedged Credit Spreads capitalized on the exact same price action**, letting both short call spreads decay to absolute maximum profit.
-3. **Weekly Expiry Calendar Discovery:**
-   * SENSEX weekly options in 2026 expire on **Thursday**, not Friday. Friday Sep 4 was Day 1 of the new weekly cycle expiring **Thursday, Sep 10, 2026**.
-   * `WEEKLY_EXPIRY_DAYS["SENSEX"]` is now correctly set to `"Thursday"`.
-4. **SPAN Margin Formula Calibrated:**
+1. **The ₹0.00 Simulation Fallback Root Cause:**
+   * In the paper trading database, `FillSimulator` recorded exit price `0.00` for all open positions at 15:15 square-off.
+   * This artificially inflated credit spread profit (claiming +₹6,556 / 96% return when actual decay was +₹1,128 / 13%), while exaggerating option buying loss (-₹23,700 phantom vs -₹7,310 real).
+2. **Weekly Expiry Distance Impact:**
+   * Because Friday Sep 04 was Day 1 of the new weekly expiry cycles (Sep 08 for Nifty, Sep 10 for Sensex), options maintained significant extrinsic value. The main legs hovered around ₹69 and ₹330 rather than decaying to zero.
+3. **SPAN Margin Formula Upgraded:**
    * Upgraded margin calculation to reflect exact NSE/BSE SPAN margin (~₹36,500 for a 150-pt Nifty spread), ensuring 100% margin transparency.
+
 
