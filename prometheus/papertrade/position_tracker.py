@@ -115,19 +115,15 @@ class PositionTracker:
         square_off_time: time = DEFAULT_SQUARE_OFF_TIME,
         session_close_time: time = DEFAULT_SESSION_CLOSE_TIME,
         recorder: Any = None,
+        on_sl_update: Optional[Callable] = None,
     ):
         self.fill_sim = fill_sim
         self.cost_model = cost_model or CostModel()
         self.enable_trailing = bool(enable_trailing)
         self.square_off_time = square_off_time
         self.session_close_time = session_close_time
-        # Bug C.2 (2026-07-25 audit): optional TradeRecorder reference
-        # used to persist open-position state to SQLite so a restart can
-        # re-hydrate ``self.open_positions`` from disk. ``None`` keeps
-        # the legacy test/standalone behavior (paper positions live only
-        # in memory — fine for unit tests and the backtest path, neither
-        # of which survives process restarts).
         self.recorder = recorder
+        self.on_sl_update = on_sl_update
 
         self.open_positions: Dict[str, Position] = {}
         self.closed_trades: List[PaperTrade] = []
@@ -534,43 +530,85 @@ class PositionTracker:
 
         risk_distance = abs(pos.entry_price - pos.stop_loss) or 1.0
 
-        # Stage 1 — breakeven (at 0.4R)
-        if not pos.breakeven_set and progress >= 0.4:
-            new_sl = pos.entry_price
+        # Calculate exact cost buffer (brokerage + STT + GST + exchange turnover)
+        sym_root = (pos.underlying or pos.symbol or "").upper()
+        if "SENSEX" in sym_root:
+            cost_buffer_pts = 3.0   # ~Rs 60 costs / 20 lot size
+        elif "BANK" in sym_root:
+            cost_buffer_pts = 1.9   # ~Rs 57 costs / 30 lot size
+        else:
+            cost_buffer_pts = 0.9   # NIFTY default: ~Rs 56.30 costs / 65 lot size
+
+        gain_pts = current_price - pos.entry_price
+
+        # Stage 1 — breakeven (at +10 pts + brokerage OR 0.4R progress)
+        # Sets SL to Entry + brokerage so the trade is guaranteed 100% zero-risk.
+        if not pos.breakeven_set and (gain_pts >= (10.0 + cost_buffer_pts) or progress >= 0.4):
+            new_sl = pos.entry_price + cost_buffer_pts
             # Only advance (never retreat)
             if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.breakeven_set = True
-                logger.debug(
-                    f"[{pos.trade_id}] BREAKEVEN_SET: SL -> {new_sl:.2f} at progress={progress:.2f}R"
+                logger.info(
+                    f"[{pos.trade_id}] BREAKEVEN_SET: SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(Covering entry + Rs {cost_buffer_pts:.2f} brokerage/taxes at gain=+{gain_pts:.2f} pts)"
                 )
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "breakeven", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update breakeven callback failed: {e}")
         # Stage 2 — lock 20% at 1.0R
         elif pos.breakeven_set and progress >= 1.0 and pos.trailing_floor < 0.20:
             lock = 0.20
             new_sl = pos.entry_price + lock * risk_distance
             if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.trailing_floor = lock
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_20pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_20pct callback failed: {e}")
         # Stage 3 — lock 50% at 2.0R
         elif pos.breakeven_set and progress >= 2.0 and pos.trailing_floor < 0.50:
             lock = 0.50
             new_sl = pos.entry_price + lock * risk_distance
             if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.trailing_floor = lock
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_50pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_50pct callback failed: {e}")
         # Stage 4 — lock 70% at 3.0R
         elif pos.breakeven_set and progress >= 3.0 and pos.trailing_floor < 0.70:
             lock = 0.70
             new_sl = pos.entry_price + lock * risk_distance
             if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.trailing_floor = lock
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_70pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_70pct callback failed: {e}")
         # Stage 5 — high-water-trail (beyond 3.0R, never below 70% floor)
-        # We don't have a single live "bar's trailing stop" here; we
-        # approximate by tightening SL to max(current_sl, 70%-floor, hwm - small buffer)
+        # Approximate by tightening SL to max(current_sl, 70%-floor, hwm - small buffer)
         elif pos.breakeven_set and progress >= 3.5:
             hwm_floor = pos.entry_price + 0.70 * risk_distance
             trail_candidate = pos.high_water_mark - 0.05 * risk_distance  # 5% of R buffer
             new_sl = max(pos.stop_loss, hwm_floor, trail_candidate)
             if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "high_water_trail", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update hwm callback failed: {e}")

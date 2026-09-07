@@ -221,6 +221,7 @@ class LivePaperCapture:
             cost_model=CostModel(cost_per_side_bps=config.cost_per_side_bps),
             enable_trailing=config.enable_trailing,
             recorder=self._recorder,
+            on_sl_update=self._on_trailing_stop_updated,
         )
         # PaperTradeEngine with high cap + allow_duplicate_instrument=True
         # so EVERY valid signal becomes a paper position (the user's stated
@@ -429,6 +430,33 @@ class LivePaperCapture:
     # -----------------------------------------------------------------
     # Telegram alert helpers (no-ops if no telegram instance wired)
     # -----------------------------------------------------------------
+
+    def _on_trailing_stop_updated(
+        self,
+        pos,
+        old_sl: float,
+        new_sl: float,
+        stage: str,
+        current_price: float,
+        gain_pts: float,
+        cost_buffer_pts: float,
+    ) -> None:
+        """Callback invoked whenever PositionTracker ratchets up the trailing stop."""
+        if self._telegram is None:
+            return
+        try:
+            self._telegram.alert_trailing_stop_updated(
+                symbol=pos.symbol,
+                instrument=pos.instrument,
+                old_sl=old_sl,
+                new_sl=new_sl,
+                stage=stage,
+                current_price=current_price,
+                gain_pts=gain_pts,
+                cost_pts=cost_buffer_pts,
+            )
+        except Exception as e:
+            logger.debug(f"[PaperCapture] alert_trailing_stop_updated failed: {e}")
 
     def _alert_position_opened(self, notif, trade_id: str) -> None:
         # Internal capture logging — main signal alert already sent rank & execution details

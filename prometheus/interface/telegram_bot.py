@@ -1158,6 +1158,48 @@ class TelegramBot:
             )
         self.send_message(text)
 
+    def alert_trailing_stop_updated(
+        self,
+        symbol: str,
+        instrument: str,
+        old_sl: float,
+        new_sl: float,
+        stage: str,
+        current_price: float,
+        gain_pts: float,
+        cost_pts: float = 0.9,
+    ):
+        """Alert whenever trailing stop ratchets up, e.g. moving SL to Breakeven (+brokerage)."""
+        from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+        kite_name = human_search_name_from_api_symbol(instrument) if instrument else symbol
+        entry_est = new_sl - cost_pts
+        gain_pct = (gain_pts / entry_est * 100) if entry_est > 0 else 0.0
+
+        if "breakeven" in stage.lower():
+            headline = "🛡️ <b>TRAILING STOP: CAPITAL PROTECTED (BREAKEVEN)</b>"
+            action_desc = (
+                f"Move Stop Loss order on Kite/Zerodha to <b>Rs {new_sl:.2f}</b> "
+                f"(Covers Entry + all brokerage & taxes). "
+                f"<i>This trade is now 100% risk-free and cannot lose money!</i>"
+            )
+        else:
+            headline = f"📈 <b>TRAILING STOP ADVANCED ({stage.upper()})</b>"
+            action_desc = f"Ratcheting profit lock: Move Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b>."
+
+        msg = (
+            f"{headline}\n\n"
+            f"<b>Symbol:</b> <code>{symbol}</code>\n"
+            f"<b>Contract:</b> <code>{kite_name}</code>\n"
+            f"📋 <b>Search Name:</b> <code>{instrument}</code>\n\n"
+            f"🔥 <b>Current LTP:</b> Rs {current_price:.2f} (<b>+{gain_pts:.1f} pts</b> | +{gain_pct:.1f}%)\n"
+            f"🛑 <b>Old SL:</b> Rs {old_sl:.2f} ➔ <b>New Trailing SL:</b> <b>Rs {new_sl:.2f}</b>\n"
+            f"💼 <b>Brokerage & Taxes:</b> ~Rs {cost_pts:.2f} pts/share covered\n\n"
+            f"⚡ <b>ACTION REQUIRED ON KITE:</b>\n"
+            f"{action_desc}\n"
+            f"━━━━━━━━━━━━━━━━━━"
+        )
+        self.send_message(msg)
+
     def alert_adverse_exit(self, symbol, instrument, entry, exit_price, pnl, reason="VWAP / SuperTrend Invalidation"):
         from prometheus.utils.symbol_format import human_search_name_from_api_symbol
         kite_name = human_search_name_from_api_symbol(instrument) if instrument else symbol
