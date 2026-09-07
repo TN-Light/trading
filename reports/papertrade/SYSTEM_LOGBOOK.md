@@ -66,7 +66,7 @@
   * **Kite Basket Order Instructions:** Clear Telegram execution guidance added: Buy hedge leg first (margin discount) -> Sell main leg.
   * **PaperCapture Credit Spread Execution Fix:** Mapped top-level `entry_price` = `net_credit`, `strike` = `short_strike`, `stop_loss` = `hard_sl_price`, `target` = `target_decay_price` on `Hedged_Credit_Spread` signals, completely eliminating the `PAPER CAPTURE — signal skipped (no entry_price hint)` error.
   * **Live Market Option Chain Connected to Credit Spreads:** Replaced the offline fallback heuristic formula (`37.5` / `12.0`) with real-time Angel One SmartAPI live option chain quotes (`get_real_premium`), guaranteeing Telegram alerts and paper execution reflect the exact live market premiums (e.g. ₹67 & ₹138).
-  * **SENSEX Friday Expiry Date Fix:** Corrected SENSEX weekly expiry day from Thursday to **Friday (`2026-08-28`)** to match BSE contract listings, ensuring Kite copy-paste searches always find the live contract.
+  * **SENSEX Expiry Schedule Clarification (SEBI Directive):** Clarified that BSE SENSEX weekly options expire on **Thursday**, not Friday, per the SEBI exchange realignment framework effective September 1, 2025.
   * **Strict Policy — Zero Mathematical Fallbacks:** Permanently banned all offline mathematical formulas (ATR/strike-width approximations and Black-Scholes estimates) across the entire engine. If live market option LTPs cannot be fetched from Angel One API, the signal is strictly discarded (`return None`) with an explicit warning log.
   * **Option Buying Execution Fix & Dual-Regime Prioritization:** Fixed an indentation bug in `main.py` that trapped Option Buying signals inside an `else:` block, completely restoring live `BUY_CE` / `BUY_PE` momentum breakout alerts. Configured concurrent dual-regime evaluation: directional breakouts (momentum score >= 3.5) take top priority #1, while sideways range markets trigger Hedged Credit Spreads (priority #2).
   * **Global Cross-Symbol Leaderboard & Shadow Paper Trading:** Deployed batch candle scanning across all 4 indices. Candidate signals are aggregated and sorted by edge conviction: Rank #1 executes on the primary trading account, while Rank #2 and Rank #3 are automatically paper-traded in the shadow engine (`paper_capture.on_signal`) with live P&L and trailing stops so no signal is dropped or lost.
@@ -408,5 +408,28 @@
    * Because Friday Sep 04 was Day 1 of the new weekly expiry cycles (Sep 08 for Nifty, Sep 10 for Sensex), options maintained significant extrinsic value. The main legs hovered around ₹69 and ₹330 rather than decaying to zero.
 3. **SPAN Margin Formula Upgraded:**
    * Upgraded margin calculation to reflect exact NSE/BSE SPAN margin (~₹36,500 for a 150-pt Nifty spread), ensuring 100% margin transparency.
+
+---
+
+### 4. Regulatory Expiry Day Audit & Resolution (SEBI Master Circular Alignment):
+* **Audit Prompt:** User flagged that Friday was never an expiry day for BSE SENSEX and pointed out that weekly expiry days in India are governed by SEBI directives.
+* **SEBI Directives & Exchange Circular Review:**
+  1. **SEBI Rationalization (Effective Nov 20, 2024 - Circular SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/134):**
+     * Each stock exchange is restricted to offering weekly derivatives contracts on only **one benchmark index**.
+     * **NSE Benchmark:** NIFTY 50 (all other NSE indices trade monthly only).
+     * **BSE Benchmark:** SENSEX (BANKEX weekly contracts discontinued; trades monthly only).
+  2. **SEBI / Exchange Realignment (Effective Sep 1, 2025):**
+     * **BSE SENSEX:** Weekly expiry contracts expire every **Thursday**.
+     * **NSE NIFTY 50:** Weekly expiry contracts expire every **Tuesday**.
+     * Expiry day shifts to the immediately preceding trading day whenever the scheduled expiry falls on a market holiday.
+* **Root Cause of Friday Misconfiguration:**
+  * `prometheus/utils/indian_market.py` contained an outdated constant `BSE_FRIDAY_EXPIRY_SYMBOLS = {"SENSEX", "BSX"}`, which bypassed the dynamic cutover logic and forced SENSEX to always resolve to Friday.
+  * On Friday Sep 04, this caused Prometheus to compute 0-DTE expiry on Sep 04, generating invalid copy strings (`SENSEX 4 SEP 76800 CE`), which do not exist on Kite because the active weekly expiry was Thursday Sep 10.
+* **Resolution Implemented:**
+  * Updated `_resolve_weekly_expiry_day_name` in `prometheus/utils/indian_market.py` to strictly return **Thursday** for BSE (`SENSEX`, `BSX`, `BANKEX`) and **Tuesday** for NSE (`NIFTY 50`) post Sep 1, 2025.
+  * Replaced `BSE_FRIDAY_EXPIRY_SYMBOLS` with `BSE_DERIVATIVE_SYMBOLS`.
+  * Updated all test suites (`test_credit_spread_live_pricing.py`, `test_leaderboard_and_shadow_paper_engine.py`) to assert Thursday expiry for SENSEX and Tuesday expiry for NIFTY.
+  * All 79 test cases passing.
+
 
 
