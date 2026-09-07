@@ -185,7 +185,7 @@ intraday:
     trailing_be_pts: 10.0
     partial_profit_pct: 0.60
   last_entry_time: '13:00'
-  max_daily_trades: 2
+  max_daily_trades: 99  # No artificial limit: all valid signals fire freely
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
   skip_first_minutes: 15
@@ -437,7 +437,7 @@ risk:
   max_correlated_pct: 50.0
   max_daily_loss: 15000
   max_daily_loss_pct: 30.0
-  max_daily_trades: 10
+  max_daily_trades: 50
   max_open_positions: 6
   max_single_position_pct: 30.0
   max_stop_loss_pct: 50.0
