@@ -431,5 +431,38 @@
   * Updated all test suites (`test_credit_spread_live_pricing.py`, `test_leaderboard_and_shadow_paper_engine.py`) to assert Thursday expiry for SENSEX and Tuesday expiry for NIFTY.
   * All 79 test cases passing.
 
+---
+
+### 5. Monday Sep 07 Forensic Audit, Target Sizing Reality & Real-Time Trailing Telegram Deployment
+* **Intraday Market Reality:**
+  * NIFTY 50 opened at 23,883, broke down to 23,738 by 12:45, staged a sharp +48 pt short squeeze between 13:00 and 14:15, and collapsed back to 23,737 at 15:00 (Close: 23,779, -104 pts).
+  * `NIFTY 23800 PE` entered at ₹62.50, surged to **₹74.90** (+12.4 pts) and **₹78.75** (+16.25 pts), then was crushed to ₹44.65 during the squeeze, hitting SL before rallying back to ₹74.80 into the close.
+* **Why System Targets Were Over-Inflated:**
+  * In `main.py` line 6386-6400, target index move used `(base_target + 1.0) * ATR` for high-score signals (i.e. `3.0 * ATR`).
+  * On a 15m Nifty chart with ATR ~45 pts, this required a **135-point index move**, expecting options to gain **+50 to +65 points**!
+  * Real intraday waves yield **+12 to +20 points** on ATM options. Waiting for +50 pts caused the system to hold through massive gains (+16 pts) and absorb counter-trend shakeouts.
+* **Exact Indian F&O Brokerage & Costs Calculation:**
+  * **NIFTY 50 (1 Lot = 65 Qty @ ₹62.50):**
+    * Brokerage: Flat ₹40.00 (₹20 buy + ₹20 sell)
+    * STT (0.1% on sell): ₹4.06
+    * Exchange Txn Charges (0.05%): ₹4.06
+    * GST (18% on brokerage + txn): ₹7.93
+    * Stamp Duty + SEBI charges: ₹0.24
+    * **Total Roundtrip Cost:** **₹56.29** (~**₹0.87 pts/share**)
+    * **Breakeven SL:** `Entry + 0.87 pts` (₹63.37) guarantees ₹0 net loss.
+    * **Breakeven Trigger (+10 pts + Brokerage):** `Entry + 10.87 pts` (₹73.37).
+  * **SENSEX (1 Lot = 20 Qty):** Total costs ~₹60.00 (~**₹3.00 pts/share**).
+  * **BANKNIFTY (1 Lot = 30 Qty):** Total costs ~₹57.00 (~**₹1.90 pts/share**).
+* **Golden Setup Simulation Results on Today's Data (23800 PE @ ₹62.50):**
+  * **Model 1 (Actual System with High Targets & No Trailing Alert):** Resulted in holding into the squeeze, hitting SL @ ₹53.12 (**-₹665 loss**).
+  * **Model 2 (Breakeven Trailing Triggered at +10 pts + Brokerage):** Breakeven activated at 11:00 AM (High reached ₹73.45). SL moved to ₹63.37. Squeeze exit @ ₹63.37 = **₹0 Net Loss (+0.0%)** (all brokerage covered).
+  * **Model 3 (Partial Booking 60% @ +12 pts, 40% Runner at Cost):** 39 qty booked @ ₹74.50 (+₹468), runner stopped at ₹63.37 (+₹0). **Net Realized Profit: +₹433.09 (+10.66% ROI)**.
+* **Code Implementation Deployed:**
+  * Added `alert_trailing_stop_updated` in `prometheus/interface/telegram_bot.py` with explicit Kite action instructions.
+  * Enhanced `PositionTracker` in `prometheus/papertrade/position_tracker.py` with exact per-symbol brokerage buffers and `on_sl_update` notification hooks.
+  * Wired `live_bridge.py` to push mobile alerts whenever any trade gains `+10 pts + brokerage`.
+  * Added unit test `test_trailing_stop_telegram_alert.py` (all 80 tests passing).
+
+
 
 
