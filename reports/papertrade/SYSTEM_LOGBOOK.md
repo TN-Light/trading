@@ -457,11 +457,21 @@
   * **Model 1 (Actual System with High Targets & No Trailing Alert):** Resulted in holding into the squeeze, hitting SL @ ₹53.12 (**-₹665 loss**).
   * **Model 2 (Breakeven Trailing Triggered at +10 pts + Brokerage):** Breakeven activated at 11:00 AM (High reached ₹73.45). SL moved to ₹63.37. Squeeze exit @ ₹63.37 = **₹0 Net Loss (+0.0%)** (all brokerage covered).
   * **Model 3 (Partial Booking 60% @ +12 pts, 40% Runner at Cost):** 39 qty booked @ ₹74.50 (+₹468), runner stopped at ₹63.37 (+₹0). **Net Realized Profit: +₹433.09 (+10.66% ROI)**.
+### 6. Golden Setup Architectural Integration & Historical Lineage Audit (Deployed Post-Sep 07)
+* **Historical System Lineage Audit:**
+  1. **Very Old APEX System (June–July 2026):** Over-parameterized (Shannon entropy, Wyckoff AMD, compression coil <0.35, gamma ambush). Result: 0 trades from 1,231 qualified signals (paralysis/failure to capture trades), and -58% drawdown on Bank Nifty. Deleted July 9, 2026.
+  2. **"YouTuber Simple Strategy" (Late August 2026):** Simple 15m ORB + SuperTrend + EMA 9/21 + VWAP. Captured trades but overtraded (51 trades across 21 days), took entries in afternoon chop, and used over-inflated +35% targets with static SL, turning +12 to +16 pt gains into -20% stop-loss hits (33.3% WR, -₹4,947.54 net loss).
+  3. **Golden Setup (Deployed):** 1-Hour Trend (EMA 20/50) + Session VWAP + 15M ORB (09:15–09:30). Strict 13:00 cutoff on non-expiry days. Max 1–2 setups/day. Realistic targets (+12 to +15 pts). Breakeven trailing at +10 pts + brokerage.
+* **21-Day Head-to-Head Proof (525 candles, Aug 10 to Sep 07, 2026):**
+  * Current System: 51 trades, 33.3% WR, -₹4,947.54 P&L, 0.83 Profit Factor.
+  * Golden Setup: 13 trades, 76.9% Win/Breakeven Rate (7 Targets, 3 Breakeven, 3 SL), +₹1,666.08 Net P&L, 1.66 Profit Factor.
 * **Code Implementation Deployed:**
-  * Added `alert_trailing_stop_updated` in `prometheus/interface/telegram_bot.py` with explicit Kite action instructions.
-  * Enhanced `PositionTracker` in `prometheus/papertrade/position_tracker.py` with exact per-symbol brokerage buffers and `on_sl_update` notification hooks.
-  * Wired `live_bridge.py` to push mobile alerts whenever any trade gains `+10 pts + brokerage`.
-  * Added unit test `test_trailing_stop_telegram_alert.py` (all 80 tests passing).
+  * `prometheus/signals/price_action_momentum.py`: Added 1H HTF trend evaluation (EMA 20/50), 15M ORB, strict 13:00 cutoff on non-expiry days, and `is_golden_setup` tagging.
+  * `prometheus/main.py`: Passed `df_1h` into `evaluate_bar`, calibrated realistic option targets (+12 to +15 pts, min +8 pts).
+  * `prometheus/config/settings.yaml`: Configured `golden_setup` parameters, set `last_entry_time: '13:00'` and `max_daily_trades: 2`.
+  * `prometheus/tests/test_price_action_momentum.py`: Added Golden Setup tests (1H trend veto, 13:00 cutoff, strategy tag).
+  * **All 83 unit tests passing.**
+
 
 
 

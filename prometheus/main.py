@@ -2014,10 +2014,18 @@ class Prometheus:
                 self._pa_momentum_scanner = PriceActionMomentumScanner()
 
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+            df_1h = None
+            try:
+                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=10)
+            except Exception as e:
+                logger.debug(f"Could not fetch 1H data for {symbol}: {e}")
+
             pa_sig = None
             is_exp = is_weekly_expiry_day(symbol)
             if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
-                pa_sig = self._pa_momentum_scanner.evaluate_bar(intra_df, symbol=symbol, is_expiry_day=is_exp)
+                pa_sig = self._pa_momentum_scanner.evaluate_bar(
+                    intra_df, symbol=symbol, is_expiry_day=is_exp, df_1h=df_1h, golden_mode=True
+                )
 
             # Option C: 5-Minute Expiry Fast-Trigger on active expiry days
             if not pa_sig and is_exp:
@@ -2076,12 +2084,17 @@ class Prometheus:
                             )
                             opt_ltp = 0.0
 
+                        # Realistic Target Sizing (+12 to +15 pts, calibrated to option premium)
+                        target_gain_pts = round(min(opt_ltp * 0.25, max(12.0, opt_ltp * 0.20)), 2)
+                        if target_gain_pts < 8.0:
+                            target_gain_pts = 8.0
+                        tgt_price = round(opt_ltp + target_gain_pts, 2)
                         sl_price = round(max(1.0, opt_ltp * 0.85), 2)  # -15% tight risk bracket
-                        tgt_price = round(opt_ltp * 1.22, 2)            # +22% quick scalp target
                         pa_sig["low_vix_mode"] = True
                     else:
-                        sl_price = round(max(1.0, opt_ltp * 0.80), 2)  # -20% normal risk bracket
-                        tgt_price = round(opt_ltp * 1.35, 2)            # +35% normal target
+                        target_gain_pts = round(min(opt_ltp * 0.28, max(14.0, opt_ltp * 0.22)), 2)
+                        tgt_price = round(opt_ltp + target_gain_pts, 2)
+                        sl_price = round(max(1.0, opt_ltp * 0.82), 2)  # -18% risk bracket
                         pa_sig["low_vix_mode"] = False
 
                     # 2. Max Nominal Premium Exposure Cap (Rs 15,000 max lot cost)

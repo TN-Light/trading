@@ -175,8 +175,17 @@ intraday:
   - NIFTY BANK
   - SENSEX
   - NIFTY MIDCAP SELECT
-  last_entry_time: '14:30'
-  max_daily_trades: 3
+  golden_setup:
+    enabled: true
+    htf_interval: '60minute'
+    orb_end_time: '09:30'
+    entry_cutoff_time: '12:30'
+    hard_cutoff_time: '13:00'
+    target_pts: 14.0
+    trailing_be_pts: 10.0
+    partial_profit_pct: 0.60
+  last_entry_time: '13:00'
+  max_daily_trades: 2
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
   skip_first_minutes: 15

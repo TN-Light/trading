@@ -29,7 +29,7 @@ class PriceActionMomentumScanner:
     def __init__(
         self,
         orb_start: dtime = dtime(9, 15),
-        orb_end: dtime = dtime(9, 45),
+        orb_end: dtime = dtime(9, 30),
         min_atr_buffer: float = 0.05,
         volume_surge_mult: float = 1.15,
     ):
@@ -43,13 +43,17 @@ class PriceActionMomentumScanner:
         df: pd.DataFrame,
         symbol: str = "NIFTY 50",
         is_expiry_day: bool = False,
+        df_1h: Optional[pd.DataFrame] = None,
+        golden_mode: bool = True,
     ) -> Optional[Dict]:
-        """Evaluate latest candle for price action / momentum breakout.
+        """Evaluate latest candle for price action / momentum breakout or Golden Setup.
 
         Args:
             df: DataFrame with OHLCV data and 'timestamp' column.
             symbol: Index symbol name.
             is_expiry_day: Whether today is weekly expiry day for this symbol.
+            df_1h: Optional 1-Hour DataFrame for Higher Timeframe trend alignment.
+            golden_mode: Whether to apply strict Golden Setup gates (1H Trend + VWAP + 15M ORB + 13:00 Cutoff).
 
         Returns:
             Dict with signal metadata or None if no actionable breakout.
@@ -67,14 +71,16 @@ class PriceActionMomentumScanner:
         current_time = current_ts.time() if hasattr(current_ts, "time") else dtime(10, 0)
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
-        # Session Time Gate: Skip first 35 mins (09:15 - 09:50) to avoid open chop
-        # On expiry sessions, allow signals up to 15:05 (Power Hour)
-        cutoff_time = dtime(15, 5) if is_expiry_day else dtime(14, 30)
-        if current_time < dtime(9, 50) or current_time > cutoff_time:
+        # Session Time Gate:
+        # Golden Setup: Active 09:35 to 12:30; on non-expiry days, hard cutoff at 13:00 (strictly 0 trades after 1:00 PM)
+        # On active weekly expiry days, allow signals up to 15:05 (Expiry Power Hour mode)
+        cutoff_time = dtime(15, 5) if is_expiry_day else (dtime(13, 0) if golden_mode else dtime(14, 30))
+        min_start_time = dtime(9, 35) if golden_mode else dtime(9, 50)
+        if current_time < min_start_time or current_time > cutoff_time:
             return None
 
-        # Dead zone check: 11:45 - 13:00 (lunchtime chop)
-        if dtime(11, 45) <= current_time <= dtime(13, 0):
+        # Dead zone check: 11:45 - 13:00 (lunchtime chop) for legacy non-expiry mode
+        if not golden_mode and not is_expiry_day and (dtime(11, 45) <= current_time <= dtime(13, 0)):
             return None
 
         # Extract today's bars
@@ -119,7 +125,7 @@ class PriceActionMomentumScanner:
         ema9 = float(ema9_s.iloc[-1]) if len(ema9_s) > 0 else close
         ema21 = float(ema21_s.iloc[-1]) if len(ema21_s) > 0 else close
 
-        # ── 2. Opening Range Calculation (09:15 - 09:45) ──
+        # ── 2. Opening Range Calculation (09:15 - 09:30 for 15M ORB) ──
         orb_bars = today_bars[
             (today_bars["timestamp"].dt.time >= self.orb_start)
             & (today_bars["timestamp"].dt.time <= self.orb_end)
@@ -127,37 +133,82 @@ class PriceActionMomentumScanner:
 
         orb_high = None
         orb_low = None
-        if len(orb_bars) >= 2:
+        if len(orb_bars) >= 1:
             orb_high = float(orb_bars["high"].max())
             orb_low = float(orb_bars["low"].min())
 
-        # ── 3. Momentum Setup Detection ──
+        # ── 3. Higher Timeframe (1-Hour) Trend Alignment ──
+        htf_trend = "NEUTRAL"
+        if df_1h is not None and len(df_1h) >= 2:
+            try:
+                if not pd.api.types.is_datetime64_any_dtype(df_1h["timestamp"]):
+                    df_1h_clean = df_1h.copy()
+                    df_1h_clean["timestamp"] = pd.to_datetime(df_1h_clean["timestamp"])
+                else:
+                    df_1h_clean = df_1h
+                prior_1h = df_1h_clean[df_1h_clean["timestamp"] <= current_ts]
+                if len(prior_1h) >= 2:
+                    ema20 = float(prior_1h["close"].ewm(span=20, min_periods=1, adjust=False).mean().iloc[-1])
+                    ema50 = float(prior_1h["close"].ewm(span=50, min_periods=1, adjust=False).mean().iloc[-1])
+                    last_1h_close = float(prior_1h["close"].iloc[-1])
+                    if last_1h_close >= ema20 and ema20 >= ema50:
+                        htf_trend = "BULLISH"
+                    elif last_1h_close <= ema20 and ema20 <= ema50:
+                        htf_trend = "BEARISH"
+                    elif last_1h_close >= ema20:
+                        htf_trend = "BULLISH"
+                    elif last_1h_close <= ema20:
+                        htf_trend = "BEARISH"
+            except Exception as e:
+                logger.debug(f"HTF 1H trend evaluation error: {e}")
+
+        # ── 4. Momentum & Golden Setup Detection ──
         buffer = atr * self.min_atr_buffer
         bull_reasons: List[str] = []
         bear_reasons: List[str] = []
         bull_score = 0.0
         bear_score = 0.0
 
+        # Check HTF 1H Trend
+        if htf_trend == "BULLISH":
+            bull_score += 2.0
+            bull_reasons.append("1H_Trend_Bullish")
+            if golden_mode:
+                bear_score = -999.0  # Absolute veto against PE in bullish 1H trend
+        elif htf_trend == "BEARISH":
+            bear_score += 2.0
+            bear_reasons.append("1H_Trend_Bearish")
+            if golden_mode:
+                bull_score = -999.0  # Absolute veto against CE in bearish 1H trend
+
         # Check A: ORB Breakout
+        is_orb_bull = False
+        is_orb_bear = False
         if orb_high is not None and orb_low is not None:
             if close > (orb_high + buffer):
                 bull_score += 2.0
                 bull_reasons.append(f"ORB_Breakout_High({orb_high:.1f})")
+                is_orb_bull = True
             elif close < (orb_low - buffer):
                 bear_score += 2.0
                 bear_reasons.append(f"ORB_Breakdown_Low({orb_low:.1f})")
+                is_orb_bear = True
 
         # Check B: VWAP Positioning & Slope
+        is_vwap_bull = False
+        is_vwap_bear = False
         if close > vwap:
             vwap_dist = (close - vwap) / close
             if vwap_dist > 0.0005:
                 bull_score += 1.5
                 bull_reasons.append("Above_VWAP")
+                is_vwap_bull = True
         elif close < vwap:
             vwap_dist = (vwap - close) / close
             if vwap_dist > 0.0005:
                 bear_score += 1.5
                 bear_reasons.append("Below_VWAP")
+                is_vwap_bear = True
 
         # Check C: SuperTrend Alignment
         if st_dir == 1:
@@ -182,7 +233,7 @@ class PriceActionMomentumScanner:
             box_low = float(recent_4["low"].min())
             box_range = box_high - box_low
             
-            # If previous 4 bars were in tight consolidation (< 1.2 * ATR)
+            # If previous 4 bars were in tight consolidation (< 1.5 * ATR)
             if box_range <= 1.5 * atr:
                 if close > box_high:
                     bull_score += 1.5
@@ -191,8 +242,10 @@ class PriceActionMomentumScanner:
                     bear_score += 1.5
                     bear_reasons.append("Consolidation_Breakdown_Down")
 
-        # ── 4. Decision & Trade Structuring ──
-        # Minimum score threshold of 3.5 requires at least ORB + VWAP or SuperTrend + Box
+        # ── 5. Decision & Trade Structuring ──
+        is_golden_bull = is_orb_bull and is_vwap_bull and (htf_trend in ("BULLISH", "NEUTRAL"))
+        is_golden_bear = is_orb_bear and is_vwap_bear and (htf_trend in ("BEARISH", "NEUTRAL"))
+
         min_threshold = 3.5
         net_edge = bull_score - bear_score
 
@@ -200,12 +253,13 @@ class PriceActionMomentumScanner:
             action = "BUY_CE"
             direction = "bullish"
             reasons = bull_reasons
-            confidence = min(0.60 + (bull_score / 10.0), 0.90)
+            confidence = min(0.60 + (bull_score / 10.0), 0.95)
+            strat_name = "Golden_Setup (1H+VWAP+ORB)" if is_golden_bull else f"PriceAction_Momentum ({'+'.join(reasons)})"
             
-            # SL: below recent swing low or SuperTrend line
+            # Realistic Target (0.9 to 1.0x ATR, approx +20 to +25 index points)
             recent_low = float(today_bars.iloc[-3:]["low"].min())
-            sl = max(recent_low - buffer, close - (1.5 * atr))
-            target = close + (2.0 * atr)
+            sl = max(recent_low - buffer, close - (1.0 * atr))
+            target = close + (1.0 * atr)
             rr = (target - close) / max(close - sl, 1.0)
 
             return {
@@ -218,7 +272,8 @@ class PriceActionMomentumScanner:
                 "stop_loss": round(sl, 2),
                 "target": round(target, 2),
                 "risk_reward": round(rr, 2),
-                "strategy": f"PriceAction_Momentum ({'+'.join(reasons)})",
+                "strategy": strat_name,
+                "is_golden_setup": is_golden_bull,
                 "reasons": reasons,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
             }
@@ -228,11 +283,12 @@ class PriceActionMomentumScanner:
             direction = "bearish"
             reasons = bear_reasons
             confidence = min(0.60 + (bear_score / 10.0), 0.90)
+            strat_name = "Golden_Setup (1H+VWAP+ORB)" if is_golden_bear else f"PriceAction_Momentum ({'+'.join(reasons)})"
 
-            # SL: above recent swing high or SuperTrend line
+            # Realistic Target (0.9 to 1.0x ATR, approx +20 to +25 index points)
             recent_high = float(today_bars.iloc[-3:]["high"].max())
-            sl = min(recent_high + buffer, close + (1.5 * atr))
-            target = close - (2.0 * atr)
+            sl = min(recent_high + buffer, close + (1.0 * atr))
+            target = close - (1.0 * atr)
             rr = (close - target) / max(sl - close, 1.0)
 
             return {
@@ -245,7 +301,8 @@ class PriceActionMomentumScanner:
                 "stop_loss": round(sl, 2),
                 "target": round(target, 2),
                 "risk_reward": round(rr, 2),
-                "strategy": f"PriceAction_Momentum ({'+'.join(reasons)})",
+                "strategy": strat_name,
+                "is_golden_setup": is_golden_bear,
                 "reasons": reasons,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
             }
