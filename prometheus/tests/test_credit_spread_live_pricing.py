@@ -4,13 +4,32 @@ from datetime import date, datetime
 from prometheus.utils.indian_market import get_expiry_date, _resolve_weekly_expiry_day_name
 from prometheus.strategies.credit_spread import CreditSpreadStrategy
 
-def test_sensex_weekly_expiry_is_friday():
-    today = date(2026, 8, 26)
+def test_sensex_weekly_expiry_is_thursday():
+    # Post Sep 1, 2025: BSE SENSEX weekly expiry is Thursday
+    today = date(2026, 8, 26)  # Wednesday
     day_name = _resolve_weekly_expiry_day_name('SENSEX', today)
-    assert day_name == 'Friday'
+    assert day_name == 'Thursday'
     
     exp_date = get_expiry_date('SENSEX', today)
-    assert exp_date == date(2026, 8, 28)
+    assert exp_date == date(2026, 8, 27)  # Next Thursday
+
+
+def test_regulatory_expiry_schedule_pre_and_post_cutover():
+    # 1. SENSEX: Friday before cutover, Thursday after cutover
+    pre_cutover = date(2025, 6, 18)  # Wednesday
+    assert _resolve_weekly_expiry_day_name('SENSEX', pre_cutover) == 'Friday'
+    assert get_expiry_date('SENSEX', pre_cutover) == date(2025, 6, 20)  # Friday
+
+    post_cutover = date(2026, 9, 2)  # Wednesday
+    assert _resolve_weekly_expiry_day_name('SENSEX', post_cutover) == 'Thursday'
+    assert get_expiry_date('SENSEX', post_cutover) == date(2026, 9, 3)  # Thursday
+
+    # 2. NIFTY: Thursday before cutover, Tuesday after cutover
+    assert _resolve_weekly_expiry_day_name('NIFTY 50', pre_cutover) == 'Thursday'
+    assert get_expiry_date('NIFTY 50', pre_cutover) == date(2025, 6, 19)  # Thursday
+
+    assert _resolve_weekly_expiry_day_name('NIFTY 50', post_cutover) == 'Tuesday'
+    assert get_expiry_date('NIFTY 50', post_cutover) == date(2026, 9, 8)  # Tuesday
 
 def test_credit_spread_uses_live_option_chain_pricing():
     strategy = CreditSpreadStrategy()

@@ -69,24 +69,32 @@ STRIKE_INTERVALS = {
 # Weekly Expiry Days
 # ---------------------------------------------------------------------------
 WEEKLY_EXPIRY_DAYS = {
-    "NIFTY 50": "Thursday",       # Legacy default; date-aware override applied below
-    "NIFTY BANK": "Wednesday",    # Legacy default; date-aware override applied below
-    "NIFTY FIN SERVICE": "Tuesday",  # Legacy/default
-    "SENSEX": "Thursday",         # BSE SENSEX weekly options expire on Thursday
-    "BANKEX": "Monday",           # BSE BANKEX weekly options expire on Monday
-    "NIFTY": "Thursday",
-    "BANKNIFTY": "Wednesday",
+    "NIFTY 50": "Tuesday",        # NSE benchmark index weekly options expire on Tuesday (effective Sep 1, 2025)
+    "NIFTY BANK": "Tuesday",     # Discontinued weekly (trades monthly on Tuesday)
+    "NIFTY FIN SERVICE": "Tuesday",  # Discontinued weekly (trades monthly on Tuesday)
+    "SENSEX": "Thursday",         # BSE SENSEX weekly options expire on Thursday (effective Sep 1, 2025)
+    "BANKEX": "Thursday",         # Discontinued weekly (trades monthly on Thursday)
+    "NIFTY": "Tuesday",
+    "BANKNIFTY": "Tuesday",
     "FINNIFTY": "Tuesday",
 }
 
-# NSE moved index and stock F&O expiries to Tuesday effective Sep 1, 2025.
-NSE_TUESDAY_EXPIRY_CUTOVER = date(2025, 9, 1)
+# Regulatory rationalization cutover effective Sep 1, 2025:
+# - NSE index and stock F&O expiries moved to Tuesday.
+# - BSE SENSEX index derivatives moved to Thursday.
+# - SEBI circular (SEBI/HO/MRD/MRD-PoD-2/P/CIR/2024/134) allows only 1 weekly index per exchange.
+#   Only NIFTY 50 (NSE, Tuesday) and SENSEX (BSE, Thursday) have weekly options.
+#   All other indices (BANKNIFTY, FINNIFTY, MIDCPNIFTY, BANKEX) trade monthly only.
+REGULATORY_EXPIRY_CUTOVER_2025 = date(2025, 9, 1)
+NSE_TUESDAY_EXPIRY_CUTOVER = REGULATORY_EXPIRY_CUTOVER_2025
 
-# BSE derivatives keep Friday/Monday expiry under the split schedule.
-BSE_FRIDAY_EXPIRY_SYMBOLS = {
+BSE_DERIVATIVE_SYMBOLS = {
     "SENSEX",
     "BSX",
+    "BANKEX",
 }
+# Backward compatibility alias
+BSE_FRIDAY_EXPIRY_SYMBOLS = BSE_DERIVATIVE_SYMBOLS
 
 # ---------------------------------------------------------------------------
 # NSE Holidays 2025-2027 (update yearly)
@@ -345,30 +353,54 @@ def _normalize_symbol_alias(symbol: str) -> str:
 def _is_bse_derivative_symbol(symbol: str) -> bool:
     """Identify symbols that follow BSE expiry schedule."""
     normalized = _normalize_symbol_alias(symbol)
-    return normalized in BSE_FRIDAY_EXPIRY_SYMBOLS or normalized == "BANKEX"
+    return normalized in BSE_DERIVATIVE_SYMBOLS
 
 
 def _resolve_weekly_expiry_day_name(symbol: str, on_date: Optional[date] = None) -> str:
-    """Resolve symbol expiry weekday with historical schedule transitions."""
+    """Resolve symbol expiry weekday with historical schedule transitions.
+
+    Regulatory Rules (SEBI):
+    - Effective Sep 1, 2025:
+      * BSE SENSEX weekly options expire on Thursday.
+      * NSE NIFTY 50 weekly options expire on Tuesday.
+      * Non-benchmark indices (BANKNIFTY, FINNIFTY, BANKEX) have no weekly options;
+        their monthly expiry matches exchange standard (Tuesday for NSE, Thursday for BSE).
+    - Prior to Sep 1, 2025:
+      * BSE SENSEX expired on Friday.
+      * BSE BANKEX expired on Monday.
+      * NSE NIFTY 50 expired on Thursday.
+      * NSE BANKNIFTY expired on Wednesday (Thursday before 2023).
+      * NSE FINNIFTY expired on Tuesday.
+    """
     if on_date is None:
         on_date = datetime.now(IST).date()
 
     normalized = _normalize_symbol_alias(symbol)
 
-    if normalized in BSE_FRIDAY_EXPIRY_SYMBOLS:
+    # Post-Sep 1, 2025 SEBI / Exchange realignment:
+    if on_date >= REGULATORY_EXPIRY_CUTOVER_2025:
+        if normalized in ("SENSEX", "BSX", "BANKEX"):
+            return "Thursday"
+        return "Tuesday"
+
+    # Historical schedule (prior to Sep 1, 2025):
+    if normalized in ("SENSEX", "BSX"):
         return "Friday"
     if normalized == "BANKEX":
         return "Monday"
-
-    # Historical BANKNIFTY schedule compatibility used by backtests.
     if normalized == "NIFTY BANK" and on_date.year < 2023:
         return "Thursday"
 
-    # NSE Tuesday standardization from Sep 1, 2025 for NSE index and stock derivatives.
-    if on_date >= NSE_TUESDAY_EXPIRY_CUTOVER:
-        return "Tuesday"
-
-    return WEEKLY_EXPIRY_DAYS.get(normalized, "Thursday")
+    # Default historical for other symbols prior to Sep 1, 2025
+    legacy_map = {
+        "NIFTY 50": "Thursday",
+        "NIFTY": "Thursday",
+        "NIFTY BANK": "Wednesday",
+        "BANKNIFTY": "Wednesday",
+        "NIFTY FIN SERVICE": "Tuesday",
+        "FINNIFTY": "Tuesday",
+    }
+    return legacy_map.get(normalized, "Thursday")
 
 
 def is_weekly_expiry_day(symbol: str, check_date: Optional[date] = None) -> bool:
