@@ -55,15 +55,22 @@ class LivePriceFeed:
         # Real option quote fallback via Angel One
         if self._data_engine and getattr(self._data_engine, "angelone_options", None):
             try:
+                ao = self._data_engine.angelone_options
+                def _fetch_prem(s, k, o, e):
+                    try:
+                        return ao.get_real_premium(s, k, o, expiry=e)
+                    except TypeError:
+                        return ao.get_real_premium(s, k, o)
+
                 # Handle 2-leg credit spreads (e.g. NIFTY2690824000CE/NIFTY2690824150CE)
                 if "/" in instrument:
                     legs = [l.strip() for l in instrument.split("/") if l.strip()]
                     if len(legs) == 2:
-                        sym1, strike1, opt1 = self._parse_option_instrument(legs[0])
-                        sym2, strike2, opt2 = self._parse_option_instrument(legs[1])
+                        sym1, strike1, opt1, exp1 = self._parse_option_instrument(legs[0])
+                        sym2, strike2, opt2, exp2 = self._parse_option_instrument(legs[1])
                         if sym1 and strike1 and opt1 and sym2 and strike2 and opt2:
-                            q1 = self._data_engine.angelone_options.get_real_premium(sym1, strike1, opt1)
-                            q2 = self._data_engine.angelone_options.get_real_premium(sym2, strike2, opt2)
+                            q1 = _fetch_prem(sym1, strike1, opt1, exp1)
+                            q2 = _fetch_prem(sym2, strike2, opt2, exp2)
                             if q1 and "ltp" in q1 and q2 and "ltp" in q2:
                                 ltp1 = float(q1.get("ltp", 0.0) or 0.0)
                                 ltp2 = float(q2.get("ltp", 0.0) or 0.0)
@@ -71,9 +78,9 @@ class LivePriceFeed:
                                 return spread_val
 
                 # Single-leg option quote
-                sym, strike, opt_type = self._parse_option_instrument(instrument)
+                sym, strike, opt_type, exp = self._parse_option_instrument(instrument)
                 if sym and strike and opt_type:
-                    q = self._data_engine.angelone_options.get_real_premium(sym, strike, opt_type)
+                    q = _fetch_prem(sym, strike, opt_type, exp)
                     if q and "ltp" in q and q["ltp"] is not None:
                         return float(q["ltp"])
             except Exception as e:
@@ -81,20 +88,21 @@ class LivePriceFeed:
 
         return 0.0
 
-    def _parse_option_instrument(self, ts: str) -> tuple[Optional[str], Optional[int], Optional[str]]:
-        """Extract symbol, strike, and option_type from standard Indian option tradingsymbol."""
+    def _parse_option_instrument(self, ts: str) -> tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
+        """Extract symbol, strike, option_type, and expiry_str (YYYY-MM-DD) from standard Indian option tradingsymbol."""
         ao = getattr(self._data_engine, "angelone_options", None) if self._data_engine else None
         if ao and hasattr(ao, "UNDERLYING_MAP") and hasattr(ao, "_parse_tradingsymbol"):
             for sym_key, underlying in ao.UNDERLYING_MAP.items():
                 if ts.startswith(underlying):
                     parsed = ao._parse_tradingsymbol(ts, underlying)
                     if parsed and "strike" in parsed and "option_type" in parsed:
-                        return sym_key, int(parsed["strike"]), parsed["option_type"]
+                        return sym_key, int(parsed["strike"]), parsed["option_type"], parsed.get("expiry_str")
 
         import re
+        from datetime import datetime, date
         opt_type = "CE" if ts.endswith("CE") else ("PE" if ts.endswith("PE") else None)
         if not opt_type:
-            return None, None, None
+            return None, None, None, None
         
         sym_map = {
             "BANKNIFTY": "NIFTY BANK",
@@ -105,11 +113,38 @@ class LivePriceFeed:
         }
         for prefix, sym in sym_map.items():
             if ts.startswith(prefix):
-                m = re.search(r'(\d+)(?:CE|PE)$', ts)
+                suffix = ts[len(prefix):-2]
+                month_map = {
+                    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
+                    "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12,
+                }
+                # Kite weekly: e.g. 2691523600 -> YY=26, M=9, DD=15, STRIKE=23600
+                m_week = re.match(r'^(\d{2})([1-9OND])(\d{2})(\d+)$', suffix)
+                if m_week:
+                    yy_str, m_char, dd_str, strike_str = m_week.groups()
+                    try:
+                        exp_dt = date(2000 + int(yy_str), month_map[m_char], int(dd_str))
+                        return sym, int(strike_str), opt_type, exp_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        return sym, int(strike_str), opt_type, None
+
+                # Angel One format: e.g. 15SEP2623600 -> DD=15, MON=SEP, YY=26, STRIKE=23600
+                m_ao = re.match(r'^(\d{2})([A-Z]{3})(\d{2})(\d+)$', suffix)
+                if m_ao:
+                    dd_str, mon_str, yy_str, strike_str = m_ao.groups()
+                    try:
+                        month = datetime.strptime(mon_str, "%b").month
+                        exp_dt = date(2000 + int(yy_str), month, int(dd_str))
+                        return sym, int(strike_str), opt_type, exp_dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        return sym, int(strike_str), opt_type, None
+
+                # Fallback to strike only
+                m = re.search(r'(\d+)$', suffix)
                 if m:
                     strike = int(m.group(1))
-                    return sym, strike, opt_type
-        return None, None, None
+                    return sym, strike, opt_type, None
+        return None, None, None, None
 
     def get_quote(self, instrument: str):
         # Bid/ask not always available; the FillSimulator falls back to LTP.

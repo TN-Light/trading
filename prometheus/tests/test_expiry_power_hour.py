@@ -23,14 +23,13 @@ def test_expiry_power_hour_time_cutoff():
         })
     df = pd.DataFrame(rows)
     
-    # Non-expiry day at 14:45 -> blocked by 14:30 cutoff
+    # Non-expiry day at 14:45 -> blocked by 11:45 cutoff
     sig_non_expiry = scanner.evaluate_bar(df, symbol='NIFTY 50', is_expiry_day=False)
     assert sig_non_expiry is None
     
-    # Expiry day at 14:45 -> allowed by 15:05 cutoff
+    # Expiry day at 14:45 -> strictly blocked by 11:45 cutoff to prevent afternoon theta traps
     sig_expiry = scanner.evaluate_bar(df, symbol='NIFTY 50', is_expiry_day=True)
-    assert sig_expiry is not None
-    assert sig_expiry['action'] == 'BUY_CE'
+    assert sig_expiry is None
 
 def test_5m_expiry_surge_at_1445():
     scanner = PriceActionMomentumScanner()
@@ -51,7 +50,6 @@ def test_5m_expiry_surge_at_1445():
         })
     df_5m = pd.DataFrame(rows)
     
+    # 5m surge at 14:45 PM is strictly blocked by 11:45 cutoff
     sig = scanner.evaluate_5m_expiry_surge(df_5m, symbol='NIFTY 50')
-    assert sig is not None
-    assert sig['action'] == 'BUY_CE'
-    assert sig['fast_expiry_surge'] is True
+    assert sig is None

@@ -229,8 +229,10 @@ class PositionMonitor:
 
                 for pid, state in positions:
                     try:
+                        sym_check = f"{state.tradingsymbol or ''} {state.symbol or ''}".upper()
+                        pos_exchange = "BFO" if ("SENSEX" in sym_check or "BSX" in sym_check or "BANKEX" in sym_check) else "NFO"
                         ltp = self.broker.get_ltp(
-                            state.tradingsymbol, exchange="NFO"
+                            state.tradingsymbol, exchange=pos_exchange
                         )
                         if ltp <= 0:
                             # Track consecutive LTP failures per position
@@ -352,85 +354,30 @@ class PositionMonitor:
         # ratcheted `state.current_sl` regardless of phase. Phase gating
         # now only adds catastrophic-floor protection on top, never
         # relaxes the ratcheted SL.
+        # ── Strict Stop Loss Enforcement (Immediate execution, zero lag, no immunity) ──
+        # Mimics live broker SL order execution: the microsecond price touches or breaches
+        # SL, exit immediately. No holding through SL hits.
         bars_held = state.entry_bar_count
-        if state.current_sl > 0 and state.current_sl > state.initial_sl and current_price <= state.current_sl:
-            # The trailing-stop ratchet has advanced current_sl above the
-            # initial SL (i.e., breakeven trap or higher has engaged).
-            # Honor that ratcheted SL on every tick — do NOT let Phase 1/2
-            # immunity silently disarm it.
-            phase_label = (
-                "phase1_sl_breach" if bars_held <= 3
-                else "phase2_sl_breach" if bars_held <= 5
-                else "stop_loss_premium_phase3"
-            )
+        effective_sl = state.current_sl if state.current_sl > 0 else state.initial_sl
+        if effective_sl > 0 and current_price <= effective_sl:
+            if state.current_sl > state.initial_sl:
+                phase_label = (
+                    "phase1_sl_breach" if bars_held <= 3
+                    else "phase2_sl_breach" if bars_held <= 5
+                    else "stop_loss_premium_phase3"
+                )
+            else:
+                phase_label = "stop_loss_hit"
             logger.warning(
-                f"[MONITOR] {phase_label}: {state.position_id} "
-                f"LTP={current_price:.2f} <= current_sl={state.current_sl:.2f} "
-                f"(initial_sl={state.initial_sl:.2f}, bars_held={bars_held})"
+                f"[MONITOR] SL breach ({phase_label}): {state.position_id} "
+                f"LTP={current_price:.2f} <= SL={effective_sl:.2f} "
+                f"(initial_sl={state.initial_sl:.2f}, current_sl={state.current_sl:.2f}, bars_held={bars_held})"
             )
-            # Sync broker SL up to the ratcheted value before exiting
-            # (in case the broker order was lagging — never lower it).
-            self._modify_broker_sl_manual(state, state.current_sl)
+            # Sync broker SL up to the effective SL value before exiting
+            self._modify_broker_sl_manual(state, effective_sl)
             if self._on_exit:
                 self._on_exit(state.position_id, current_price, phase_label)
             return
-
-        if bars_held <= 3:
-            # Phase 1: Immunity to IV crush / spread widening / stop hunts
-            # But add a catastrophic circuit breaker — if premium drops > 80%,
-            # something is genuinely wrong (not just noise).
-            catastrophic_floor = entry * 0.20
-            if current_price <= catastrophic_floor:
-                logger.warning(
-                    f"[MONITOR] Phase 1 CATASTROPHIC exit: {state.position_id} "
-                    f"LTP={current_price:.2f} <= 20% of entry={entry:.2f}"
-                )
-                if self._on_exit:
-                    self._on_exit(state.position_id, current_price, "catastrophic_phase1")
-                return
-        elif bars_held <= 5:
-            # Phase 2: Allow spread to settle, use buffered SL
-            buffered_sl = state.initial_sl * 0.8
-            if current_price <= buffered_sl:
-                logger.warning(
-                    f"[MONITOR] Premium floor Phase 2 exit: {state.position_id} "
-                    f"LTP={current_price:.2f} <= buffered SL={buffered_sl:.2f}"
-                )
-                if self._on_exit:
-                    self._on_exit(state.position_id, current_price, "stop_loss_premium_phase2")
-                return
-
-            # Sync broker SL to Phase 2 buffered limit if we just transitioned
-            # out of Phase 1. Bug #3 fix: NEVER lower the broker SL below the
-            # ratcheted `state.current_sl`. Previously this path pushed the
-            # broker SL order DOWN to `initial_sl×0.8` (e.g. 332.64 → 233.76
-            # today), silently disarming the broker-side stop.
-            if getattr(state, "_current_phase", 1) < 2:
-                state._current_phase = 2
-                # Only lower broker SL if the trailing ratchet never engaged
-                # (current_sl still == initial_sl). If it ratcheted, keep it
-                # at the ratcheted value — never give back profit-lock.
-                broker_sl_target = (
-                    state.current_sl
-                    if state.current_sl > state.initial_sl
-                    else buffered_sl
-                )
-                self._modify_broker_sl_manual(state, broker_sl_target)
-        else:
-            # Phase 3: Full enforcement — normal SL check
-            if current_price <= state.current_sl:
-                logger.warning(
-                    f"[MONITOR] SL breach: {state.position_id} "
-                    f"LTP={current_price:.2f} <= SL={state.current_sl:.2f}"
-                )
-                if self._on_exit:
-                    self._on_exit(state.position_id, current_price, "stop_loss_premium_phase3")
-                return
-
-            # Sync broker SL to Phase 3 normal limit if we just transitioned out of Phase 2
-            if getattr(state, "_current_phase", 1) < 3:
-                state._current_phase = 3
-                self._modify_broker_sl_manual(state, state.current_sl)
 
         # ── Target hit ──
         # Premium rising above target = profit, regardless of direction.

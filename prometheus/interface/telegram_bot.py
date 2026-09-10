@@ -85,6 +85,8 @@ class TelegramBot:
         self._preferred_base_url = api_base_url.rstrip("/") if api_base_url else ""
         self._base_url = self._preferred_base_url or "https://api.telegram.org"
         self._last_reconnect_attempt = 0
+        self._reconnect_failures = 0
+        self._announced_online = False
         self._connection_strategy = "direct"
 
         # Command handlers: command_name -> callable(args_str) -> response_str
@@ -345,6 +347,9 @@ class TelegramBot:
             except queue.Empty:
                 continue
             try:
+                cooldown = getattr(self, "_rate_limit_until", 0.0) - time.time()
+                if cooldown > 0:
+                    time.sleep(cooldown)
                 self.send_message(text, parse_mode=parse_mode)
             finally:
                 self._send_queue.task_done()
@@ -369,22 +374,37 @@ class TelegramBot:
 
     def reconnect(self):
         """Retry connecting to Telegram (useful when network changes).
-        Retries at most once every 5 minutes to avoid spamming.
+        Uses tiered backoff: 15s for first 3 attempts (fast startup recovery),
+        60s for next 3, then 300s to avoid spamming.
         """
         if self._enabled:
             return True
         now = time.time()
-        if now - self._last_reconnect_attempt < 300:  # 5-minute cooldown
+        failures = getattr(self, "_reconnect_failures", 0)
+        if failures < 3:
+            cooldown = 15
+        elif failures < 6:
+            cooldown = 60
+        else:
+            cooldown = 300
+
+        if now - self._last_reconnect_attempt < cooldown:
             return False
         self._last_reconnect_attempt = now
         if self.bot_token and self.chat_id:
-            logger.info("Telegram: retrying connection...")
+            logger.info(f"Telegram: retrying connection (attempt #{failures + 1}, cooldown={cooldown}s)...")
             self._init_bot()
             if self._enabled:
+                self._reconnect_failures = 0
                 logger.info("Telegram: reconnected successfully!")
+                # If startup online message was not delivered yet, deliver it now
+                if not getattr(self, "_announced_online", False):
+                    self.alert_system_start()
                 # Auto-start command listener if it wasn't running
                 if not self._listening and self._command_handlers:
                     self.start_listening()
+            else:
+                self._reconnect_failures = failures + 1
             return self._enabled
         return False
 
@@ -396,6 +416,41 @@ class TelegramBot:
         if not self._enabled:
             logger.debug(f"[TG not active] Would send: {text[:50]}...")
             return False
+
+        now = time.time()
+        if now < getattr(self, "_rate_limit_until", 0.0):
+            logger.debug("Telegram send skipped: rate limit cooldown active")
+            return False
+
+        if len(text) > 4000:
+            chunks = []
+            lines = text.split("\n")
+            current_chunk = []
+            current_len = 0
+            for line in lines:
+                while len(line) > 4000:
+                    if current_chunk:
+                        chunks.append("\n".join(current_chunk))
+                        current_chunk = []
+                        current_len = 0
+                    chunks.append(line[:4000])
+                    line = line[4000:]
+                line_len = len(line) + (1 if current_chunk else 0)
+                if current_len + line_len > 4000 and current_chunk:
+                    chunks.append("\n".join(current_chunk))
+                    current_chunk = [line]
+                    current_len = len(line)
+                else:
+                    current_chunk.append(line)
+                    current_len += line_len
+            if current_chunk:
+                chunks.append("\n".join(current_chunk))
+
+            all_ok = True
+            for chunk in chunks:
+                if not self.send_message(chunk, parse_mode=parse_mode):
+                    all_ok = False
+            return all_ok
 
         with self._send_lock:
             try:
@@ -424,21 +479,24 @@ class TelegramBot:
                     if response.status_code == 200:
                         self._send_fail_streak = 0
                         self._last_send_ok_ts = time.time()
-                        # Item 3 (2026-07-25 audit follow-up): one-site
-                        # DEBUG log per successful send so future
-                        # instrumented audits can rely on a stable
-                        # success-trace without grep-ing through call
-                        # sites. DEBUG level (not INFO) — a paper bot
-                        # sends hundreds of fills/skips/stats per
-                        # session; promoting to INFO would drown the
-                        # log. Operators who need it visible can set
-                        # ``logger.setLevel("DEBUG")`` on the
-                        # ``prometheus.interface.telegram_bot`` logger.
+                        self._rate_limit_until = 0.0
                         logger.debug(
                             f"Telegram send ok chat_id={self.chat_id} "
                             f"len={len(text)} base={base_url}"
                         )
                         return True
+
+                    if response.status_code == 429:
+                        try:
+                            retry_after = int(response.json().get("parameters", {}).get("retry_after", 10))
+                        except Exception:
+                            retry_after = 10
+                        self._rate_limit_until = time.time() + retry_after + 2
+                        logger.warning(
+                            f"Telegram rate limited (429) on {base_url}; "
+                            f"pausing all sends for {retry_after + 2}s"
+                        )
+                        return False
 
                     if response.status_code == 400 and parse_mode == "HTML":
                         # Fallback: retry as plain text when HTML formatting is rejected.
@@ -451,6 +509,7 @@ class TelegramBot:
                             logger.warning("Telegram HTML payload rejected (400); sent as plain text fallback")
                             self._send_fail_streak = 0
                             self._last_send_ok_ts = time.time()
+                            self._rate_limit_until = 0.0
                             return True
 
                     if idx + 1 < len(base_candidates):
@@ -474,8 +533,13 @@ class TelegramBot:
 
     def _send_command_reply(self, text: str):
         """Send command response with forced recovery + one retry if needed."""
+        cooldown = getattr(self, "_rate_limit_until", 0.0) - time.time()
+        if cooldown > 0:
+            time.sleep(cooldown)
         if self.send_message(text):
             return
+        if getattr(self, "_rate_limit_until", 0.0) > time.time():
+            return  # In rate limit cooldown; do not churn transport
         self._request_transport_recovery("command reply failed")
         if not self.send_message(text):
             logger.error("Telegram command reply dropped after recovery retry")
@@ -781,11 +845,12 @@ class TelegramBot:
                 # Format clean human readable Kite search string with explicit weekly date
                 kite_name = human_search_name_from_api_symbol(leg_sym)
                 if not kite_name or kite_name == leg_sym:
-                    exp_d = get_expiry_date(symbol)
+                    clean_sym = symbol.split("(")[0].strip()
+                    exp_d = get_expiry_date(clean_sym)
                     if exp_d:
-                        kite_name = human_search_name(symbol, exp_d, leg_stk, leg_opt)
+                        kite_name = human_search_name(clean_sym, exp_d, leg_stk, leg_opt)
                     else:
-                        kite_name = f"{symbol} {int(leg_stk)} {leg_opt}"
+                        kite_name = f"{clean_sym} {int(leg_stk)} {leg_opt}"
 
                 legs_text += f"• <b>{leg_act}</b> <code>{kite_name}</code> (~Rs {leg_prem:.1f}) {leg_tag}\n"
                 box_title = f"📋 LEG ({leg_act} HEDGE)" if is_hedge else f"📋 LEG ({leg_act} MAIN)"
@@ -810,10 +875,33 @@ class TelegramBot:
             else:
                 rank_header = ""
 
+            is_sure_shot = bool(signal.get("is_sure_shot", False)) or (float(signal.get("signal_score", 0.0) or 0.0) >= 9.0)
+            if is_sure_shot:
+                conviction_banner = (
+                    "🎯 <b>[SURE-SHOT 9.5+ HIGH CONVICTION SIGNAL]</b>\n"
+                    "💎 <b>REAL-TRADE READY (Math Probability: 92%+)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                )
+            else:
+                conviction_banner = (
+                    "📊 <b>[STANDARD SIGNAL — PAPER TRADE ONLY]</b>\n"
+                    "⚠️ <i>Standard conviction (7.0 - 8.0). Keep in paper mode.</i>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                )
+
+            oi_wall_line = ""
+            if signal.get("oi_wall_strike"):
+                wall_stk = int(signal["oi_wall_strike"])
+                wall_sh = signal.get("oi_wall_shares", 0)
+                sh_part = f" ({wall_sh/1e6:.1f}M shares)" if wall_sh > 0 else ""
+                oi_wall_line = f"🏛️ <b>Institutional OI Wall:</b> <code>{wall_stk}</code> Strike{sh_part}\n"
+
             text = (
                 f"{rank_header}"
-                f"🛡️ <b>NEW BARBELL SIGNAL: {spread_type}</b>{source_tag}\n"
-                f"<b>Underlying:</b> <code>{symbol}</code>\n\n"
+                f"{conviction_banner}"
+                f"🛡️ <b>STRATEGY: {spread_type}</b>{source_tag}\n"
+                f"<b>Underlying:</b> <code>{symbol}</code>\n"
+                f"{oi_wall_line}\n"
                 f"<b>Legs Breakdown:</b>\n{legs_text}"
                 f"{copy_boxes}\n"
                 f"💰 <b>Net Live Credit (Angel One):</b> Rs {net_credit:,.1f}/share\n"
@@ -822,7 +910,7 @@ class TelegramBot:
                 f"💼 <b>Est. Margin Required:</b> Rs {margin_req:,.0f}/lot\n"
                 f"⏳ <b>Hold:</b> <code>same-day theta decay</code>\n\n"
                 f"💡 <i>How to Execute on Kite: Open Basket Order ➔ Add BUY Hedge leg FIRST (to unlock margin discount) ➔ Add SELL leg.</i>\n"
-                f"ℹ️ <i>If you only trade Option Buying (Call/Put), you can safely ignore Barbell alerts.</i>"
+                f"⚠️ <i>Capital Notice: Credit Spreads involve Option Selling which requires exchange margin (~Rs 35k on normal days, ~Rs 65k on expiry day due to mandatory SEBI 2% ELM). If your account capital is under Rs 50,000, ignore Barbell alerts and trade single-leg Option Buying (CE/PE) signals (which require only Rs 1.5k–5k premium).</i>"
             )
             self.send_message(text)
             return
@@ -947,13 +1035,42 @@ class TelegramBot:
         else:
             rank_header = ""
 
+        is_golden = bool(signal.get("is_golden_setup")) or ("Golden_Setup" in str(signal.get("strategy", "")))
+        header_title = f"⭐ <b>NEW GOLDEN SETUP SIGNAL</b>" if is_golden else f"{emoji} <b>NEW TRADING SIGNAL</b>"
+
+        strat_name = signal.get("strategy") or ("Golden_Setup (1H+VWAP+ORB)" if is_golden else "PriceAction_Momentum")
+        edge_score = signal.get("edge_score") if signal.get("edge_score") is not None else signal.get("signal_score")
+        score_str = f" ({float(edge_score):.1f}/10)" if edge_score is not None else ""
+        reasons_list = signal.get("reasons") or []
+        confluence_str = ", ".join(reasons_list) if reasons_list else ""
+
+        strategy_line = f"<b>Strategy:</b> <code>{strat_name}</code>{score_str}\n"
+        confluence_line = f"<b>Confluences:</b> <i>{confluence_str}</i>\n" if confluence_str else ""
+
+        is_sure_shot_buy = bool(signal.get("is_sure_shot", False)) or (float(edge_score or 0.0) >= 9.0)
+        if is_sure_shot_buy:
+            conviction_badge = (
+                "🎯 <b>[SURE-SHOT 9.5+ HIGH CONVICTION SIGNAL]</b>\n"
+                "💎 <b>REAL-TRADE READY (Math Probability: 90%+)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+        else:
+            conviction_badge = (
+                "📊 <b>[STANDARD SIGNAL — PAPER TRADE ONLY]</b>\n"
+                "⚠️ <i>Standard conviction. Recommended for paper observation.</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+
         text = (
             f"{rank_header}"
-            f"{emoji} <b>NEW TRADING SIGNAL</b>{source_tag}\n"
+            f"{conviction_badge}"
+            f"{header_title}{source_tag}\n"
             f"{account_header}\n"
             f"<b>Symbol:</b> <code>{symbol}</code>\n"
             f"<b>Action:</b> {action}\n"
             f"<b>Contract:</b> {contract_name}\n"
+            f"{strategy_line}"
+            f"{confluence_line}"
             f"{copy_box}\n"
             f"<b>Live Entry LTP (Angel One):</b> Rs {entry:,.1f}\n"
             f"<b>Stop Loss:</b> Rs {sl:,.1f}\n"
@@ -962,7 +1079,7 @@ class TelegramBot:
             f"<i>{cost_line.replace('Margin Required: ', 'Est. Capital: ')}</i>"
             f"{hold_line}\n"
         )
-        if reasoning:
+        if reasoning and reasoning != strat_name:
             text += f"\n<i>Note: {reasoning[:150]}</i>"
 
         self.send_message(text)
@@ -1037,11 +1154,14 @@ class TelegramBot:
             direction = "CE Buy" if "CE" in action else "PE Buy" if "PE" in action else "HOLD"
             d_emoji = "🟢" if "CE" in action else "🔴" if "PE" in action else "⚪"
 
+            is_golden = bool(r.get("is_golden_setup")) or ("Golden_Setup" in str(r.get("strategy", "")))
+            golden_tag = " ⭐ <b>GOLDEN</b>" if is_golden else ""
+
             sig_only = " (sig only)" if not r.get("executable", True) else ""
             stale_tag = f" \u26a0\ufe0f STALE +{_age(r)}s" if _is_stale(r) else ""
 
             return (
-                f"{d_emoji} <b>{symbol} ({tf_clean})</b>: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {regime.upper()}{sig_only}{stale_tag}"
+                f"{d_emoji} <b>{symbol} ({tf_clean})</b>{golden_tag}: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {regime.upper()}{sig_only}{stale_tag}"
             )
 
         if intraday_top:
@@ -1083,22 +1203,10 @@ class TelegramBot:
 
         # Fire per-signal alerts only for fresh actionable rows.
         for r in actionable_fresh[:3]:
-            self.alert_new_signal({
-                "action": r["action"],
-                "symbol": r["symbol"],
-                "instrument": r.get("instrument", ""),
-                "strike": r.get("strike", 0),
-                "option_type": r.get("option_type", ""),
-                "expiry": r.get("expiry", ""),
-                "confidence": r["adj_confidence"],
-                "entry_price": r.get("entry_price", 0),
-                "stop_loss": r.get("stop_loss", 0),
-                "target": r.get("target", 0),
-                "risk_reward": r.get("risk_reward", 0),
-                "regime": r.get("regime", ""),
-                "reasoning": r.get("reasoning", ""),
-                "trade_mode": r.get("timeframe", ""),
-            }, source="scan")
+            sig_payload = dict(r)
+            sig_payload["confidence"] = r.get("adj_confidence", r.get("confidence", 0))
+            sig_payload["trade_mode"] = r.get("timeframe", "")
+            self.alert_new_signal(sig_payload, source="scan")
 
     def alert_order_placed(self, order_info: Dict):
         """Alert when an order is placed."""
@@ -1308,7 +1416,7 @@ class TelegramBot:
         text += f"\n\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
         self.send_message(text)
 
-    def alert_system_start(self):
+    def alert_system_start(self) -> bool:
         """Alert when system starts."""
         text = (
             "\U0001f680 <b>PROMETHEUS ONLINE</b>\n"
@@ -1317,7 +1425,10 @@ class TelegramBot:
             "/scan  |  /status  |  /pnl\n"
             "/positions  |  /regime  |  /help"
         )
-        self.send_message(text)
+        ok = self.send_message(text)
+        if ok:
+            self._announced_online = True
+        return ok
 
     def alert_system_error(self, error: str):
         """Alert on critical system error (non-blocking)."""

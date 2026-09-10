@@ -17,7 +17,7 @@ from prometheus.execution.broker import (
 from prometheus.execution.kite_executor import generate_tradingsymbol
 from prometheus.risk.manager import RiskManager
 from prometheus.data.store import DataStore
-from prometheus.utils.indian_market import get_lot_size, get_expiry_date
+from prometheus.utils.indian_market import get_lot_size, get_expiry_date, get_atm_strike
 from prometheus.utils.logger import logger
 
 
@@ -213,7 +213,6 @@ class OrderManager:
                 if expiry_str is None:
                     # Fall back to nearest expiry from indian_market
                     try:
-                        from prometheus.utils.indian_market import get_expiry_date
                         expiry_str = get_expiry_date(symbol).strftime("%Y-%m-%d")
                     except Exception:
                         expiry_str = None
@@ -236,7 +235,6 @@ class OrderManager:
             else:
                 tradingsymbol = instrument_raw
         else:
-            from prometheus.utils.indian_market import get_atm_strike
             spot = signal.get("spot_price", signal.get("entry_price", 0))
             strike = get_atm_strike(spot, symbol)
             expiry = get_expiry_date(symbol)
@@ -244,10 +242,14 @@ class OrderManager:
             total_qty = lots * lot_size
 
             underlying = symbol.replace(" ", "").replace("NIFTY50", "NIFTY").replace("NIFTYBANK", "BANKNIFTY")
-            if "BANK" in symbol.upper():
+            if "BANK" in symbol.upper() and "NIFTY" in symbol.upper():
                 underlying = "BANKNIFTY"
             elif "FIN" in symbol.upper():
                 underlying = "FINNIFTY"
+            elif "SENSEX" in symbol.upper() or "BSX" in symbol.upper():
+                underlying = "SENSEX"
+            elif "MIDCAP" in symbol.upper():
+                underlying = "MIDCPNIFTY"
             else:
                 underlying = "NIFTY"
 
@@ -255,11 +257,13 @@ class OrderManager:
             tradingsymbol = generate_tradingsymbol(underlying, expiry_str, strike, option_type)
             estimated_premium = signal.get("entry_price", 0)
 
+        exchange = "BFO" if ("SENSEX" in symbol.upper() or "BSX" in symbol.upper() or "BANKEX" in symbol.upper()) else "NFO"
+
         # Build entry order (set price for PaperTrader reference)
         entry_order = Order(
             symbol=symbol,
             tradingsymbol=tradingsymbol,
-            exchange="NFO",
+            exchange=exchange,
             side=OrderSide.BUY,
             order_type=OrderType.MARKET,
             product=ProductType.MIS,  # Intraday
@@ -374,11 +378,14 @@ class OrderManager:
         position_id = self._next_position_id()
         entry_orders = []
 
+        sym_up = signal.get("symbol", "").upper()
+        exchange = "BFO" if ("SENSEX" in sym_up or "BSX" in sym_up or "BANKEX" in sym_up) else "NFO"
+
         for leg in legs:
             order = Order(
                 symbol=signal["symbol"],
                 tradingsymbol=leg.get("tradingsymbol", ""),
-                exchange="NFO",
+                exchange=exchange,
                 side=OrderSide.BUY if leg.get("action") == "BUY" else OrderSide.SELL,
                 order_type=OrderType.MARKET,
                 product=ProductType.MIS,
@@ -621,9 +628,10 @@ class OrderManager:
         if broker_trigger < 0.05:
             broker_trigger = 0.05
 
+        exchange = "BFO" if ("SENSEX" in tradingsymbol or "BSX" in tradingsymbol or "BANKEX" in tradingsymbol) else "NFO"
         sl_order = Order(
             tradingsymbol=tradingsymbol,
-            exchange="NFO",
+            exchange=exchange,
             side=OrderSide.SELL,
             order_type=OrderType.SL_M,
             product=ProductType.MIS,

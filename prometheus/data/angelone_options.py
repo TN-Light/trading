@@ -251,10 +251,31 @@ class AngelOneOptionChain:
                         exp_dt = _dt.strptime(expiry_date[:10], "%Y-%m-%d")
                         seg = self._exchange_for(underlying)
                         if seg == "BFO":
-                            # BFO (SENSEX) uses YY-MON format: SENSEX26AUG77800CE
+                            # BSE F&O (SENSEX):
+                            # Weekly options use: {UNDERLYING}{YY}{M}{DD} (e.g. SENSEX26910 for 10-Sep-2026)
+                            # Monthly options use: {UNDERLYING}{YY}{MON} (e.g. SENSEX26SEP for 24-Sep-2026)
                             yy = f"{exp_dt.year % 100:02d}"
                             mon = exp_dt.strftime("%b").upper()
-                            search_query = f"{underlying}{yy}{mon}"
+                            month_codes = {
+                                1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+                                7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"
+                            }
+                            m_code = month_codes.get(exp_dt.month, str(exp_dt.month))
+                            dd = f"{exp_dt.day:02d}"
+
+                            is_monthly = False
+                            try:
+                                from prometheus.utils.indian_market import get_monthly_expiry, _resolve_weekly_expiry_day_name
+                                exp_day_name = _resolve_weekly_expiry_day_name(underlying, on_date=exp_dt.date())
+                                m_exp = get_monthly_expiry(exp_dt.year, exp_dt.month, exp_day_name)
+                                is_monthly = (exp_dt.date() == m_exp)
+                            except Exception:
+                                pass
+
+                            if is_monthly:
+                                search_query = f"{underlying}{yy}{mon}"
+                            else:
+                                search_query = f"{underlying}{yy}{m_code}{dd}"
                         else:
                             # NFO uses DD-MON-YY format: NIFTY26AUG2624400CE
                             dd = f"{exp_dt.day:02d}"
@@ -274,10 +295,15 @@ class AngelOneOptionChain:
 
                 if not result or not result.get("data"):
                     # Fallback ONLY when the first call returned no data
-                    # due to a tradingsymbol format mismatch (e.g. stale
-                    # daily-expiry calendar). Skip fallback for AB1021 —
-                    # it would extend the rate-limit window.
-                    if search_query != underlying:
+                    # due to a tradingsymbol format mismatch.
+                    # If BFO weekly failed, try BFO monthly before bare underlying.
+                    if seg == "BFO" and search_query != f"{underlying}{yy}{mon}":
+                        monthly_query = f"{underlying}{yy}{mon}"
+                        result = obj.searchScrip(seg, monthly_query)
+                        if self._mark_rate_limited(result, f"searchScrip_bfo_monthly('{seg}', '{monthly_query}')"):
+                            return []
+
+                    if (not result or not result.get("data")) and search_query != underlying:
                         result = obj.searchScrip(seg, underlying)
                         if self._mark_rate_limited(result, f"searchScrip_fallback('{seg}', '{underlying}')"):
                             return []
@@ -360,6 +386,22 @@ class AngelOneOptionChain:
             future_expiries = [e for e in expiries if e >= today_iso]
             chosen = future_expiries[0] if future_expiries else (expiries[0] if expiries else "")
             if chosen:
+                # Plausibility check: don't silently jump to an expiry > 4 days away from requested!
+                # E.g. jumping from weekly 10-SEP to monthly 24-SEP (14 days away) fetched
+                # Rs 826 / Rs 640 monthly prices instead of Rs 181 / Rs 92 weekly prices.
+                try:
+                    from datetime import datetime as _dt
+                    req_d = _dt.strptime(expiry_date[:10], "%Y-%m-%d").date()
+                    chosen_d = _dt.strptime(chosen[:10], "%Y-%m-%d").date()
+                    if abs((chosen_d - req_d).days) > 4:
+                        logger.error(
+                            f"Angel One: requested expiry {expiry_date} for {symbol} not found; "
+                            f"nearest available {chosen} is {abs((chosen_d - req_d).days)} days away "
+                            f"(exceeds 4-day threshold). Refusing silent fallback to prevent price distortion."
+                        )
+                        return []
+                except Exception:
+                    pass
                 fallback = [c for c in candidates if c.get("expiry") == chosen]
                 if fallback:
                     logger.warning(
@@ -572,9 +614,29 @@ class AngelOneOptionChain:
         for c in contracts:
             self._rate_limit()
             try:
+                # Format expirydate to uppercase DDMMMYYYY (e.g. 10SEP2026) for Angel One SmartAPI
+                raw_exp = str(c.get("expiry", ""))
+                formatted_exp = raw_exp
+                if "-" in raw_exp and len(raw_exp) == 10:
+                    try:
+                        formatted_exp = datetime.strptime(raw_exp, "%Y-%m-%d").strftime("%d%b%Y").upper()
+                    except Exception:
+                        pass
+
+                # Resolve underlying root name (e.g. NIFTY, BANKNIFTY, SENSEX)
+                underlying_name = c.get("underlying") or c.get("name") or ""
+                if not underlying_name and c.get("tradingsymbol"):
+                    # fallback from tradingsymbol prefix
+                    for prefix in ["MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "NIFTY", "SENSEX"]:
+                        if c["tradingsymbol"].startswith(prefix):
+                            underlying_name = prefix
+                            break
+                if underlying_name in self.UNDERLYING_MAP:
+                    underlying_name = self.UNDERLYING_MAP[underlying_name]
+
                 params = {
-                    "name": c.get("tradingsymbol", ""),
-                    "expirydate": c.get("expiry", ""),
+                    "name": underlying_name or c.get("tradingsymbol", ""),
+                    "expirydate": formatted_exp,
                     "strikeprice": str(c.get("strike", "")),
                     "optiontype": c.get("option_type", ""),
                 }

@@ -137,3 +137,16 @@ def test_golden_setup_confluence_tag():
     assert sig["is_golden_setup"] is True
     assert "Golden_Setup" in sig["strategy"]
 
+
+def test_golden_setup_1145_cutoff_on_expiry_day():
+    """Verify that on expiry days, no option buying signals are allowed after 11:45 AM."""
+    scanner = PriceActionMomentumScanner()
+    # 20 bars prior + 12 bars today (12th bar is 12:00 PM)
+    prior_df = _generate_sample_candles(n_bars=20, start_dt=datetime(2026, 9, 7, 9, 15), trend="neutral")
+    today_df = _generate_sample_candles(n_bars=12, start_dt=datetime(2026, 9, 8, 9, 15), trend="bearish")
+    df = pd.concat([prior_df, today_df], ignore_index=True)
+
+    sig = scanner.evaluate_bar(df, symbol="NIFTY 50", is_expiry_day=True, golden_mode=True)
+    assert sig is None, "Expected trade at 12:00 PM on expiry day to be strictly blocked by 11:45 cutoff"
+
+

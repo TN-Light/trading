@@ -19,6 +19,6 @@ echo [%date% %time%] Mode: INTRADAY PAPER (15-minute scans, auto-closes at 15:15
 
 :: Run intraday paper mode (auto-closes positions at 3:15 PM)
 :: --data-source auto = Kite if available, else Angel One/yfinance fallbacks
-"%PYTHON%" prometheus/main.py paper --intraday --data-source auto --fetch-retries 2 >> "%LOGFILE%" 2>&1
+"%PYTHON%" -u prometheus/main.py paper --intraday --data-source auto --fetch-retries 2 >> "%LOGFILE%" 2>&1
 
 echo [%date% %time%] PROMETHEUS service stopped. >> "%LOGFILE%"

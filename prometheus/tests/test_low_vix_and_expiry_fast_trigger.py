@@ -45,7 +45,7 @@ def test_low_vix_trailing_ladder():
 def test_expiry_fast_trigger_bullish_reclaim():
     scanner = PriceActionMomentumScanner()
     
-    base_time = datetime(2026, 8, 25, 11, 0)
+    base_time = datetime(2026, 8, 25, 10, 0)
     rows = []
     # 15 bars: earlier bars below VWAP (~24130), last 2 bars surge to 24180
     for i in range(15):

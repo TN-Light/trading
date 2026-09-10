@@ -103,22 +103,22 @@ def test_low_vix_gate_allows_high_conviction_breakout():
 
 
 def test_max_nominal_capital_cap_blocks_expensive_contracts():
-    """Contracts with total single-lot cost > Rs 15,000 must be skipped to avoid oversize risk."""
+    """Contracts with total single-lot cost > Rs 15,000 must be skipped in live mode to avoid oversize risk."""
     p = Prometheus()
-    p.mode = "paper"
+    p.mode = "live"
     p.data.get_vix = MagicMock(return_value=14.0)
     p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
-    
+
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
-    
+
     p.data.angelone_options = MagicMock()
     # BankNifty lot size 30 * LTP 900 = Rs 27,000 (> Rs 15,000 cap)
     p.data.angelone_options.get_real_premium.return_value = {
         "ltp": 900.0,
         "tradingsymbol": "BANKNIFTY29SEP2657900CE",
     }
-    
+
     pa_sig = {
         "symbol": "NIFTY BANK",
         "action": "BUY_CE",
@@ -128,12 +128,48 @@ def test_max_nominal_capital_cap_blocks_expensive_contracts():
         "edge_score": 4.5,
         "underlying_price": 57800.0,
     }
-    
+
     p._pa_momentum_scanner = MagicMock()
     p._pa_momentum_scanner.evaluate_bar.return_value = pa_sig
-    
+
     signal = p._get_intraday_signal_for_execution("NIFTY BANK", "15minute", False)
     assert signal is None
+
+
+def test_paper_trading_bypasses_capital_filter():
+    """In paper mode, capital filtering is bypassed so paper trades mimic the full signal universe."""
+    p = Prometheus()
+    p.mode = "paper"
+    p.data.get_vix = MagicMock(return_value=14.0)
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+
+    p._credit_spread_strategy = MagicMock()
+    p._credit_spread_strategy.evaluate_spread.return_value = None
+
+    p.data.angelone_options = MagicMock()
+    # BankNifty lot size 30 * LTP 900 = Rs 27,000 (> Rs 15,000 cap)
+    p.data.angelone_options.get_real_premium.return_value = {
+        "ltp": 900.0,
+        "tradingsymbol": "BANKNIFTY29SEP2657900CE",
+    }
+
+    pa_sig = {
+        "symbol": "NIFTY BANK",
+        "action": "BUY_CE",
+        "direction": "bullish",
+        "strike": 57900,
+        "option_type": "CE",
+        "edge_score": 4.5,
+        "underlying_price": 57800.0,
+    }
+
+    p._pa_momentum_scanner = MagicMock()
+    p._pa_momentum_scanner.evaluate_bar.return_value = pa_sig
+
+    signal = p._get_intraday_signal_for_execution("NIFTY BANK", "15minute", False)
+    assert signal is not None
+    assert signal["action"] == "BUY_CE"
+    assert signal["entry_price"] == 900.0
 
 
 def test_same_strike_lockout_blocks_repeat_entries_in_loss_with_moderate_score():
@@ -219,10 +255,8 @@ def test_strong_signal_override_permits_repeat_entry():
     p._pa_momentum_scanner.evaluate_bar.return_value = pa_sig
     
     signal = p._get_intraday_signal_for_execution("NIFTY 50", "15minute", False)
-    # Allowed due to strong signal override
-    assert signal is not None
-    assert signal.get("action") == "BUY_PE"
-    assert signal.get("signal_score") == 5.2
+    # Strictly blocked: active position is only +1.1% in profit (< 10%), so no duplicate signals permitted
+    assert signal is None
 
 
 def test_same_strike_pyramiding_allowed_when_profit_locked():

@@ -1487,29 +1487,11 @@ class BacktestEngine:
                     position["prev_close"] = bar["close"]
                     return True, premium_low, "stop_loss_underlying"
 
-            # Parallel Premium SL Floor Check (3-Phase Conditional Floor)
-            if sl > 0:
-                is_premium_stop = False
-                phase = ""
-                if bars_held <= 3:
-                     # Phase 1: Total immunity to premium spread widening / IV crush
-                     is_premium_stop = False
-                elif bars_held <= 5:
-                     # Phase 2: Moderate buffer (allow spread to settle)
-                     buffered_sl = sl * 0.8
-                     if premium_low <= buffered_sl:
-                         is_premium_stop = True
-                         phase = "phase2"
-                else:
-                     # Phase 3: Total trust in options pricing
-                     if premium_low <= sl:
-                         is_premium_stop = True
-                         phase = "phase3"
-
-                if is_premium_stop:
-                    position["current_premium"] = sl
-                    position["prev_close"] = bar["close"]
-                    return True, sl, f"stop_loss_premium_{phase}"
+            # Parallel Premium SL Floor Check (Strict Real-Market Execution: immediate SL exit)
+            if sl > 0 and premium_low <= sl:
+                position["current_premium"] = sl
+                position["prev_close"] = bar["close"]
+                return True, sl, "stop_loss_premium"
 
             # Fallback Premium Target Check (for older signal compatibility)
             if target > 0 and premium_high >= target:

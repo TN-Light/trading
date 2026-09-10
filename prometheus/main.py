@@ -1935,8 +1935,8 @@ class Prometheus:
 
         score = float(out.get("bull_score", 0) or 0) if out.get("direction") == "bullish" else float(out.get("bear_score", 0) or 0)
         if not out.get("confidence"):
-            # Max score = sum of all signal weights (loaded or default ~8.5)
-            _max_score = sum(_w.values()) if '_w' in dir() else 8.5
+            # Max score = sum of all signal weights (default ~8.5)
+            _max_score = 8.5
             out["confidence"] = min(1.0, score / _max_score) if score > 0 else 0.0
 
         strike = float(out.get("strike", 0) or 0)
@@ -2009,6 +2009,7 @@ class Prometheus:
         try:
             from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
             from prometheus.utils.indian_market import get_atm_strike, get_expiry_date, is_weekly_expiry_day
+            from prometheus.config import get
 
             if not hasattr(self, "_pa_momentum_scanner"):
                 self._pa_momentum_scanner = PriceActionMomentumScanner()
@@ -2027,8 +2028,9 @@ class Prometheus:
                     intra_df, symbol=symbol, is_expiry_day=is_exp, df_1h=df_1h, golden_mode=True
                 )
 
-            # Option C: 5-Minute Expiry Fast-Trigger on active expiry days
-            if not pa_sig and is_exp:
+            # Option C: 5-Minute Expiry Fast-Trigger (disabled by default to prevent afternoon theta traps)
+            fast_trigger_enabled = bool(get("intraday.expiry_fast_trigger.enabled", False))
+            if not pa_sig and is_exp and fast_trigger_enabled:
                 try:
                     df_5m = self.data.fetch_intraday(symbol, interval="5minute", days=1)
                     if df_5m is not None and not df_5m.empty and len(df_5m) >= 15:
@@ -2097,11 +2099,12 @@ class Prometheus:
                         sl_price = round(max(1.0, opt_ltp * 0.82), 2)  # -18% risk bracket
                         pa_sig["low_vix_mode"] = False
 
-                    # 2. Max Nominal Premium Exposure Cap (Rs 15,000 max lot cost)
-                    if opt_ltp > 0 and lot_cost > 15000.0:
+                    # 2. Max Nominal Premium Exposure Cap (Applies only to live broker execution; paper trading bypasses capital filter)
+                    enforce_cap = (self.mode == "live") or bool(get("risk.enforce_capital_filter", False))
+                    if enforce_cap and opt_ltp > 0 and lot_cost > 15000.0:
                         logger.info(
                             f"Capital Cap Gate: Skipped Option Buying on {symbol} {strike}{opt_type} "
-                            f"(Lot Cost Rs {lot_cost:,.0f} exceeds max nominal threshold Rs 15,000)."
+                            f"(Lot Cost Rs {lot_cost:,.0f} exceeds max nominal threshold Rs 15,000 in live mode)."
                         )
                         opt_ltp = 0.0
 
@@ -2122,39 +2125,33 @@ class Prometheus:
                         pa_sig["quantity"] = lot_sz
                         pa_sig["lot_cost"] = lot_cost
 
-                        # 3. ── Same-Strike Lockout & Profit-Locked Pyramiding Gate ──
+                        # 3. ── Strict Same-Instrument Lockout & Profit-Locked Pyramiding Gate ──
                         repeat_entry_blocked = False
                         traded_set = getattr(self, "_today_traded_instruments", set())
                         if tradingsymbol and tradingsymbol in traded_set:
-                            # Strong Signal Override: High conviction (Score >= 5.0) is permitted to re-enter/scale-in
-                            if edge_score >= 5.0:
-                                logger.info(
-                                    f"Strong Signal Override: Permitted repeat entry on {tradingsymbol} "
-                                    f"due to high conviction score {edge_score:.1f} >= 5.0"
-                                )
-                            else:
-                                has_active_pos = False
-                                if hasattr(self, "position_monitor") and self.position_monitor:
-                                    open_positions = self.position_monitor.get_positions()
-                                    for pid, pos_state in open_positions.items():
-                                        if pos_state.tradingsymbol == tradingsymbol:
-                                            has_active_pos = True
-                                            # Only allow scale-in if the first position is sitting in >= +10% profit
-                                            if opt_ltp < pos_state.entry_premium * 1.10:
-                                                logger.info(
-                                                    f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
-                                                    f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {pos_state.entry_premium:.2f} and Score {edge_score:.1f} < 5.0)"
-                                                )
-                                                repeat_entry_blocked = True
-                                            break
+                            has_active_pos = False
+                            if hasattr(self, "position_monitor") and self.position_monitor:
+                                open_positions = self.position_monitor.get_positions()
+                                for pid, pos_state in open_positions.items():
+                                    if getattr(pos_state, "tradingsymbol", "") == tradingsymbol:
+                                        has_active_pos = True
+                                        # Only allow scale-in if the first position is sitting in >= +10% profit
+                                        entry_prem = getattr(pos_state, "entry_premium", 0.0)
+                                        if entry_prem > 0 and opt_ltp < entry_prem * 1.10:
+                                            logger.info(
+                                                f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
+                                                f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {entry_prem:.2f})"
+                                            )
+                                            repeat_entry_blocked = True
+                                        break
 
-                                # If it was traded today and is not currently active, block same-strike re-entry for moderate scores
-                                if not has_active_pos:
-                                    logger.info(
-                                        f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
-                                        f"(Strike was already traded today and score {edge_score:.1f} < 5.0; blocking clustered stop-outs)."
-                                    )
-                                    repeat_entry_blocked = True
+                            # If it was traded today and is not currently active (e.g. SL hit or closed), block repeat entry strictly
+                            if not has_active_pos:
+                                logger.info(
+                                    f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
+                                    f"(Instrument was already traded today and is no longer active; strictly blocking duplicate signals/stop-outs)."
+                                )
+                                repeat_entry_blocked = True
 
                         if not repeat_entry_blocked:
                             if tradingsymbol:
@@ -2184,11 +2181,11 @@ class Prometheus:
         cs_sig = None
         try:
             from prometheus.strategies.credit_spread import CreditSpreadStrategy
-            from prometheus.config import get
 
             if get("intraday.credit_spread.enabled", True):
                 if not hasattr(self, "_credit_spread_strategy"):
-                    self._credit_spread_strategy = CreditSpreadStrategy()
+                    max_dte = int(get("intraday.credit_spread.max_days_to_expiry", 1))
+                    self._credit_spread_strategy = CreditSpreadStrategy(max_days_to_expiry=max_dte)
 
                 intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
                 if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
@@ -2200,7 +2197,7 @@ class Prometheus:
                     )
                     if cs_sig:
                         cs_sig["strategy_type"] = "credit_spread"
-                        cs_sig["signal_score"] = float(cs_sig.get("signal_strength", 3.5) or 3.5)
+                        cs_sig["signal_score"] = float(cs_sig.get("signal_score") or cs_sig.get("signal_strength", 3.5) or 3.5)
                         logger.info(
                             f"CreditSpread signal generated for {symbol}: "
                             f"{cs_sig.get('spread_type')} (Credit=Rs {cs_sig.get('net_credit', 0):.2f}) "
@@ -4078,7 +4075,7 @@ class Prometheus:
         target_atr = float(profile.get("target_atr_mult", v2_cfg.get("target_atr_mult", 2.2)))
         ts_bars = int(profile.get("time_stop_bars", v2_cfg.get("time_stop_bars", 14)))
 
-        self.telegram.send_message(
+        return self.telegram.send_message(
             f"🔄 <b>DAILY RESET COMPLETE</b>\n"
             f"Mode: {mode_label}\n"
             f"Capital: Rs {current_equity:,.0f}\n"
@@ -4210,7 +4207,7 @@ class Prometheus:
         account: str = "primary",
         strike: Optional[float] = None,
         source: str = "auto",
-        cooldown_seconds: int = 1800,
+        cooldown_seconds: int = 28800,  # Full trading session (8 hours): never re-alert exact same strike
     ) -> bool:
         """Check if the same signal was already alerted within the cooldown window."""
         key = self._signal_dedupe_key(symbol, action, account, strike=strike, source=source)
@@ -4567,6 +4564,18 @@ class Prometheus:
     # MODE: INTRADAY TRADING
     # ─────────────────────────────────────────────────────────────────────
 
+    def _get_active_positions_count(self) -> int:
+        """Return total active open positions count across live and paper trading."""
+        count = 0
+        if getattr(self, "position_monitor", None):
+            count += self.position_monitor.active_count
+        if getattr(self, "_paper_capture", None) and hasattr(self._paper_capture, "open_positions_view"):
+            try:
+                count += len(self._paper_capture.open_positions_view())
+            except Exception:
+                pass
+        return count
+
     def run_intraday_mode(self, interval_seconds: int = 180):
         """
         Intraday trading — continuous scanning during market hours.
@@ -4670,9 +4679,10 @@ class Prometheus:
                 current_time = now.time()
 
                 if current_time >= dtime(9, 15) and not _did_send_reset_start_msg:
-                    self._send_intraday_reset_start_message(mode_label, intraday_cfg)
-                    _did_send_reset_start_msg = True
-                    self._set_daily_state("dry_did_send_reset_start_msg", True)
+                    sent = self._send_intraday_reset_start_message(mode_label, intraday_cfg)
+                    if sent:
+                        _did_send_reset_start_msg = True
+                        self._set_daily_state("dry_did_send_reset_start_msg", True)
 
                 if current_time >= dtime(9, 15):
                     guard_eval = self._evaluate_intraday_pilot_guardrails(
@@ -4759,7 +4769,7 @@ class Prometheus:
                 any_expiry_today = any(is_weekly_expiry_day(sym) for sym in intraday_instruments)
 
                 effective_last_entry = last_entry_time
-                if any_expiry_today:
+                if any_expiry_today and bool(get("intraday.expiry_fast_trigger.enabled", False)):
                     expiry_last_entry_str = get("intraday.expiry_fast_trigger.last_entry_time_expiry", "15:05")
                     try:
                         elh, elm = map(int, expiry_last_entry_str.split(":"))
@@ -4769,7 +4779,7 @@ class Prometheus:
 
                 # No new entries after cutoff — monitor only
                 if current_time >= effective_last_entry:
-                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    n_pos = self._get_active_positions_count()
                     self.dashboard.show_status_line(
                         f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
                         f"Square-off at {square_off_str}."
@@ -4778,7 +4788,7 @@ class Prometheus:
                     continue
 
                 if _guardrail_breached and pilot_block_new:
-                    n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                    n_pos = self._get_active_positions_count()
                     self.dashboard.show_status_line(
                         f"{mode_label}: Guardrail active ({_guardrail_reason}). "
                         f"Monitoring {n_pos} position(s)."
@@ -4932,7 +4942,7 @@ class Prometheus:
                     time.sleep(60)
                     continue
 
-                n_pos = self.position_monitor.active_count if self.position_monitor else 0
+                n_pos = self._get_active_positions_count()
                 self.dashboard.show_status_line(
                     f"{mode_label}: {n_pos} position(s) | "
                     f"Trades: {_intraday_trades_today}/{max_trades} | "
@@ -5116,6 +5126,8 @@ class Prometheus:
         # Intraday state
         intraday_cfg = get("intraday", {})
         _intra_traded_symbols = self._get_daily_state("live_intra_traded_symbols", set())
+        _today_traded_instruments = self._get_daily_state("live_today_traded_instruments", set())
+        self._today_traded_instruments = _today_traded_instruments
         _intra_trades_today = self._get_daily_state("live_intra_trades_today", 0)
         _did_square_off = self._get_daily_state("live_did_square_off", False)
         _last_intra_scan = None
@@ -5189,9 +5201,10 @@ class Prometheus:
                 current_time = now.time()
 
                 if current_time >= dtime(9, 15) and not _did_send_reset_start_msg:
-                    self._send_intraday_reset_start_message(mode_label, intraday_cfg)
-                    _did_send_reset_start_msg = True
-                    self._set_daily_state("live_did_send_reset_start_msg", True)
+                    sent = self._send_intraday_reset_start_message(mode_label, intraday_cfg)
+                    if sent:
+                        _did_send_reset_start_msg = True
+                        self._set_daily_state("live_did_send_reset_start_msg", True)
 
                 if current_time >= dtime(9, 15):
                     guard_eval = self._evaluate_intraday_pilot_guardrails(
@@ -5220,6 +5233,9 @@ class Prometheus:
                 if current_time < dtime(9, 15):
                     _intra_traded_symbols.clear()
                     self._set_daily_state("live_intra_traded_symbols", set())
+                    _today_traded_instruments.clear()
+                    self._set_daily_state("live_today_traded_instruments", set())
+                    self._today_traded_instruments = set()
                     _intra_trades_today = 0
                     self._set_daily_state("live_intra_trades_today", 0)
                     _did_square_off = False
@@ -5349,29 +5365,51 @@ class Prometheus:
                             # evaluation per bar across every open paper position.
                             self._paper_capture_feed_bars(intraday_instruments, bar_interval)
 
+                            allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", True))
                             for isym in intraday_instruments:
-                                if isym in _intra_traded_symbols:
+                                if isym in _intra_traded_symbols and not allow_mult:
                                     continue
                                 refined = self._get_intraday_signal_for_execution(
                                     isym, bar_interval, use_backtest_generator
                                 )
                                 if refined and refined.get("action") != "HOLD":
+                                    # Block same-instrument re-entry
+                                    tsym = refined.get("tradingsymbol", "")
+                                    inst = refined.get("instrument", "")
+                                    traded_set = getattr(self, "_today_traded_instruments", set())
+                                    if (tsym and tsym in traded_set) or (inst and inst in traded_set):
+                                        logger.info(f"{mode_label}: Skipping re-entry of {tsym or inst} (already traded today)")
+                                        continue
+
                                     self._alert_signal(refined)
                                     position = self._execute_signal_with_feedback(
                                         refined, confirm=False, context=f"{mode_label} intraday"
                                     )
-                                    self._dispatch_multi_account(
-                                        refined, is_intraday=True,
-                                        bar_interval=bar_interval
-                                    )
+                                    if position is None:
+                                        position = self._dispatch_multi_account(
+                                            refined, is_intraday=True,
+                                            bar_interval=bar_interval
+                                        )
+                                    else:
+                                        self._dispatch_multi_account(
+                                            refined, is_intraday=True,
+                                            bar_interval=bar_interval
+                                        )
                                     if position:
                                         _intra_traded_symbols.add(isym)
                                         self._set_daily_state("live_intra_traded_symbols", _intra_traded_symbols)
+                                        if tsym:
+                                            _today_traded_instruments.add(tsym)
+                                        if inst:
+                                            _today_traded_instruments.add(inst)
+                                        self._today_traded_instruments = _today_traded_instruments
+                                        self._set_daily_state("live_today_traded_instruments", _today_traded_instruments)
                                         _intra_trades_today += 1
                                         self._set_daily_state("live_intra_trades_today", _intra_trades_today)
-                                        ts = self.order_manager.create_trailing_state(
-                                            position.position_id
-                                        )
+                                        if not isinstance(position, str):
+                                            ts = self.order_manager.create_trailing_state(
+                                                position.position_id
+                                            )
                                         if ts:
                                             ts.trade_mode = "intraday"
                                             ts.bar_interval = bar_interval
@@ -9597,6 +9635,14 @@ class Prometheus:
                             "strike": exec_sig.get("strike", 0),
                             "option_type": exec_sig.get("option_type", ""),
                             "expiry": exec_sig.get("expiry", ""),
+                            "strategy_type": exec_sig.get("strategy_type", ""),
+                            "spread_type": exec_sig.get("spread_type", ""),
+                            "net_credit": exec_sig.get("net_credit", 0),
+                            "target_decay_price": exec_sig.get("target_decay_price", 0),
+                            "hard_sl_price": exec_sig.get("hard_sl_price", 0),
+                            "margin_required": exec_sig.get("margin_required", 0),
+                            "legs": exec_sig.get("legs", []),
+                            "lot_size": exec_sig.get("lot_size", 0),
                             # Freshness timestamp (Fix B) — see _scan_one_cmd.
                             "_signal_generated_at": time.time(),
                         }

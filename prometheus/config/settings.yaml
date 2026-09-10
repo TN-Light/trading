@@ -153,11 +153,11 @@ intraday:
     stage1_trigger_pct: 0.14
     stage2_trigger_pct: 0.18
   expiry_fast_trigger:
-    enabled: true
+    enabled: false
     timeframe: 5minute
     min_volume_surge_mult: 1.30
     vwap_reclaim_required: true
-    last_entry_time_expiry: '15:05'
+    last_entry_time_expiry: '11:45'
     power_hour_start_time: '13:30'
     power_hour_scan_interval_seconds: 180
   allowed_instruments:
@@ -179,13 +179,13 @@ intraday:
     enabled: true
     htf_interval: '60minute'
     orb_end_time: '09:30'
-    entry_cutoff_time: '12:30'
-    hard_cutoff_time: '13:00'
+    entry_cutoff_time: '11:45'
+    hard_cutoff_time: '12:00'
     target_pts: 14.0
     trailing_be_pts: 10.0
     partial_profit_pct: 0.60
-  last_entry_time: '13:00'
-  max_daily_trades: 99  # No artificial limit: all valid signals fire freely
+  last_entry_time: '11:45'
+  max_daily_trades: 2  # Focus on top 2 high-probability morning trades; no afternoon overtrading
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
   skip_first_minutes: 15

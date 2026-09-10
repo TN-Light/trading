@@ -429,8 +429,15 @@ class DataEngine:
 
         from prometheus.data.store import DataStore
         self.store = DataStore()
+        self._mem_cache: Dict[str, tuple] = {}
+        self._mem_cache_ttl_seconds: float = 45.0
 
         logger.info("Data Engine initialized")
+
+    def clear_mem_cache(self):
+        """Clear short-term in-memory historical candle cache."""
+        if hasattr(self, "_mem_cache"):
+            self._mem_cache.clear()
 
     def configure_historical_fetch(self, source: str = "auto", retries: int = 2):
         """Configure historical data provider selection and retry behavior."""
@@ -582,12 +589,22 @@ class DataEngine:
         symbol: str,
         days: int = 365,
         interval: str = "day",
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        bypass_mem_cache: bool = False,
     ) -> pd.DataFrame:
         """
         Fetch historical data — tries Kite first, then yfinance fallback.
-        Caches in SQLite.
+        Caches in SQLite and short-term memory (45s) to avoid duplicate API spam.
         """
+        mem_key = f"{symbol}:{interval}:{days}"
+        now_ts = time.time()
+        if not bypass_mem_cache and hasattr(self, "_mem_cache") and mem_key in self._mem_cache:
+            cached_df, cached_ts = self._mem_cache[mem_key]
+            if (now_ts - cached_ts) < getattr(self, "_mem_cache_ttl_seconds", 45.0):
+                if cached_df is not None and not cached_df.empty:
+                    logger.debug(f"DataEngine: short-term memory cache hit for {symbol} ({interval}, {days}d)")
+                    return cached_df.copy()
+
         end_date = datetime.now(IST).strftime("%Y-%m-%d")
         start_date = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -603,6 +620,8 @@ class DataEngine:
             cached = self.store.get_ohlcv(symbol, interval, start=start_date, end=end_date)
             if not cached.empty and len(cached) > (days * 0.5):
                 logger.debug(f"Using cached data for {symbol} ({len(cached)} rows)")
+                if hasattr(self, "_mem_cache"):
+                    self._mem_cache[mem_key] = (cached.copy(), time.time())
                 return cached
 
         source_order = self._get_source_order(symbol, interval, days)
@@ -620,6 +639,8 @@ class DataEngine:
             df = self._clean_ohlcv(df, source=source, interval=interval)
             if source != "csv":
                 self.store.save_ohlcv(df, symbol, interval)
+            if hasattr(self, "_mem_cache"):
+                self._mem_cache[mem_key] = (df.copy(), time.time())
             logger.info(f"Fetched {len(df)} rows for {symbol} via {source}")
             return df
 
@@ -704,6 +725,7 @@ class DataEngine:
         symbol: str,
         interval: str = "5minute",
         days: int = 5,
+        bypass_mem_cache: bool = False,
     ) -> pd.DataFrame:
         """
         Fetch intraday bars — always fresh for live scanning.
@@ -712,7 +734,7 @@ class DataEngine:
         Kite provides real-time when connected.
         """
         return self.fetch_historical(
-            symbol, days=days, interval=interval, force_refresh=True
+            symbol, days=days, interval=interval, force_refresh=True, bypass_mem_cache=bypass_mem_cache
         )
 
     def get_vix(self) -> float:

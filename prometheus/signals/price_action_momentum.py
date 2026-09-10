@@ -72,9 +72,9 @@ class PriceActionMomentumScanner:
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
         # Session Time Gate:
-        # Golden Setup: Active 09:35 to 12:30; on non-expiry days, hard cutoff at 13:00 (strictly 0 trades after 1:00 PM)
-        # On active weekly expiry days, allow signals up to 15:05 (Expiry Power Hour mode)
-        cutoff_time = dtime(15, 5) if is_expiry_day else (dtime(13, 0) if golden_mode else dtime(14, 30))
+        # Golden Setup: Active 09:35 to 11:45; hard cutoff at 12:00 (strictly 0 option buying after 12:00 PM).
+        # On expiry days, option buying after 12:00 PM is lethal due to extreme theta decay and strike pinning.
+        cutoff_time = dtime(11, 45) if golden_mode else dtime(12, 0)
         min_start_time = dtime(9, 35) if golden_mode else dtime(9, 50)
         if current_time < min_start_time or current_time > cutoff_time:
             return None
@@ -246,10 +246,12 @@ class PriceActionMomentumScanner:
         is_golden_bull = is_orb_bull and is_vwap_bull and (htf_trend in ("BULLISH", "NEUTRAL"))
         is_golden_bear = is_orb_bear and is_vwap_bear and (htf_trend in ("BEARISH", "NEUTRAL"))
 
-        min_threshold = 3.5
+        min_threshold = 4.0 if golden_mode else 3.5
         net_edge = bull_score - bear_score
 
         if bull_score >= min_threshold and net_edge >= 1.5:
+            if golden_mode and not is_golden_bull:
+                return None
             action = "BUY_CE"
             direction = "bullish"
             reasons = bull_reasons
@@ -279,6 +281,8 @@ class PriceActionMomentumScanner:
             }
 
         elif bear_score >= min_threshold and net_edge <= -1.5:
+            if golden_mode and not is_golden_bear:
+                return None
             action = "BUY_PE"
             direction = "bearish"
             reasons = bear_reasons
@@ -329,8 +333,8 @@ class PriceActionMomentumScanner:
         current_time = current_ts.time() if hasattr(current_ts, "time") else dtime(10, 0)
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
-        # Expiry fast trigger operates from 09:35 to 15:05 (Expiry Power Hour)
-        if current_time < dtime(9, 35) or current_time > dtime(15, 5):
+        # Expiry fast trigger operates from 09:35 to 11:45 (strictly 0 option buying after 11:45)
+        if current_time < dtime(9, 35) or current_time > dtime(11, 45):
             return None
 
         if current_date:

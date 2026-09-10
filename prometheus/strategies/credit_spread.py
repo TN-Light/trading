@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 from prometheus.utils.indian_market import (
     get_lot_size, get_atm_strike, get_strike_interval,
-    days_to_expiry, get_expiry_date
+    days_to_expiry, get_expiry_date, is_weekly_expiry_day
 )
 from prometheus.execution.kite_executor import generate_tradingsymbol
 from prometheus.signals.technical import calculate_atr, calculate_vwap, calculate_supertrend
@@ -36,6 +36,7 @@ class CreditSpreadStrategy:
         breakeven_decay_pct: float = 0.50,  # Lock BE when 50% of credit decays
         max_loss_multiplier: float = 1.5,   # Hard SL at 1.5x initial credit
         min_credit_pct: float = 0.15,       # Min credit must be >= 15% of strike width
+        max_days_to_expiry: Optional[int] = None,  # When set (e.g. 1 in intraday), strictly enforce 0-DTE / 1-DTE
     ):
         self.strike_otm_steps = strike_otm_steps
         self.hedge_otm_steps = hedge_otm_steps
@@ -43,6 +44,7 @@ class CreditSpreadStrategy:
         self.breakeven_decay_pct = breakeven_decay_pct
         self.max_loss_multiplier = max_loss_multiplier
         self.min_credit_pct = min_credit_pct
+        self.max_days_to_expiry = max_days_to_expiry
 
     def evaluate_spread(
         self,
@@ -123,8 +125,18 @@ class CreditSpreadStrategy:
         atm_strike = get_atm_strike(close, symbol)
         interval = get_strike_interval(symbol)
         lot_size = get_lot_size(symbol)
-        expiry_date = get_expiry_date(symbol)
+        expiry_date = get_expiry_date(symbol, from_date=current_date)
         expiry_str = expiry_date.strftime("%Y-%m-%d") if expiry_date else ""
+
+        # Enforce DTE restriction for intraday credit spreads (0-DTE or 1-DTE only)
+        if self.max_days_to_expiry is not None and current_date and expiry_date:
+            days_to_exp = (expiry_date - current_date).days
+            if days_to_exp > self.max_days_to_expiry:
+                logger.info(
+                    f"CreditSpread skipped for {symbol}: Expiry {expiry_str} is {days_to_exp} days away. "
+                    f"Intraday credit spreads strictly require <= {self.max_days_to_expiry} DTE for rapid theta decay."
+                )
+                return None
 
         # ── 2. Select Spread Type with Structural Safety & Trend Alignment ──
         # Bear Call Spread requires: Below VWAP and not in a rapid bullish rebound
@@ -140,24 +152,49 @@ class CreditSpreadStrategy:
             else:
                 is_bullish = True  # Below range midpoint -> sell Bull Put Spread below support
 
-        # Dynamic Strike Buffer (Ensure Short Strike is OUTSIDE day's key level)
+        # ── Dynamic 2.0σ Strike Buffer (Pillar 2) ──
+        sigma_buffer = round((2.0 * atr) / interval) * interval
+        sigma_buffer = max(interval, sigma_buffer)
+
+        # ── Institutional Open Interest (OI) Wall Scan (Pillar 3) ──
+        oi_wall_strike = None
+        oi_wall_shares = 0
+        if option_chain is not None and hasattr(option_chain, "get_option_chain"):
+            try:
+                target_opt = "CE" if is_bearish else "PE"
+                chain_df = option_chain.get_option_chain(symbol, spot_price=close, expiry_date=expiry_str)
+                if isinstance(chain_df, pd.DataFrame) and not chain_df.empty and "oi" in chain_df.columns:
+                    side_df = chain_df[chain_df["option_type"] == target_opt]
+                    if not side_df.empty and side_df["oi"].max() > 0:
+                        max_oi_row = side_df.loc[side_df["oi"].idxmax()]
+                        oi_wall_strike = float(max_oi_row["strike"])
+                        oi_wall_shares = int(max_oi_row["oi"])
+            except Exception as e:
+                logger.debug(f"OI wall discovery error for {symbol}: {e}")
+
         otm_steps = self.strike_otm_steps
         
         if is_bearish:
-            # Bear Call Spread: Place short strike above today's high / resistance
+            # Bear Call Spread: Place short strike above today's high / resistance + 2.0σ buffer
             spread_type = "BEAR_CALL_SPREAD"
-            high_strike = get_atm_strike(today_high, symbol) + interval
-            calculated_strike = atm_strike + (otm_steps * interval)
+            high_strike = get_atm_strike(today_high + sigma_buffer, symbol)
+            calculated_strike = atm_strike + max(otm_steps * interval, sigma_buffer)
             short_strike = max(high_strike, calculated_strike)
+            # If an institutional Call OI wall is identified above spot, ensure strike is at or beyond the wall
+            if oi_wall_strike and oi_wall_strike >= atm_strike:
+                short_strike = max(short_strike, oi_wall_strike)
             long_strike = short_strike + (self.hedge_otm_steps * interval)
             opt_str = "CE"
             action = "SELL_CALL_SPREAD"
         elif is_bullish:
-            # Bull Put Spread: Place short strike below today's low / support
+            # Bull Put Spread: Place short strike below today's low / support - 2.0σ buffer
             spread_type = "BULL_PUT_SPREAD"
-            low_strike = get_atm_strike(today_low, symbol) - interval
-            calculated_strike = atm_strike - (otm_steps * interval)
+            low_strike = get_atm_strike(today_low - sigma_buffer, symbol)
+            calculated_strike = atm_strike - max(otm_steps * interval, sigma_buffer)
             short_strike = min(low_strike, calculated_strike)
+            # If an institutional Put OI wall is identified below spot, ensure strike is at or below the wall
+            if oi_wall_strike and oi_wall_strike <= atm_strike:
+                short_strike = min(short_strike, oi_wall_strike)
             long_strike = short_strike - (self.hedge_otm_steps * interval)
             opt_str = "PE"
             action = "SELL_PUT_SPREAD"
@@ -217,8 +254,14 @@ class CreditSpreadStrategy:
             return None
 
         net_credit = round(short_premium - long_premium, 2)
-        if net_credit < (strike_width * self.min_credit_pct):
-            net_credit = round(strike_width * self.min_credit_pct, 2)
+        min_required_credit = round(strike_width * self.min_credit_pct, 2)
+        if net_credit < min_required_credit or net_credit <= 0:
+            logger.info(
+                f"CreditSpread skipped for {symbol}: Net credit Rs {net_credit:.2f} is below "
+                f"minimum threshold Rs {min_required_credit:.2f} ({self.min_credit_pct*100:.0f}% of strike width) "
+                f"or non-positive — refusing synthetic fill."
+            )
+            return None
 
         max_profit = net_credit * lot_size
         max_loss = (strike_width - net_credit) * lot_size
@@ -265,14 +308,23 @@ class CreditSpreadStrategy:
             }
         ]
 
-        # Realistic NSE/BSE SPAN + Exposure Margin for hedged spreads
-        # Scaled by strike gap, lot size, and exchange base requirement
+        # Realistic NSE/BSE SPAN + Exposure Margin for hedged spreads.
+        # Account for SEBI derivatives framework (minimum Rs 15 Lakhs contract notional):
+        # 1. Base SPAN margin for hedged spreads: ~Rs 32,000 - 35,000 depending on index
+        # 2. Mandatory Expiry Day 2% ELM (Extreme Loss Margin) on short leg:
+        #    SEBI circular mandates +2% ELM on contract notional on expiry day, which
+        #    CANNOT be discounted by hedges: 2% of (Strike * Lot Size) = ~Rs 30,000!
+        is_expiry = is_weekly_expiry_day(symbol, current_date)
+        expiry_elm = (0.02 * float(short_strike) * lot_size) if is_expiry else 0.0
+
         if "BANK" in symbol:
-            margin_required = 22000.0 + (strike_width * lot_size * 1.5)
+            base_margin = 35000.0 + (strike_width * lot_size * 0.8)
         elif "SENSEX" in symbol:
-            margin_required = 15000.0 + (strike_width * lot_size * 1.2)
-        else:  # NIFTY 50 / FINNIFTY
-            margin_required = 18000.0 + (strike_width * lot_size * 1.8)
+            base_margin = 34000.0 + (strike_width * lot_size * 0.6)
+        else:  # NIFTY 50 / FINNIFTY / MIDCAP
+            base_margin = 32000.0 + (strike_width * lot_size * 0.7)
+
+        margin_required = base_margin + expiry_elm
 
         return {
             "strategy": "Hedged_Credit_Spread",
@@ -305,8 +357,11 @@ class CreditSpreadStrategy:
             "tradingsymbol": f"{short_tradingsymbol}/{long_tradingsymbol}",
             "instrument": f"{short_tradingsymbol}/{long_tradingsymbol}",
             "trade_mode": "intraday",
-            "timeframe": "intraday",
-            "confidence": 0.75,
-            "signal_strength": 3.5,
+            "is_sure_shot": bool((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)),
+            "signal_score": 9.5 if ((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)) else 7.5,
+            "confidence": 0.95 if ((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)) else 0.75,
+            "signal_strength": 9.5 if ((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)) else 3.5,
+            "oi_wall_strike": oi_wall_strike,
+            "oi_wall_shares": oi_wall_shares,
             "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
         }

@@ -288,14 +288,28 @@ class PaperTrader(BrokerBase):
 
     def get_ltp(self, tradingsymbol: str, exchange: str = "NFO") -> float:
         """Get last price from simulated feed."""
-        price = self._price_feed.get(tradingsymbol, 0.0)
+        if not tradingsymbol:
+            return 0.0
+
+        # Handle 2-leg credit spreads (e.g. "NIFTY2691523600CE/NIFTY2691523750CE")
+        if "/" in tradingsymbol:
+            parts = [p.strip() for p in tradingsymbol.split("/") if p.strip()]
+            if len(parts) == 2:
+                p_short = self.get_ltp(parts[0], exchange=exchange)
+                p_long = self.get_ltp(parts[1], exchange=exchange)
+                if p_short > 0 or p_long > 0:
+                    return max(0.05, round(p_short - p_long, 2))
+
+        val = self._price_feed.get(tradingsymbol, 0.0)
+        price = float(val.get("ltp", 0.0) if isinstance(val, dict) else (val or 0.0))
         if price > 0:
             return price
 
         # Try translation if it looks like a Zerodha symbol
         translated = self._translate_zerodha_to_angelone(tradingsymbol)
         if translated:
-            price = self._price_feed.get(translated, 0.0)
+            val = self._price_feed.get(translated, 0.0)
+            price = float(val.get("ltp", 0.0) if isinstance(val, dict) else (val or 0.0))
             if price > 0:
                 return price
 
@@ -329,6 +343,9 @@ class PaperTrader(BrokerBase):
             m_week = re.match(r'^(\d{2})([1-9OND])(\d{2})(\d+(?:\.\d+)?)$', suffix)
             if m_week:
                 yy, m_char, dd, strike_str = m_week.groups()
+                if underlying == "SENSEX":
+                    # For BSE (SENSEX), Angel One weekly format matches Zerodha: SENSEX2691075300CE
+                    return ts
                 month_map = {
                     "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
                     "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12
@@ -345,6 +362,9 @@ class PaperTrader(BrokerBase):
             m_month = re.match(r'^(\d{2})([A-Z]{3})(\d+(?:\.\d+)?)$', suffix)
             if m_month:
                 yy, mon, strike_str = m_month.groups()
+                if underlying == "SENSEX":
+                    # For BSE (SENSEX), Angel One monthly format matches Zerodha: SENSEX26SEP75300CE
+                    return ts
                 strike_val = float(strike_str)
                 strike_formatted = str(int(strike_val)) if strike_val == int(strike_val) else str(strike_val)
                 pattern = re.compile(rf"^{underlying}\d{{2}}{mon}{yy}{strike_formatted}{option_type}$")

@@ -344,21 +344,39 @@ class PositionTracker:
 
             if p.symbol == snapshot.symbol and not snapshot.instrument:
                 # Underlying bar (e.g. NIFTY 50 index bar) for an open option
-                # position on the same symbol. Advance bars-held only — DO NOT
-                # evaluate SL/target/trailing against the index price (that
-                # was the 2026-07-21 Rs 1.5M phantom-profit bug).
+                # position on the same symbol. Advance bars-held.
                 p.bars_held += 1
-                # Force-evaluate session_end / square_off using the LTP feed
-                # (not the snapshot's OHLC, which is the index level).
-                if is_session_end or is_square_off:
-                    exit_price, exit_reason = self._evaluate_exit_via_feed(
-                        p, snapshot, is_session_end=is_session_end,
-                        is_square_off=is_square_off,
-                    )
-                    if exit_reason is not None:
-                        trade = self.close_position(tid, snapshot.timestamp, exit_price, exit_reason)
-                        if trade is not None:
-                            closed.append(trade)
+                # Always evaluate SL/target/trailing/square-off via the live LTP feed
+                # on EVERY bar (never evaluate against the underlying snapshot's index price).
+                exit_price, exit_reason = self._evaluate_exit_via_feed(
+                    p, snapshot, is_session_end=is_session_end,
+                    is_square_off=is_square_off,
+                )
+                if exit_reason is not None:
+                    trade = self.close_position(tid, snapshot.timestamp, exit_price, exit_reason)
+                    if trade is not None:
+                        closed.append(trade)
+                    continue
+
+                if self.enable_trailing:
+                    ltp = 0.0
+                    if "/" in p.instrument:
+                        parts = p.instrument.split("/")
+                        if len(parts) == 2:
+                            try:
+                                s_ltp = float(self.fill_sim.feed.get_ltp(parts[0].strip()) or 0.0)
+                                l_ltp = float(self.fill_sim.feed.get_ltp(parts[1].strip()) or 0.0)
+                                if s_ltp > 0 or l_ltp > 0:
+                                    ltp = round(max(0.0, s_ltp - l_ltp), 2)
+                            except Exception:
+                                ltp = 0.0
+                    else:
+                        try:
+                            ltp = float(self.fill_sim.feed.get_ltp(p.instrument) or 0.0)
+                        except Exception:
+                            ltp = 0.0
+                    if ltp > 0:
+                        self._maybe_advance_trailing_stop(p, ltp)
         return closed
 
     def _evaluate_exit(
@@ -476,6 +494,11 @@ class PositionTracker:
                     return ltp, ExitReason.TARGET
         # Otherwise no LTP — skip SL/target evaluation this bar (don't
         # fabricate an exit price from the underlying snapshot).
+
+        # Time stop: check max_bars (order matters: SL/target already checked above)
+        max_bars = pos.max_bars_allowed or pos.max_bars
+        if max_bars and pos.bars_held >= max_bars:
+            return max(ltp, pos.entry_price if pos.entry_price > 0 else 0.0), ExitReason.TIME_STOP
 
         # Square-off and end-of-day force-closes still fire (the LTP we
         # recovered — or fall back to ``fill_sim`` at fill time — supplies

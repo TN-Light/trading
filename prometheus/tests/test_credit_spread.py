@@ -50,10 +50,19 @@ def test_credit_spread_generation():
     today_df = _generate_range_candles(n_bars=6, start_dt=datetime(2026, 8, 24, 9, 15))
     df = pd.concat([prior_df, today_df], ignore_index=True)
 
-    # Mock live option chain quotes
+    # Mock live option chain quotes with realistic short/long spread
     class MockChain:
+        def __init__(self):
+            self._first = True
+
         def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
-            return {"ltp": 45.0, "bid": 44.0, "ask": 46.0, "tradingsymbol": f"{symbol}{strike}{option_type}"}
+            if self._first:
+                self._first = False
+                prem = 50.0  # Short strike premium
+            else:
+                self._first = True
+                prem = 20.0  # Long hedge strike premium
+            return {"ltp": prem, "bid": prem - 1.0, "ask": prem + 1.0, "tradingsymbol": f"{symbol}{strike}{option_type}"}
 
     spread = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=50000.0, option_chain=MockChain())
     assert spread is not None, "Expected valid credit spread in sideways regime"
@@ -137,3 +146,19 @@ def test_credit_spread_inverted_trailing_hard_sl():
     monitor._process_tick(state, 62.0)
     assert len(exits) == 1
     assert exits[0][2] == "stop_loss_credit_spread"
+
+
+def test_credit_spread_rejects_insufficient_or_zero_credit():
+    """Verify CreditSpreadStrategy rejects trades when net credit is insufficient without fabricating synthetic fills."""
+    strategy = CreditSpreadStrategy()
+    prior_df = _generate_range_candles(n_bars=20, start_dt=datetime(2026, 8, 21, 9, 15))
+    today_df = _generate_range_candles(n_bars=6, start_dt=datetime(2026, 8, 24, 9, 15))
+    df = pd.concat([prior_df, today_df], ignore_index=True)
+
+    class ZeroCreditChain:
+        def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
+            return {"ltp": 45.0, "bid": 44.0, "ask": 46.0, "tradingsymbol": f"{symbol}{strike}{option_type}"}
+
+    spread = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=50000.0, option_chain=ZeroCreditChain())
+    assert spread is None, "Expected spread to be rejected when net credit is 0.0"
+
