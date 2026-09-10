@@ -870,8 +870,12 @@ class TelegramBot:
             if rank:
                 if rank == 1:
                     rank_header = "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+                elif rank == 2:
+                    rank_header = "🥈 <b>RANK #2 SIGNAL (SHADOW PAPER TRADED)</b>\n"
+                elif rank == 3:
+                    rank_header = "🥉 <b>RANK #3 SIGNAL (SHADOW PAPER TRADED)</b>\n"
                 else:
-                    rank_header = f"🥈 <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
+                    rank_header = f"🎖️ <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
             else:
                 rank_header = ""
 
@@ -1030,8 +1034,12 @@ class TelegramBot:
         if rank:
             if rank == 1:
                 rank_header = "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+            elif rank == 2:
+                rank_header = "🥈 <b>RANK #2 SIGNAL (SHADOW PAPER TRADED)</b>\n"
+            elif rank == 3:
+                rank_header = "🥉 <b>RANK #3 SIGNAL (SHADOW PAPER TRADED)</b>\n"
             else:
-                rank_header = f"🥈 <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
+                rank_header = f"🎖️ <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
         else:
             rank_header = ""
 

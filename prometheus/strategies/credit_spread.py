@@ -326,6 +326,17 @@ class CreditSpreadStrategy:
 
         margin_required = base_margin + expiry_elm
 
+        # ── Sure-Shot 9.5+ Classifier (Pillars 1 to 5) ──
+        is_0dte = bool(current_date and expiry_date and (expiry_date - current_date).days == 0)
+        strike_dist = abs(short_strike - close)
+        is_far_otm = (strike_dist >= min(interval, atr))
+        trend_aligned = bool(is_bearish or is_bullish)
+        
+        is_sure_shot = bool(is_0dte and is_far_otm and trend_aligned)
+        signal_score = 9.5 if is_sure_shot else 7.5
+        confidence = 0.95 if is_sure_shot else 0.75
+        signal_strength = 9.5 if is_sure_shot else 3.5
+
         return {
             "strategy": "Hedged_Credit_Spread",
             "strategy_type": "credit_spread",
@@ -357,10 +368,10 @@ class CreditSpreadStrategy:
             "tradingsymbol": f"{short_tradingsymbol}/{long_tradingsymbol}",
             "instrument": f"{short_tradingsymbol}/{long_tradingsymbol}",
             "trade_mode": "intraday",
-            "is_sure_shot": bool((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)),
-            "signal_score": 9.5 if ((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)) else 7.5,
-            "confidence": 0.95 if ((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)) else 0.75,
-            "signal_strength": 9.5 if ((current_date and expiry_date and (expiry_date - current_date).days == 0) and (abs(short_strike - close) >= min(interval, atr)) and (is_bearish or is_bullish)) else 3.5,
+            "is_sure_shot": is_sure_shot,
+            "signal_score": signal_score,
+            "confidence": confidence,
+            "signal_strength": signal_strength,
             "oi_wall_strike": oi_wall_strike,
             "oi_wall_shares": oi_wall_shares,
             "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
