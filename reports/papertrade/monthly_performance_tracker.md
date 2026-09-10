@@ -1,9 +1,9 @@
 # 📊 PROMETHEUS — Monthly Performance Tracker
 
-**Tracking Period:** August - September 2026  
+**Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 18,786.48 (-125.24%)**  
-**Last Updated:** 2026-09-09 18:00:00 IST  
+**Current Realized Net P&L:** **🔴 -Rs 17,547.15 (-116.98%)**  
+**Last Updated:** 2026-09-10 18:34:13 IST  
 
 ---
 
@@ -11,14 +11,14 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 18,786.48** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-125.24%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **12** | 20–22 days | In Progress |
-| **Green / Red Days** | **4 Green / 6 Red / 2 BE** | > 65% Green | 33.3% |
-| **Total Trades** | **54** | ~3–5 / day | Tracked |
-| **Win Rate** | **42.6%** (23W / 35L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.58** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 24,655.52 | — | Winning Trades |
+| **Net Realized P&L** | **-Rs 17,547.15** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-116.98%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **13** | 20–22 days | In Progress |
+| **Green / Red Days** | **5 Green / 6 Red / 2 BE** | > 65% Green | 38.5% |
+| **Total Trades** | **56** | ~3–5 / day | Tracked |
+| **Win Rate** | **42.9%** (24W / 35L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 26,144.12 | — | Winning Trades |
 | **Gross Loss** | -Rs 42,758.61 | — | Losing Trades |
 
 ---
@@ -38,7 +38,8 @@
 | **2026-09-04** | 6 | 2W / 4L | 33% | +Rs 1,379 | -Rs 7,023 | **🔴 -Rs 6,181.5** | -41.2% | **-Rs 18,862.3** | 2 Credit Spreads gained (+Rs 1128 net decay); 4 Call buys lost on afternoon pullback (-Rs 7310) |
 | **2026-09-07** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 18,862.3** | Intraday paper trading session |
 | **2026-09-08** | 0 | 2W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 18,862.3** | Intraday paper trading session |
-| **2026-09-09** | 1 | 1W / 0L | 100% | +Rs 203 | -Rs 0 | **🟢 +Rs 75.8** | +0.5% | **-Rs 18,786.5** | NIFTY 15 SEP Bear Call Spread (23600CE/23750CE): Entry net credit 49.32, exit 46.20 (+Rs 75.82 net; live Kite was flat -Rs 107 gross due to midday rally). Morning 50pt chop appropriately avoided. BSE weekly query bug identified & fixed. |
+| **2026-09-09** | 1 | 1W / 0L | 100% | +Rs 203 | -Rs 0 | **🟢 +Rs 75.8** | +0.5% | **-Rs 18,786.5** | NIFTY 15 SEP Bear Call Spread 23600CE/23750CE: Entry net credit 49.32 exit 46.20 (+Rs 75.82 net; live Kite was flat -Rs 107 gross / ~-Rs 207 net due to midday rally offsetting theta). Golden setup option buying appropriately suppressed in 50pt morning chop. |
+| **2026-09-10** | 2 | 2W / 0L | 100% | +Rs 1,489 | -Rs 0 | **🟢 +Rs 1,239.3** | +8.3% | **-Rs 17,547.2** | SENSEX 75000/75300 CE spread (+Rs 660.15 net, target decay hit @ 15.05); MIDCPNIFTY 14625/14700 CE spread (+Rs 579.18 net, square-off @ 27.40) |
 
 ---
 
