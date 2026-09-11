@@ -888,9 +888,10 @@ class TelegramBot:
             sigma_detail = f" ({sigma}σ OTM)" if sigma else ""
             
             if is_sure_shot:
+                pop_tag = f"Theoretical POP: ~{pop:.0f}%" if pop else f"High Conviction ({sig_score:.1f}/10)"
                 conviction_banner = (
                     f"🎯 <b>[TIER 1 HIGH CONVICTION SPREAD — {sig_score:.1f}/10]</b>\n"
-                    f"💎 <b>REAL-TRADE READY (Theoretical POP: ~{pop or 92:.0f}%{sigma_detail})</b>\n"
+                    f"💎 <b>REAL-TRADE READY ({pop_tag}{sigma_detail})</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 )
             else:

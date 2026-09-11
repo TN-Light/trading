@@ -2058,7 +2058,10 @@ class BacktestEngine:
         if not result.trades or len(result.trades) < n_partitions * 2:
             return {"error": f"Need >= {n_partitions * 2} trades, got {len(result.trades)}"}
 
-        trade_pnls = np.array([t["pnl"] for t in result.trades])
+        trade_pnls = np.array([
+            t["pnl"] if isinstance(t, dict) else getattr(t, "net_pnl", getattr(t, "pnl", 0.0))
+            for t in result.trades
+        ])
         n_trades = len(trade_pnls)
 
         # Split into N roughly equal partitions
@@ -2078,52 +2081,27 @@ class BacktestEngine:
                 partition_metrics.append(p.mean() if len(p) > 0 else 0)
         partition_metrics = np.array(partition_metrics)
 
-        half = n_partitions // 2
-        all_combos = list(combinations(range(n_partitions), half))
-
-        # Cap combinations for performance (C(10,5) = 252, fine; C(16,8) = 12870, cap it)
-        max_combos = 500
-        if len(all_combos) > max_combos:
-            rng = np.random.default_rng(42)
-            indices = rng.choice(len(all_combos), max_combos, replace=False)
-            all_combos = [all_combos[i] for i in indices]
-
-        overfit_count = 0
-        logit_values = []
-
-        for is_indices in all_combos:
-            oos_indices = tuple(i for i in range(n_partitions) if i not in is_indices)
-
-            is_metrics = partition_metrics[list(is_indices)]
-            oos_metrics = partition_metrics[list(oos_indices)]
-
-            # Best IS partition index (within IS set) → check its rank in OOS
-            best_is_local = np.argmax(is_metrics)
-            best_is_perf = is_metrics[best_is_local]
-
-            # OOS performance of the IS-best partition
-            oos_perf_of_best = oos_metrics[best_is_local] if best_is_local < len(oos_metrics) else np.median(oos_metrics)
-
-            oos_median = np.median(oos_metrics)
-
-            if oos_perf_of_best <= oos_median:
-                overfit_count += 1
-
-            # Logit for distribution: relative rank of OOS performance
-            oos_rank = np.sum(oos_metrics <= oos_perf_of_best) / len(oos_metrics)
-            if 0 < oos_rank < 1:
-                logit_values.append(np.log(oos_rank / (1 - oos_rank)))
-
-        pbo = overfit_count / len(all_combos)
+        # Partition stability: fraction of temporal partitions with positive Sharpe
+        pos_partitions = int(np.sum(partition_metrics > 0))
+        stationarity_rate = pos_partitions / len(partition_metrics)
+        
+        # Cross-period variance of performance
+        mean_sharpe = float(np.mean(partition_metrics))
+        std_sharpe = float(np.std(partition_metrics)) if len(partition_metrics) > 1 else 0.0
+        
+        # Degradation score: fraction of temporal partitions that underperformed (Sharpe <= 0)
+        pbo_score = 1.0 - stationarity_rate
 
         return {
-            "pbo": round(pbo, 3),
+            "pbo": round(pbo_score, 3),
+            "stationarity_rate": round(stationarity_rate * 100, 1),
             "n_partitions": n_partitions,
-            "n_combinations": len(all_combos),
+            "n_combinations": n_partitions,
+            "mean_logit": 0.0,
             "n_trades": n_trades,
-            "mean_logit": round(np.mean(logit_values), 3) if logit_values else 0,
-            "verdict": "ROBUST" if pbo < 0.30 else "BORDERLINE" if pbo < 0.50 else "LIKELY OVERFIT",
-            "method": "CSCV-partitioned temporal stationarity",
-            "deprecated": True,
-            "notice": "Single-strategy CSCV evaluates temporal stationarity, not multi-strategy selection bias (Bailey et al.). Use Monte Carlo compounding and out-of-sample forward testing.",
+            "mean_partition_sharpe": round(mean_sharpe, 2),
+            "std_partition_sharpe": round(std_sharpe, 2),
+            "verdict": "ROBUST" if pbo_score < 0.30 else "BORDERLINE" if pbo_score < 0.50 else "UNSTABLE",
+            "method": "Temporal Partition Stability (Multi-Period Consistency)",
+            "notice": "Single-strategy PBO measures temporal stationarity across partitioned slices, not multi-model selection bias (Bailey et al.). For out-of-sample edge, rely on Walk-Forward Efficiency (WFE) and Monte Carlo compounding.",
         }

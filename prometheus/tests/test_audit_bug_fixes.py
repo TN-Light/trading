@@ -715,4 +715,65 @@ def test_oi_analyzer_adaptive_threshold_non_nifty():
     assert len(call_buildups) >= 0  # Does not crash or hard-fail
 
 
+def test_telegram_no_or_92_fallback_when_pop_none():
+    """ISSUE-10 FIX: When pop is None on a Tier 1 spread signal, never fall back to 92%."""
+    from prometheus.interface.telegram_bot import TelegramBot
+    
+    bot = TelegramBot(bot_token="fake_token", chat_id="fake_chat")
+    messages_sent = []
+    bot.send_message = lambda text, parse_mode="HTML": messages_sent.append(text)
+    
+    spread_signal = {
+        "action": "BULL_PUT_SPREAD",
+        "symbol": "NIFTY 50",
+        "strategy_type": "credit_spread",
+        "spread_type": "BULL PUT SPREAD",
+        "is_sure_shot": True,
+        "signal_score": 9.5,
+        "pop_pct": None,  # POP could not be computed
+        "otm_sigma": 2.1,
+        "legs": [
+            {"tradingsymbol": "NIFTY2691523600PE", "action": "SELL", "premium": 45.0, "is_hedge": False, "strike": 23600, "option_type": "PE"},
+            {"tradingsymbol": "NIFTY2691523400PE", "action": "BUY", "premium": 15.0, "is_hedge": True, "strike": 23400, "option_type": "PE"},
+        ],
+        "net_credit": 30.0,
+        "target_decay_price": 9.0,
+        "hard_sl_price": 45.0,
+        "margin_required": 35000,
+    }
+    bot.alert_new_signal(spread_signal)
+    assert len(messages_sent) == 1
+    sent = messages_sent[0]
+    assert "92" not in sent, f"Expected no '92' fallback in alert, got:\n{sent}"
+    assert "High Conviction (9.5/10)" in sent
+    assert "2.1σ OTM" in sent
+
+
+def test_backtest_temporal_partition_stability():
+    """ISSUE-12 FIX: Test temporal partition stability method returns robust statistics."""
+    from prometheus.backtest.engine import BacktestEngine
+    from types import SimpleNamespace
+    
+    engine = BacktestEngine(initial_capital=100000.0)
+    
+    # Create 30 mock trades with known positive returns
+    trades = [
+        {"pnl": 500.0 if i % 3 != 0 else -250.0, "net_pnl": 500.0 if i % 3 != 0 else -250.0}
+        for i in range(30)
+    ]
+        
+    res = SimpleNamespace(trades=trades)
+    
+    pbo_metrics = engine.probability_of_backtest_overfitting(res, n_partitions=6)
+    assert "error" not in pbo_metrics
+    assert "pbo" in pbo_metrics
+    assert "stationarity_rate" in pbo_metrics
+    assert "mean_partition_sharpe" in pbo_metrics
+    assert pbo_metrics["stationarity_rate"] > 0
+    assert pbo_metrics["n_partitions"] == 6
+    assert pbo_metrics["verdict"] in ["ROBUST", "BORDERLINE", "UNSTABLE"]
+
+
+
+
 

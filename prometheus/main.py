@@ -8233,14 +8233,18 @@ class Prometheus:
                 result_train, n_partitions=10
             )
             if "error" not in pbo_result:
+                method_title = pbo_result.get("method", "Temporal Stationarity & Partition Stability")
                 print("\n  " + "-" * 65)
-                print("  PBO — Probability of Backtest Overfitting (CSCV)")
+                print(f"  PBO — {method_title}")
                 print("  " + "-" * 65)
-                print(f"  PBO score:       {pbo_result['pbo']:.3f}  "
-                      f"(<0.30 robust, 0.30-0.50 borderline, >0.50 overfit)")
-                print(f"  Partitions:      {pbo_result['n_partitions']} "
-                      f"({pbo_result['n_combinations']} combinations)")
-                print(f"  Mean logit:      {pbo_result['mean_logit']:.3f}")
+                print(f"  PBO Degradation: {pbo_result['pbo']:.3f}  "
+                      f"(<0.30 robust, 0.30-0.50 borderline, >0.50 unstable)")
+                if "stationarity_rate" in pbo_result:
+                    print(f"  Stationarity:    {pbo_result['stationarity_rate']:.1f}% positive periods "
+                          f"({pbo_result.get('n_partitions', 0)} partitions)")
+                if "mean_partition_sharpe" in pbo_result:
+                    print(f"  Partition Sharpe:{pbo_result['mean_partition_sharpe']:.2f} "
+                          f"(±{pbo_result.get('std_partition_sharpe', 0.0):.2f})")
                 print(f"  Verdict:         {pbo_result['verdict']}")
                 if pbo_result.get("notice"):
                     print(f"  Notice:          {pbo_result['notice']}")

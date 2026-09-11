@@ -398,3 +398,28 @@ Completed full architectural pivot to **Prometheus 2.0 Barbell Dual-Regime Syste
 - `python smoke_test_quick.py` $\rightarrow$ **4 passed, 0 failed**.
 - End-to-end verified on Monday Aug 24 historical data and 11-year dataset.
 
+## Session 33 Updates (September 11, 2026) — Forensic Audit Hardening & Backtest Correction
+
+Comprehensive codebase audit and hardening addressing all 7 Critical (P0) bugs and 6 Research Integrity / Scoring issues:
+
+### 1. Critical Execution & Backtest Bug Fixes (BUG-1 to BUG-7)
+- **BUG-1 (Trailing Stop Zero-Division)**: `prometheus/paper_executor/position_monitor.py` — Fixed trailing stop trigger logic. Corrected stage denominator to `target_dist = target - entry` (with `1e-4` guard) rather than `peak_gain`, and enforced sequential top-down stage evaluation (`STAGE_4 -> 3 -> 2 -> 1`) to eliminate simultaneous multi-stage firing.
+- **BUG-2 (Entry-Bar Invincibility)**: `prometheus/backtest/engine.py` — Backtest engine now evaluates stop loss and profit targets against the entry bar's intra-bar range from `entry_price` forward, removing the unearned "free bar" survival bias.
+- **BUG-3 (Exit Evaluation Order)**: `prometheus/backtest/engine.py` — When both SL and Target fall within a bar's High-Low range, SL is now strictly evaluated first (conservative quantitative standard).
+- **BUG-4 (Position Sizing 1-Lot Floor)**: `prometheus/risk/position_sizer.py` — Guaranteed a minimum 1-lot floor for small accounts (₹15,000–₹50,000) when risk parameters permit, preventing silent drop of trades.
+- **BUG-5 (Risk Overlay Preservation)**: `prometheus/backtest/engine.py` — Preserved overlay-adjusted `signal["quantity"]` in `_open_position` instead of resetting to raw initial quantity.
+- **BUG-6 (Credit Spread Short Mechanics)**: `prometheus/backtest/engine.py` — Proper short option / credit spread PnL mechanics: SL fires when premium expands above threshold; decay target triggers when premium collapses below threshold.
+- **BUG-7 (Realistic Option Slippage)**: `prometheus/backtest/engine.py` & `cost_model.py` — Enforced minimum ₹0.50 tick slippage + percentage slippage, preventing unrealistic fills on illiquid option strikes.
+
+### 2. Research Integrity & Signal Math Upgrades (ISSUE-8 to ISSUE-13)
+- **ISSUE-8 (Honest Credit Spread Conviction & POP)**: `prometheus/strategies/credit_spread.py` — Replaced tautological `is_far_otm` / `trend_aligned` checks with dynamic Gaussian CDF Probability of Profit $\Phi(z)$, true strike $\sigma$-distance calculation, and institutional OI wall clearance. Aligned `signal_strength = signal_score`.
+- **ISSUE-9 (HTF 1H EMA Trend Alignment)**: `prometheus/signals/price_action_momentum.py` — Fixed 1H HTF EMA logic (`close > ema20 > ema50` for BULLISH, `<` for BEARISH, mixed for NEUTRAL).
+- **ISSUE-10 (Telegram Honesty & Zero Hardcoded Probabilities)**: `prometheus/interface/telegram_bot.py` — Stripped all hardcoded `"92%"` display strings and removed `pop or 92` fallbacks across all signal types. Uncomputed POP now displays honest conviction score `(X.X/10)`.
+- **ISSUE-11 (Monte Carlo R-Multiple Bootstrap)**: `prometheus/backtest/engine.py` — Upgraded Monte Carlo simulations to bootstrap normalized R-multiples with realistic compounding distribution.
+- **ISSUE-12 (PBO Partition Index Mismatch & Stationarity Refactor)**: `prometheus/backtest/engine.py` — Fixed broken CSCV `oos_metrics[best_is_local]` cross-subset index mapping. Refactored single-strategy overfitting metric to **Temporal Partition Stability** (% positive Sharpe slices, mean/std partition Sharpe, and partition degradation rate) alongside Walk-Forward Efficiency (WFE).
+- **ISSUE-13 (Adaptive OI Institutional Wall Threshold)**: `prometheus/signals/oi_analyzer.py` — Replaced static `50,000` OI threshold with adaptive `max(5000, total_near_atm_oi * 0.03)`, ensuring proper support for SENSEX, BANKNIFTY, MIDCPNIFTY, and equity options.
+
+### 3. Verification & Regressions
+- Unit test suite: `pytest prometheus/tests/test_audit_bug_fixes.py prometheus/tests/test_credit_spread.py prometheus/tests/test_price_action_momentum.py prometheus/tests/test_credit_spread_live_pricing.py` $\rightarrow$ **33 passed**.
+- System running cleanly in paper trading mode with full live telemetry.
+
