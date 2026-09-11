@@ -240,6 +240,20 @@ class PriceActionMomentumScanner:
                     bear_score += 1.5
                     bear_reasons.append("Consolidation_Breakdown_Down")
 
+        # Check F: Volume Surge Expansion
+        has_volume_surge = False
+        if "volume" in df.columns and len(df) >= 10:
+            avg_vol = float(df["volume"].iloc[-11:-1].mean())
+            curr_vol = float(current_row["volume"]) if "volume" in current_row else 0.0
+            if avg_vol > 0 and curr_vol >= (avg_vol * self.volume_surge_mult):
+                has_volume_surge = True
+                if is_orb_bull or is_vwap_bull:
+                    bull_score += 1.0
+                    bull_reasons.append("Volume_Surge_Confirmed")
+                if is_orb_bear or is_vwap_bear:
+                    bear_score += 1.0
+                    bear_reasons.append("Volume_Surge_Confirmed")
+
         # ── 5. Decision & Trade Structuring ──
         is_golden_bull = is_orb_bull and is_vwap_bull and (htf_trend in ("BULLISH", "NEUTRAL"))
         is_golden_bear = is_orb_bear and is_vwap_bear and (htf_trend in ("BEARISH", "NEUTRAL"))
@@ -253,13 +267,15 @@ class PriceActionMomentumScanner:
             action = "BUY_CE"
             direction = "bullish"
             reasons = bull_reasons
-            confidence = min(0.60 + (bull_score / 10.0), 0.95)
+            # Dynamic confidence based on net edge and confluence breadth (0.60 to 0.90)
+            confidence = round(min(0.52 + (net_edge * 0.06), 0.90), 2)
             strat_name = "Golden_Setup (1H+VWAP+ORB)" if is_golden_bull else f"PriceAction_Momentum ({'+'.join(reasons)})"
             
-            # Realistic Target (0.9 to 1.0x ATR, approx +20 to +25 index points)
+            # Realistic Target (1.0x to 1.2x ATR with volume surge, approx +20 to +30 index points)
+            target_mult = 1.2 if has_volume_surge and bull_score >= 6.0 else 1.0
             recent_low = float(today_bars.iloc[-3:]["low"].min())
             sl = max(recent_low - buffer, close - (1.0 * atr))
-            target = close + (1.0 * atr)
+            target = close + (target_mult * atr)
             rr = (target - close) / max(close - sl, 1.0)
 
             return {
@@ -284,13 +300,15 @@ class PriceActionMomentumScanner:
             action = "BUY_PE"
             direction = "bearish"
             reasons = bear_reasons
-            confidence = min(0.60 + (bear_score / 10.0), 0.90)
+            # Dynamic confidence based on net edge and confluence breadth (0.60 to 0.90)
+            confidence = round(min(0.52 + (abs(net_edge) * 0.06), 0.90), 2)
             strat_name = "Golden_Setup (1H+VWAP+ORB)" if is_golden_bear else f"PriceAction_Momentum ({'+'.join(reasons)})"
 
-            # Realistic Target (0.9 to 1.0x ATR, approx +20 to +25 index points)
+            # Realistic Target (1.0x to 1.2x ATR with volume surge, approx +20 to +30 index points)
+            target_mult = 1.2 if has_volume_surge and bear_score >= 6.0 else 1.0
             recent_high = float(today_bars.iloc[-3:]["high"].max())
             sl = min(recent_high + buffer, close + (1.0 * atr))
-            target = close - (1.0 * atr)
+            target = close - (target_mult * atr)
             rr = (close - target) / max(sl - close, 1.0)
 
             return {

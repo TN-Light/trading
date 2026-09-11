@@ -332,8 +332,9 @@ class CreditSpreadStrategy:
         otm_sigma = round(strike_dist / max(atr, 1.0), 2)
         
         # Rigorous Pillar Checks:
-        # Pillar 1: Statistical buffer (strike must be >= 1.5σ away from spot)
-        is_far_otm = bool(otm_sigma >= 1.5)
+        # Pillar 1: Statistical buffer (requires >= 2.0σ away from spot for true Tier 1 conviction)
+        is_far_otm = bool(otm_sigma >= 2.0)
+        is_mod_otm = bool(otm_sigma >= 1.5)
         # Pillar 2: Trend alignment (spot actually favorable relative to VWAP)
         trend_aligned = bool((is_bearish and close <= vwap) or (is_bullish and close >= vwap))
         # Pillar 3: Institutional Open Interest wall protection
@@ -354,7 +355,7 @@ class CreditSpreadStrategy:
             raw_pop -= 0.06  # discount on non-expiry days due to multi-day vega/gamma risk
         pop_pct = round(max(0.65, min(0.96, raw_pop)) * 100.0, 1)
 
-        # Sure-Shot / Tier 1 requires 0-DTE + Far OTM (>=1.5σ) + VWAP trend alignment
+        # Sure-Shot / Tier 1 requires 0-DTE + Far OTM (>=2.0σ) + VWAP trend alignment
         is_sure_shot = bool(is_0dte and is_far_otm and trend_aligned)
         
         # Dynamically scaled score (7.0 to 9.5) based on true confluences
@@ -363,6 +364,8 @@ class CreditSpreadStrategy:
             score_calc += 1.0
         if is_far_otm:
             score_calc += 0.8
+        elif is_mod_otm:
+            score_calc += 0.4
         if trend_aligned:
             score_calc += 0.4
         if is_wall_shielded:
