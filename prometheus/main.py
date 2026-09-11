@@ -341,6 +341,11 @@ class Prometheus:
         # See ``prometheus/paper_executor/live_bridge.py``.
         self._paper_capture = None
 
+    @property
+    def paper_capture(self):
+        """Access the initialized LivePaperCapture instance."""
+        return getattr(self, "_paper_capture", None)
+
         # Forward-validation artifact for Thursday Gamma Ambush exits.
         self.gamma_ambush_log_file = str(
             PROJECT_ROOT.parent / "reports" / "validation" / "gamma_ambush_forward.csv"
