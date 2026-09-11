@@ -457,10 +457,20 @@ class DataEngine:
         """Resolve provider priority based on mode and data characteristics."""
         sources: List[str] = []
 
-        # Hardcode override: try local CSV first for large intraday backtests
-        import os
-        if os.path.exists(f"dataset/{symbol}_{interval}.csv"):
-            sources.append("csv")
+        is_intraday = str(interval).lower() in {
+            "minute", "1minute", "1m", "3minute", "3m", "5minute", "5m",
+            "15minute", "15m", "30minute", "30m", "60minute", "1h", "hour"
+        }
+        from prometheus.utils.indian_market import is_trading_day
+        from datetime import time as dtime
+        now_ist = datetime.now(IST)
+        is_live_trading_hours = is_trading_day(now_ist.date()) and (dtime(9, 15) <= now_ist.time() <= dtime(15, 45))
+
+        # Local CSV override: only for offline backtesting, NEVER during live market hours!
+        if not (is_live_trading_hours and is_intraday):
+            import os
+            if os.path.exists(f"dataset/{symbol}_{interval}.csv"):
+                sources.append("csv")
 
         if self.historical_source != "auto":
             # Hybrid architecture: use yfinance candles for validation gates,
@@ -472,8 +482,8 @@ class DataEngine:
                 if self.historical_source not in sources:
                     sources.append(self.historical_source)
             return sources
-        intraday_intervals = {"5minute", "5m", "15minute", "15m", "minute", "1m"}
 
+        # In live trading hours for intraday bars, Angel One is the primary real-time provider.
         if self.kite.is_connected() and KiteDataFeed.INDEX_TOKENS.get(symbol):
             if "kite" not in sources:
                 sources.append("kite")
@@ -593,27 +603,59 @@ class DataEngine:
         bypass_mem_cache: bool = False,
     ) -> pd.DataFrame:
         """
-        Fetch historical data — tries Kite first, then yfinance fallback.
+        Fetch historical data — tries Kite first, then Angel One, then yfinance fallback.
         Caches in SQLite and short-term memory (45s) to avoid duplicate API spam.
+        Strictly enforces live broker fetching during market hours.
         """
+        from prometheus.utils.indian_market import is_trading_day
+        from datetime import time as dtime
+        now_ist = datetime.now(IST)
+        today_d = now_ist.date()
+        is_intraday_bar = str(interval).lower() in (
+            "minute", "1minute", "1m", "3minute", "3m", "5minute", "5m",
+            "15minute", "15m", "30minute", "30m", "60minute", "1h", "hour"
+        )
+        is_live_trading_hours = is_trading_day(today_d) and (dtime(9, 15) <= now_ist.time() <= dtime(15, 45))
+
+        # During live market hours on a trading day, ALWAYS force live refresh for intraday intervals.
+        # Live intraday signals and open paper positions MUST ONLY be fed fresh broker data.
+        if is_live_trading_hours and is_intraday_bar:
+            force_refresh = True
+
         mem_key = f"{symbol}:{interval}:{days}"
         now_ts = time.time()
         if not bypass_mem_cache and hasattr(self, "_mem_cache") and mem_key in self._mem_cache:
             cached_df, cached_ts = self._mem_cache[mem_key]
-            if (now_ts - cached_ts) < getattr(self, "_mem_cache_ttl_seconds", 45.0):
+            mem_ttl = getattr(self, "_mem_cache_ttl_seconds", 45.0)
+            if is_live_trading_hours and is_intraday_bar:
+                mem_ttl = min(mem_ttl, 15.0)
+
+            if (now_ts - cached_ts) < mem_ttl:
                 if cached_df is not None and not cached_df.empty:
-                    logger.debug(f"DataEngine: short-term memory cache hit for {symbol} ({interval}, {days}d)")
-                    return cached_df.copy()
+                    # Guard memory cache against stale yesterday bars during market hours
+                    is_mem_fresh = True
+                    if is_live_trading_hours and is_intraday_bar:
+                        last_ts = cached_df.iloc[-1].get("timestamp")
+                        if last_ts is not None:
+                            last_bar_d = pd.to_datetime(last_ts).date()
+                            if last_bar_d < today_d:
+                                is_mem_fresh = False
+                    if is_mem_fresh:
+                        logger.debug(f"DataEngine: short-term memory cache hit for {symbol} ({interval}, {days}d)")
+                        return cached_df.copy()
 
         end_date = datetime.now(IST).strftime("%Y-%m-%d")
         start_date = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
 
-        # Check cache first only in auto mode. When source is explicitly forced,
-        # bypass shared cache so provider comparisons stay deterministic.
+        # Check cache first only in auto mode. When source is explicitly forced or force_refresh is requested,
+        # bypass shared cache so provider comparisons and live scans stay deterministic.
         use_cache = (self.historical_source == "auto") and (not force_refresh)
         # Always bypass cache for large intraday requests targeting CSV overrides
         import os
-        if os.path.exists(f"dataset/{symbol}_{interval}.csv"):
+        if os.path.exists(f"dataset/{symbol}_{interval}.csv") and not is_live_trading_hours:
+            use_cache = False
+        # In live trading hours for intraday bars, NEVER read from SQLite cache
+        if is_live_trading_hours and is_intraday_bar:
             use_cache = False
             
         if use_cache:
@@ -623,12 +665,8 @@ class DataEngine:
                 # For intraday intervals during trading hours, cache is only valid if it includes today's bars.
                 # Serving yesterday's cache causes strategies to evaluate stale historical setups!
                 is_fresh = True
-                from prometheus.utils.indian_market import is_trading_day
-                from datetime import time as dtime
-                now_ist = datetime.now(IST)
-                today_d = now_ist.date()
                 if is_trading_day(today_d) and now_ist.time() >= dtime(9, 15):
-                    if interval in ("minute", "1minute", "3minute", "5minute", "15minute", "30minute", "60minute", "hour"):
+                    if is_intraday_bar:
                         last_ts = cached.iloc[-1].get("timestamp")
                         if last_ts is not None:
                             last_bar_date = pd.to_datetime(last_ts).date()
@@ -653,6 +691,30 @@ class DataEngine:
                 df["symbol"] = symbol
 
             df = self._clean_ohlcv(df, source=source, interval=interval)
+            if df.empty:
+                logger.warning(f"Data cleaned to empty for {symbol} via {source}")
+                continue
+
+            # Strict Live Freshness Guard:
+            # During live market hours on a trading day, assert that the latest candle is from TODAY.
+            # If a source returns historical data ending yesterday or earlier, reject it!
+            if is_live_trading_hours and is_intraday_bar:
+                last_ts = pd.to_datetime(df.iloc[-1].get("timestamp"))
+                if last_ts is not None:
+                    last_bar_date = last_ts.date()
+                    if last_bar_date < today_d:
+                        logger.error(
+                            f"STALE DATA REJECTED: {source} returned data for {symbol} ({interval}) "
+                            f"ending on {last_bar_date}, but today is trading day {today_d}! "
+                            f"Rejecting stale batch to ensure only live data is fed to strategies."
+                        )
+                        continue
+                    else:
+                        logger.info(
+                            f"LIVE DATA VERIFIED: {symbol} ({interval}) via {source} -> "
+                            f"{len(df)} candles, latest bar timestamp: {last_ts.strftime('%Y-%m-%d %H:%M')}"
+                        )
+
             if source != "csv":
                 self.store.save_ohlcv(df, symbol, interval)
             if hasattr(self, "_mem_cache"):

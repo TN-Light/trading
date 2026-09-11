@@ -147,8 +147,9 @@ def test_data_engine_short_term_mem_cache():
 
     de = DataEngine()
     de.historical_source = "auto"
+    now_dt = pd.Timestamp.now()
     mock_df = pd.DataFrame({
-        "timestamp": pd.date_range("2026-09-10 09:15", periods=5, freq="15min"),
+        "timestamp": pd.date_range(now_dt - pd.Timedelta(minutes=60), periods=5, freq="15min"),
         "open": [100, 101, 102, 103, 104],
         "high": [105, 106, 107, 108, 109],
         "low": [99, 100, 101, 102, 103],
@@ -179,3 +180,53 @@ def test_data_engine_short_term_mem_cache():
     # Bypass mem cache: makes another call
     df3 = de.fetch_intraday("NIFTY 50", interval="15minute", days=5, bypass_mem_cache=True)
     assert fetch_count == 2
+
+
+def test_live_intraday_freshness_enforcement():
+    """Verify that during market hours:
+    1. Yesterday's stale candles from any source are strictly rejected.
+    2. Today's fresh candles are accepted.
+    3. SQLite cache containing yesterday's bars is completely bypassed.
+    """
+    import pandas as pd
+    from unittest.mock import MagicMock, patch
+    from prometheus.data.engine import DataEngine
+    from datetime import datetime
+    import pytz
+
+    IST = pytz.timezone("Asia/Kolkata")
+    # Simulate Tuesday 10:30 AM trading hours (Sep 15, 2026)
+    sim_now = datetime(2026, 9, 15, 10, 30, tzinfo=IST)
+
+    de = DataEngine()
+    de.historical_source = "auto"
+
+    stale_df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-09-11 09:15", periods=25, freq="15min"),
+        "open": [100.0] * 25, "high": [105.0] * 25, "low": [99.0] * 25, "close": [101.0] * 25, "volume": [1000] * 25,
+    })
+    fresh_df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-09-15 09:15", periods=6, freq="15min"),
+        "open": [100.0] * 6, "high": [105.0] * 6, "low": [99.0] * 6, "close": [101.0] * 6, "volume": [1000] * 6,
+    })
+
+    de.store = MagicMock()
+    # SQLite has stale data
+    de.store.get_ohlcv.return_value = stale_df.copy()
+
+    with patch("prometheus.data.engine.datetime") as mock_dt:
+        mock_dt.now.return_value = sim_now
+        mock_dt.strptime = datetime.strptime
+        mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+
+        # 1. Source returns stale data -> must be rejected during market hours!
+        de._fetch_with_retry = MagicMock(return_value=stale_df.copy())
+        res = de.fetch_historical("NIFTY 50", days=5, interval="15minute", force_refresh=False)
+        assert res.empty, "Stale candles ending on a previous date must be rejected during market hours"
+
+        # 2. Source returns fresh data -> accepted!
+        de._fetch_with_retry = MagicMock(return_value=fresh_df.copy())
+        res_fresh = de.fetch_historical("NIFTY 50", days=5, interval="15minute", force_refresh=False)
+        assert not res_fresh.empty, "Fresh candles from today must be accepted"
+        assert len(res_fresh) == 6
+

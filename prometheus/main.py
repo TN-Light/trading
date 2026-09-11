@@ -498,7 +498,7 @@ class Prometheus:
                 try:
                     df = self.data.fetch_historical(
                         sym, days=5, interval=bar_interval,
-                        force_refresh=False,
+                        force_refresh=True,
                     )
                 except Exception as e:
                     logger.debug(f"[PaperCapture] feed bars skipped for {sym}: {e}")
@@ -2017,7 +2017,7 @@ class Prometheus:
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
             df_1h = None
             try:
-                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=10)
+                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=10, force_refresh=True)
             except Exception as e:
                 logger.debug(f"Could not fetch 1H data for {symbol}: {e}")
 
