@@ -2124,4 +2124,6 @@ class BacktestEngine:
             "mean_logit": round(np.mean(logit_values), 3) if logit_values else 0,
             "verdict": "ROBUST" if pbo < 0.30 else "BORDERLINE" if pbo < 0.50 else "LIKELY OVERFIT",
             "method": "CSCV-partitioned temporal stationarity",
+            "deprecated": True,
+            "notice": "Single-strategy CSCV evaluates temporal stationarity, not multi-strategy selection bias (Bailey et al.). Use Monte Carlo compounding and out-of-sample forward testing.",
         }

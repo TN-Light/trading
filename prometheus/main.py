@@ -8242,6 +8242,8 @@ class Prometheus:
                       f"({pbo_result['n_combinations']} combinations)")
                 print(f"  Mean logit:      {pbo_result['mean_logit']:.3f}")
                 print(f"  Verdict:         {pbo_result['verdict']}")
+                if pbo_result.get("notice"):
+                    print(f"  Notice:          {pbo_result['notice']}")
 
         # Pass/fail
         print("\n  " + "-" * 65)
