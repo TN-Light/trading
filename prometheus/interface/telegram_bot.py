@@ -880,16 +880,23 @@ class TelegramBot:
                 rank_header = ""
 
             is_sure_shot = bool(signal.get("is_sure_shot", False)) or (float(signal.get("signal_score", 0.0) or 0.0) >= 9.0)
+            sig_score = float(signal.get("signal_score", 0.0) or 7.5)
+            pop = signal.get("pop_pct") or signal.get("theoretical_pop")
+            sigma = signal.get("otm_sigma")
+            
+            pop_detail = f" | POP: ~{pop:.0f}%" if pop else ""
+            sigma_detail = f" ({sigma}σ OTM)" if sigma else ""
+            
             if is_sure_shot:
                 conviction_banner = (
-                    "🎯 <b>[SURE-SHOT 9.5+ HIGH CONVICTION SIGNAL]</b>\n"
-                    "💎 <b>REAL-TRADE READY (Math Probability: 92%+)</b>\n"
+                    f"🎯 <b>[TIER 1 HIGH CONVICTION SPREAD — {sig_score:.1f}/10]</b>\n"
+                    f"💎 <b>REAL-TRADE READY (Theoretical POP: ~{pop or 92:.0f}%{sigma_detail})</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 )
             else:
                 conviction_banner = (
-                    "📊 <b>[STANDARD SIGNAL — PAPER TRADE ONLY]</b>\n"
-                    "⚠️ <i>Standard conviction (7.0 - 8.0). Keep in paper mode.</i>\n"
+                    "📊 <b>[STANDARD SPREAD — PAPER TRADE ONLY]</b>\n"
+                    f"⚠️ <i>Standard conviction ({sig_score:.1f}/10{pop_detail}{sigma_detail}). Keep in paper mode.</i>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 )
 
@@ -1056,16 +1063,20 @@ class TelegramBot:
         confluence_line = f"<b>Confluences:</b> <i>{confluence_str}</i>\n" if confluence_str else ""
 
         is_sure_shot_buy = bool(signal.get("is_sure_shot", False)) or (float(edge_score or 0.0) >= 9.0)
+        rr_val = signal.get("risk_reward") or signal.get("rr")
+        rr_detail = f" | R:R 1:{float(rr_val):.1f}" if rr_val else ""
+        edge_disp = f"{float(edge_score):.1f}/10" if edge_score is not None else "High"
+        
         if is_sure_shot_buy:
             conviction_badge = (
-                "🎯 <b>[SURE-SHOT 9.5+ HIGH CONVICTION SIGNAL]</b>\n"
-                "💎 <b>REAL-TRADE READY (Math Probability: 90%+)</b>\n"
+                f"🎯 <b>[TIER 1 HIGH CONVICTION MOMENTUM — {edge_disp}]</b>\n"
+                f"💎 <b>REAL-TRADE READY (Edge Score: {edge_disp}{rr_detail})</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
         else:
             conviction_badge = (
                 "📊 <b>[STANDARD SIGNAL — PAPER TRADE ONLY]</b>\n"
-                "⚠️ <i>Standard conviction. Recommended for paper observation.</i>\n"
+                f"⚠️ <i>Standard conviction ({edge_disp}{rr_detail}). Recommended for paper observation.</i>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
 

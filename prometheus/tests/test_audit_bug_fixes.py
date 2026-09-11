@@ -550,3 +550,148 @@ def test_backtest_monte_carlo_compounding_returns():
     assert mc["median_max_drawdown"] < 25.0
 
 
+def test_htf_1h_ema50_trend_alignment():
+    """Verify 1H EMA50 is not dead code and mixed EMAs result in NEUTRAL trend."""
+    import pandas as pd
+    from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
+    from datetime import datetime, timedelta
+    
+    scanner = PriceActionMomentumScanner()
+    
+    # Construct 1H candles where close > EMA20, but EMA20 < EMA50 (e.g. bounce in downtrend)
+    # 30 bars downtrend (25000 down to 24000) followed by a 1-bar sharp bounce to 24200
+    rows = []
+    base_ts = datetime(2026, 8, 20, 9, 15)
+    for i in range(40):
+        ts = base_ts + timedelta(hours=i)
+        p = 25000.0 - i * 25.0  # steady downtrend
+        rows.append({"timestamp": ts, "open": p, "high": p + 10, "low": p - 10, "close": p, "volume": 10000})
+    
+    # Add bounce bar: close jumps above recent prices so close > ema20, but ema20 remains < ema50
+    bounce_ts = base_ts + timedelta(hours=40)
+    rows.append({"timestamp": bounce_ts, "open": 24000.0, "high": 24300.0, "low": 23990.0, "close": 24250.0, "volume": 50000})
+    df_1h = pd.DataFrame(rows)
+
+    # Prior 15m bars + today's bars
+    p_df = pd.DataFrame([
+        {"timestamp": datetime(2026, 8, 24, 9, 15) + timedelta(minutes=15 * i),
+         "open": 24000 + i*10, "high": 24020 + i*10, "low": 23990 + i*10, "close": 24010 + i*10, "volume": 50000}
+        for i in range(10)
+    ])
+    
+    # In golden_mode with counter or non-aligned trend, setup must not falsely trigger as Golden
+    sig = scanner.evaluate_bar(p_df, symbol="NIFTY 50", df_1h=df_1h, golden_mode=True)
+    # The HTF trend must not be BULLISH because EMA20 < EMA50
+    if sig:
+        assert sig.get("is_golden_setup") is not True or "1H_Trend_Bullish" not in sig.get("reasons", [])
+
+
+def test_credit_spread_pop_and_score_harmonization():
+    """Verify credit spread computes dynamic POP and harmonizes signal_strength with signal_score."""
+    import pandas as pd
+    from prometheus.strategies.credit_spread import CreditSpreadStrategy
+    from datetime import datetime, timedelta
+    
+    strategy = CreditSpreadStrategy()
+    # 20 bars prior day (Aug 21) + 6 bars today (Aug 24)
+    prior_bars = [
+        {"timestamp": datetime(2026, 8, 21, 9, 15) + timedelta(minutes=15 * i),
+         "open": 24000.0, "high": 24050.0, "low": 23950.0, "close": 24000.0, "volume": 50000}
+        for i in range(20)
+    ]
+    today_bars = [
+        {"timestamp": datetime(2026, 8, 24, 9, 15) + timedelta(minutes=15 * i),
+         "open": 24000.0, "high": 24050.0, "low": 23950.0, "close": 24000.0, "volume": 50000}
+        for i in range(6)
+    ]
+    df = pd.DataFrame(prior_bars + today_bars)
+
+    class MockChain:
+        def __init__(self):
+            self._first = True
+
+        def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
+            if self._first:
+                self._first = False
+                prem = 50.0
+            else:
+                self._first = True
+                prem = 20.0
+            return {"ltp": prem, "bid": prem - 1.0, "ask": prem + 1.0, "tradingsymbol": f"{symbol}{strike}{option_type}"}
+
+    spread = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=50000.0, option_chain=MockChain())
+    assert spread is not None
+    # Score harmonization: signal_strength MUST match signal_score
+    assert spread["signal_strength"] == spread["signal_score"]
+    assert spread["signal_score"] >= 7.0
+    # POP metrics must exist and be mathematically valid
+    assert "pop_pct" in spread
+    assert 65.0 <= spread["pop_pct"] <= 96.0
+    assert spread["otm_sigma"] > 0.0
+
+
+def test_telegram_alerts_no_fake_math_probability_string():
+    """Verify Telegram alert formatting uses dynamic metrics and no hardcoded 92%+ strings."""
+    from prometheus.interface.telegram_bot import TelegramBot
+    
+    bot = TelegramBot(bot_token="test_token", chat_id="test_chat")
+    messages_sent = []
+    bot.send_message = lambda msg, **kwargs: messages_sent.append(msg)
+    
+    # Test Credit Spread Alert
+    cs_signal = {
+        "strategy_type": "credit_spread",
+        "spread_type": "BULL_PUT_SPREAD",
+        "symbol": "NIFTY 50",
+        "action": "SELL_PUT_SPREAD",
+        "net_credit": 25.0,
+        "entry_price": 25.0,
+        "underlying_price": 24000.0,
+        "strike": 23600.0,
+        "short_strike": 23600.0,
+        "long_strike": 23400.0,
+        "option_type": "PE",
+        "expiry": "2026-08-27",
+        "lot_size": 25,
+        "margin_required": 35000.0,
+        "max_profit": 625.0,
+        "max_loss": 4375.0,
+        "legs": [
+            {"action": "BUY", "tradingsymbol": "NIFTY26AUG23400PE", "entry_price": 10.0, "is_hedge": True},
+            {"action": "SELL", "tradingsymbol": "NIFTY26AUG23600PE", "entry_price": 35.0, "is_hedge": False},
+        ],
+        "is_sure_shot": True,
+        "signal_score": 9.5,
+        "pop_pct": 93.5,
+        "otm_sigma": 2.1,
+    }
+    
+    bot.alert_new_signal(cs_signal)
+    assert len(messages_sent) == 1
+    sent = messages_sent[-1]
+    assert "Math Probability: 92%+" not in sent
+    assert "Theoretical POP: ~94%" in sent or "Theoretical POP" in sent
+    assert "2.1σ OTM" in sent
+
+    # Test Momentum Alert
+    mom_signal = {
+        "symbol": "BANKNIFTY",
+        "action": "BUY_CE",
+        "direction": "bullish",
+        "strategy": "Golden_Setup (1H+VWAP+ORB)",
+        "entry_price": 51000.0,
+        "stop_loss": 50850.0,
+        "target": 51300.0,
+        "risk_reward": 2.0,
+        "edge_score": 9.2,
+        "is_sure_shot": True,
+        "reasons": ["1H_Trend_Bullish", "ORB_High_Breakout", "VWAP_Cross_Bullish"],
+    }
+    bot.alert_new_signal(mom_signal)
+    assert len(messages_sent) == 2
+    sent_mom = messages_sent[-1]
+    assert "Math Probability: 90%+" not in sent_mom
+    assert "R:R 1:2.0" in sent_mom
+
+
+

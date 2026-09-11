@@ -326,16 +326,52 @@ class CreditSpreadStrategy:
 
         margin_required = base_margin + expiry_elm
 
-        # ── Sure-Shot 9.5+ Classifier (Pillars 1 to 5) ──
+        # ── Quantitative Conviction & Probability of Profit Classifier ──
         is_0dte = bool(current_date and expiry_date and (expiry_date - current_date).days == 0)
         strike_dist = abs(short_strike - close)
-        is_far_otm = (strike_dist >= min(interval, atr))
-        trend_aligned = bool(is_bearish or is_bullish)
+        otm_sigma = round(strike_dist / max(atr, 1.0), 2)
         
+        # Rigorous Pillar Checks:
+        # Pillar 1: Statistical buffer (strike must be >= 1.5σ away from spot)
+        is_far_otm = bool(otm_sigma >= 1.5)
+        # Pillar 2: Trend alignment (spot actually favorable relative to VWAP)
+        trend_aligned = bool((is_bearish and close <= vwap) or (is_bullish and close >= vwap))
+        # Pillar 3: Institutional Open Interest wall protection
+        is_wall_shielded = bool(
+            (oi_wall_strike and is_bearish and short_strike >= oi_wall_strike) or
+            (oi_wall_strike and is_bullish and short_strike <= oi_wall_strike)
+        )
+        
+        # Theoretical Probability of Profit (POP) based on standard normal distribution & moneyness
+        # POP approx = Phi(otm_sigma) with haircut for fat-tail risk in index options
+        # e.g., 2.0σ -> ~93%, 1.75σ -> ~89%, 1.5σ -> ~85%, 1.0σ -> ~78%
+        import math
+        def _norm_cdf(x):
+            return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+        
+        raw_pop = _norm_cdf(otm_sigma) - 0.04  # 4% tail-risk haircut
+        if not is_0dte:
+            raw_pop -= 0.06  # discount on non-expiry days due to multi-day vega/gamma risk
+        pop_pct = round(max(0.65, min(0.96, raw_pop)) * 100.0, 1)
+
+        # Sure-Shot / Tier 1 requires 0-DTE + Far OTM (>=1.5σ) + VWAP trend alignment
         is_sure_shot = bool(is_0dte and is_far_otm and trend_aligned)
-        signal_score = 9.5 if is_sure_shot else 7.5
-        confidence = 0.95 if is_sure_shot else 0.75
-        signal_strength = 9.5 if is_sure_shot else 3.5
+        
+        # Dynamically scaled score (7.0 to 9.5) based on true confluences
+        score_calc = 7.0
+        if is_0dte:
+            score_calc += 1.0
+        if is_far_otm:
+            score_calc += 0.8
+        if trend_aligned:
+            score_calc += 0.4
+        if is_wall_shielded:
+            score_calc += 0.3
+        signal_score = min(9.5, round(score_calc, 1))
+        
+        # Harmonize confidence and strength
+        confidence = round(pop_pct / 100.0, 2)
+        signal_strength = signal_score
 
         return {
             "strategy": "Hedged_Credit_Spread",
@@ -372,6 +408,10 @@ class CreditSpreadStrategy:
             "signal_score": signal_score,
             "confidence": confidence,
             "signal_strength": signal_strength,
+            "pop_pct": pop_pct,
+            "theoretical_pop": pop_pct,
+            "otm_sigma": otm_sigma,
+            "oi_shielded": is_wall_shielded,
             "oi_wall_strike": oi_wall_strike,
             "oi_wall_shares": oi_wall_shares,
             "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),

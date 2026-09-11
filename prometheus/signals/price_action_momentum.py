@@ -151,14 +151,12 @@ class PriceActionMomentumScanner:
                     ema20 = float(prior_1h["close"].ewm(span=20, min_periods=1, adjust=False).mean().iloc[-1])
                     ema50 = float(prior_1h["close"].ewm(span=50, min_periods=1, adjust=False).mean().iloc[-1])
                     last_1h_close = float(prior_1h["close"].iloc[-1])
-                    if last_1h_close >= ema20 and ema20 >= ema50:
+                    if last_1h_close > ema20 and ema20 > ema50:
                         htf_trend = "BULLISH"
-                    elif last_1h_close <= ema20 and ema20 <= ema50:
+                    elif last_1h_close < ema20 and ema20 < ema50:
                         htf_trend = "BEARISH"
-                    elif last_1h_close >= ema20:
-                        htf_trend = "BULLISH"
-                    elif last_1h_close <= ema20:
-                        htf_trend = "BEARISH"
+                    else:
+                        htf_trend = "NEUTRAL"
             except Exception as e:
                 logger.debug(f"HTF 1H trend evaluation error: {e}")
 
