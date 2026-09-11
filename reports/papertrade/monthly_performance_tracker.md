@@ -2,8 +2,8 @@
 
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 17,547.15 (-116.98%)**  
-**Last Updated:** 2026-09-10 18:34:13 IST  
+**Current Realized Net P&L:** **🔴 -Rs 24,428.27 (-162.86%)**  
+**Last Updated:** 2026-09-11 17:25:00 IST  
 
 ---
 
@@ -11,15 +11,15 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 17,547.15** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-116.98%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **13** | 20–22 days | In Progress |
-| **Green / Red Days** | **5 Green / 6 Red / 2 BE** | > 65% Green | 38.5% |
-| **Total Trades** | **56** | ~3–5 / day | Tracked |
-| **Win Rate** | **42.9%** (24W / 35L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
+| **Net Realized P&L** | **-Rs 24,428.27** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-162.86%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **14** | 20–22 days | In Progress |
+| **Green / Red Days** | **5 Green / 7 Red / 2 BE** | > 65% Green | 35.7% |
+| **Total Trades** | **57** | ~3–5 / day | Tracked |
+| **Win Rate** | **42.1%** (24W / 36L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.53** | > 1.50 | ⚠️ Under Review |
 | **Gross Profit** | +Rs 26,144.12 | — | Winning Trades |
-| **Gross Loss** | -Rs 42,758.61 | — | Losing Trades |
+| **Gross Loss** | -Rs 49,488.19 | — | Losing Trades |
 
 ---
 
@@ -40,6 +40,7 @@
 | **2026-09-08** | 0 | 2W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 18,862.3** | Intraday paper trading session |
 | **2026-09-09** | 1 | 1W / 0L | 100% | +Rs 203 | -Rs 0 | **🟢 +Rs 75.8** | +0.5% | **-Rs 18,786.5** | NIFTY 15 SEP Bear Call Spread 23600CE/23750CE: Entry net credit 49.32 exit 46.20 (+Rs 75.82 net; live Kite was flat -Rs 107 gross / ~-Rs 207 net due to midday rally offsetting theta). Golden setup option buying appropriately suppressed in 50pt morning chop. |
 | **2026-09-10** | 2 | 2W / 0L | 100% | +Rs 1,489 | -Rs 0 | **🟢 +Rs 1,239.3** | +8.3% | **-Rs 17,547.2** | SENSEX 75000/75300 CE spread (+Rs 660.15 net, target decay hit @ 15.05); MIDCPNIFTY 14625/14700 CE spread (+Rs 579.18 net, square-off @ 27.40) |
+| **2026-09-11** | 1 | 0W / 1L | 0% | +Rs 0 | -Rs 6,730 | **🔴 -Rs 6,881.1** | -45.9% | **-Rs 24,428.3** | Deep gap-down (-0.8%) followed by massive V-reversal (+1,351 pts Bank Nifty, +351 pts Nifty). Morning MIDCAP PE caught on stale SQLite candle; system hardened to strictly reject stale historical cache during live market. |
 
 ---
 

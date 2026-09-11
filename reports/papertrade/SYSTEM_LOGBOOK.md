@@ -472,6 +472,56 @@
   * `prometheus/tests/test_price_action_momentum.py`: Added Golden Setup tests (1H trend veto, 13:00 cutoff, strategy tag).
   * **All 83 unit tests passing.**
 
+---
+
+### 7. Friday Sep 11, 2026 — Market Analysis, Deep V-Reversal Anatomy & Quantitative Truth of "9.5 Sure Shot"
+
+#### 1. Market Action & Intraday Structure (September 11, 2026):
+Friday's session opened with an aggressive gap-down across all Indian benchmarks following global weakness, only to turn into one of the sharpest intraday V-shape short-squeeze reversals of the month:
+
+* **NIFTY 50:**
+  * Previous Close: 23,477.80 | Open: 23,270.30 (**Gap: -207.50 pts / -0.88%**)
+  * Low: 23,231.40 (tested within the first 30 mins)
+  * High: 23,582.50 (afternoon short squeeze peak)
+  * Close: 23,398.10 (Net Change: -79.70 pts / -0.34%, but **+351.10 pts rally from the low**)
+* **NIFTY BANK:**
+  * Previous Close: 56,471.95 | Open: 55,970.15 (**Gap: -501.80 pts / -0.89%**)
+  * Low: 55,699.45 (bottomed at 09:30 AM)
+  * High: 57,050.70 (surged past previous day's high)
+  * Close: 56,606.55 (**Net Change: +134.60 pts / +0.24% GREEN**; **+1,351.25 pts intraday rally!**)
+* **BSE SENSEX:**
+  * Previous Close: 74,902.59 | Open: 74,309.16 (**Gap: -593.43 pts / -0.79%**)
+  * Low: 74,160.16 | High: 74,917.15 | Close: 74,781.76 (**+756.99 pts rally from low**)
+* **NIFTY MIDCAP SELECT:**
+  * Previous Close: 14,528.30 | Open: 14,431.50 (**Gap: -96.80 pts / -0.67%**)
+  * Low: 14,292.05 (made at 09:30 AM) | High: 14,626.55 | Close: 14,584.70 (**+56.40 pts / +0.39% GREEN**; **+334.50 pts / +2.32% intraday run**)
+
+#### 2. Morning Trade Autopsy & Data Engine Hardening:
+* **Trade Incident (`PAPER-20260911041656-4C840E`):**
+  * Instrument: `MIDCPNIFTY29SEP2614525PE` (120 Qty / 2 Lots)
+  * Entry: ₹310.16 | Exit SL: ₹254.08 | Net Loss: -₹6,881.12 (-18.49%)
+  * **Root Cause Analysis:** At 09:46 AM, `DataEngine.fetch_historical` served cached 15m candles from SQLite that ended on Thursday Sep 10. The system evaluated the prior day's afternoon breakdown as current market data, firing a SHORT (PE BUY) signal right as the live market had already completed its 09:30 bottom and was beginning an aggressive +334 pt short squeeze.
+  * **Resolution Implemented:** Updated `DataEngine` so that during live market hours (09:15–15:30 IST), any cached dataframe not ending on the current calendar date is strictly discarded, forcing live candle retrieval with fallback retries from Angel One SmartAPI.
+
+#### 3. Quantitative Truth: Is "9.5 Sure Shot" Real or Still a Bug?
+1. **The Code Bug is 100% Fixed:**
+   * **Old Fake Logic:** `is_far_otm` was hardcoded `True`, `trend_aligned` was forced `True`, and Telegram printed a hardcoded `"💎 REAL-TRADE READY (Math Probability: 92%+)"` string. That was an ungrounded marketing placeholder.
+   * **New Audited Reality:** In `prometheus/strategies/credit_spread.py`, conviction scores $\ge 9.0$ now require:
+     - Real Black-Scholes Gaussian CDF Probability of Profit $\Phi(z) \ge 85\%$.
+     - Statistical strike distance $\ge 2.0\sigma$ using live ATR and volatility.
+     - Clearance beyond the nearest institutional Open Interest (OI) wall.
+     - 1-Hour HTF EMA20/50 trend confirmation.
+     - Telegram bot displays true computed POP (e.g. `Theoretical POP: ~87% (2.1σ OTM)`) with zero hardcoded fallbacks.
+2. **The Quant Truth: There is No Such Thing as a "Sure Shot" in Markets:**
+   * Calling any options trade a "9.5 Sure Shot" creates false psychological certainty. A mathematical POP of 85%–90% means **10%–15% of trades will fail**.
+   * **Negative Skewness Danger:** Credit spreads collect small credits (₹20–₹35) and risk larger losses (1.5x credit = -₹50 to -₹70). On violent gap-and-reversal days like today (where Bank Nifty ripped +1,351 pts), selling Bear Call spreads based on morning gap downs would have resulted in maximum pain.
+3. **What is the True "Best Thing" Prometheus Generates?**
+   * **The Golden Setup (1H Trend + VWAP + 15M ORB Breakout)** is mathematically superior for compounding capital:
+     * **Asymmetric Positive Skewness:** Risk 10–12 pts to capture 25–35 pts (1:2 to 1:2.5+ R:R).
+     * **Strict Loss Capping:** Losses are cut small at 1R; winners pay 2R to 3R.
+     * **Capital Efficiency:** Requires ₹3,000–₹5,000 capital per lot (Option Buying) rather than ₹40,000+ margin (Credit Spreads).
+
+
 
 
 

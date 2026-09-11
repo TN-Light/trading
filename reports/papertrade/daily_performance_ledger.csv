@@ -12,3 +12,4 @@ Date,Total_Trades,Wins,Losses,Win_Rate_Pct,Gross_Profit,Gross_Loss,Net_PnL,Capit
 2026-09-08,0,2,0,0.0,0.0,0.0,0.0,15000.0,0.0,-18862.3,Intraday paper trading session
 2026-09-09,1,1,0,100.0,202.8,0.0,75.82,15000.0,0.5,-18786.48,NIFTY 15 SEP Bear Call Spread 23600CE/23750CE: Entry net credit 49.32 exit 46.20 (+Rs 75.82 net; live Kite was flat -Rs 107 gross / ~-Rs 207 net due to midday rally offsetting theta). Golden setup option buying appropriately suppressed in 50pt morning chop.
 2026-09-10,2,2,0,100.0,1488.6,0.0,1239.33,15000.0,8.26,-17547.15,"SENSEX 75000/75300 CE spread (+Rs 660.15 net, target decay hit @ 15.05); MIDCPNIFTY 14625/14700 CE spread (+Rs 579.18 net, square-off @ 27.40)"
+2026-09-11,1,0,1,0.0,0.0,-6729.58,-6881.12,15000.0,-45.87,-24428.27,"Deep gap-down (-0.8%) & massive V-reversal (+1351pt Bank Nifty). Morning MIDCAP PE trade caught on stale SQLite candle; system hardened to strictly reject stale cache during market hours."
