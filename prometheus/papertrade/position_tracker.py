@@ -186,8 +186,9 @@ class PositionTracker:
         # long-premium PnL: (exit - entry) * qty.
         if exit_price <= 0:
             side = "SELL"
+            price_hint = pos.stop_loss if exit_reason == ExitReason.STOP_LOSS else (pos.entry_price or pos.stop_loss)
             fill = self.fill_sim.fill(
-                pos.instrument, pos.direction, price_hint=pos.stop_loss,
+                pos.instrument, pos.direction, price_hint=price_hint,
                 side=side, theoretical_price=pos.entry_price,
             )
             if fill.source == "rejected":
@@ -199,6 +200,7 @@ class PositionTracker:
                 )
                 self.open_positions[trade_id] = pos
                 return None
+            exit_price = fill.fill_price
         is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
         if hasattr(self.cost_model, "calculate_trade_cost"):
             costs = self.cost_model.calculate_trade_cost(
@@ -545,13 +547,16 @@ class PositionTracker:
         survived SL/target/time-stop evaluation. Added the ``def`` signature
         line back to restore the trailing-stop code path.
         """
-        progress = (current_price - pos.entry_price) / max(
-            (pos.entry_price - pos.stop_loss), 1e-9
-        )
+        # Determine constant initial risk distance (never changes as stop_loss is ratcheted up)
+        risk_distance = getattr(pos, "initial_risk_distance", 0.0)
+        if risk_distance <= 0.0:
+            init_sl = getattr(pos, "initial_sl", 0.0) or pos.stop_loss
+            risk_distance = abs(pos.entry_price - init_sl) or 1.0
+            pos.initial_risk_distance = risk_distance
+
+        progress = (current_price - pos.entry_price) / max(risk_distance, 1.0)
         if current_price > pos.high_water_mark:
             pos.high_water_mark = current_price
-
-        risk_distance = abs(pos.entry_price - pos.stop_loss) or 1.0
 
         # Calculate exact cost buffer (brokerage + STT + GST + exchange turnover)
         sym_root = (pos.underlying or pos.symbol or "").upper()

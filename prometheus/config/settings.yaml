@@ -57,7 +57,7 @@ capital:
     tier1:
       base_target: 5.0
       max_capital: 29999
-      max_loss_per_trade: 150
+      max_loss_per_trade: 750
       min_margin: 0
       min_rr: 3.5
       name: 15K Strict Preservation
@@ -65,7 +65,7 @@ capital:
     tier2:
       base_target: 4.0
       max_capital: 49999
-      max_loss_per_trade: 500
+      max_loss_per_trade: 1200
       min_margin: 30000
       min_rr: 2.5
       name: 30K Balanced Growth
@@ -73,7 +73,7 @@ capital:
     tier3:
       base_target: 2.5
       max_capital: 99999
-      max_loss_per_trade: 500
+      max_loss_per_trade: 1500
       min_margin: 50000
       min_rr: 2.0
       name: 50K Standard

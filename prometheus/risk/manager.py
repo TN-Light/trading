@@ -147,6 +147,10 @@ class RiskManager:
         self.bracket_manager = CapitalBracketManager(capital_config)
         self._intraday_trades_today = 0
 
+        # Wire up Drawdown & Portfolio Scaler
+        from prometheus.risk.portfolio_scaler import RiskPortfolioScaler
+        self.portfolio_scaler = RiskPortfolioScaler(initial_equity=initial_capital)
+
         # State tracking
         self._daily_pnl = 0.0
         self._weekly_pnl = 0.0
@@ -337,32 +341,68 @@ class RiskManager:
         if risk_per_unit <= 0:
             return {"lots": 0, "quantity": 0, "risk_amount": 0, "error": "Invalid SL"}
 
-        max_units = risk_amount / risk_per_unit
-        lots = int(max_units / lot_size)  # ALWAYS round down
-        if lots < 1:
+        # Apply graduated drawdown multiplier from portfolio scaler
+        dd_mult = self.portfolio_scaler.get_drawdown_multiplier() if hasattr(self, "portfolio_scaler") else 1.0
+        if dd_mult <= 0.0:
             return {
                 "lots": 0,
                 "quantity": 0,
                 "risk_amount": 0,
-                "error": "Risk budget insufficient for 1 lot"
+                "error": "Drawdown throttle active (>10% DD); trading halted"
             }
+
+        max_units = (risk_amount * dd_mult) / risk_per_unit
+        lots = int(max_units / lot_size)  # ALWAYS round down
+
+        # Small-account adaptation (BUG-4 fix):
+        # In Indian F&O, contract sizes (NIFTY 65, BANKNIFTY 30, SENSEX 20) mean that
+        # even small SLs on small accounts (< 50,000) exceed tight 1-2% risk budgets.
+        # Allow a 1-lot floor if the total risk for 1 lot does not exceed 6% of capital.
+        if lots < 1:
+            loss_for_one_lot = risk_per_unit * lot_size
+            small_account_risk_limit = self.current_capital * 0.06
+            if self.current_capital < 50000 and loss_for_one_lot <= small_account_risk_limit and dd_mult > 0.0:
+                lots = 1
+                logger.info(
+                    f"RiskManager: Enforced 1-lot minimum floor for small account (Capital=Rs {self.current_capital:,.0f}, "
+                    f"1-lot risk=Rs {loss_for_one_lot:.1f} <= limit Rs {small_account_risk_limit:.1f})"
+                )
+            else:
+                return {
+                    "lots": 0,
+                    "quantity": 0,
+                    "risk_amount": 0,
+                    "error": f"Risk budget insufficient for 1 lot (1-lot risk Rs {loss_for_one_lot:.1f} > limit Rs {risk_amount:.1f})"
+                }
             
         # Enforce absolute physical liquidity ceiling (e.g. max 50 lots)
         if lots > self.max_lots_per_trade:
             lots = self.max_lots_per_trade
 
         # Cap by max position size
-        max_cost = self.current_capital * self.max_single_position_pct / 100
+        # Small accounts (< Rs 50,000) allow up to 45% deployment for 1 lot (matching backtest engine max_deploy)
+        effective_single_pct = 45.0 if self.current_capital < 50000 else self.max_single_position_pct
+        max_cost = self.current_capital * effective_single_pct / 100
         position_cost = entry_price * lot_size * lots
         if position_cost > max_cost:
             lots = int(max_cost / (entry_price * lot_size))
             if lots < 1:
-                return {
-                    "lots": 0,
-                    "quantity": 0,
-                    "risk_amount": 0,
-                    "error": "Position cost would breach max_single_position_pct"
-                }
+                # If small account 1-lot floor applies and risk is within 6%, allow 1 lot if cost <= 50% capital
+                one_lot_risk = risk_per_unit * lot_size
+                one_lot_cost = entry_price * lot_size
+                if (
+                    self.current_capital < 50000
+                    and one_lot_risk <= (self.current_capital * 0.06)
+                    and one_lot_cost <= (self.current_capital * 0.50)
+                ):
+                    lots = 1
+                else:
+                    return {
+                        "lots": 0,
+                        "quantity": 0,
+                        "risk_amount": 0,
+                        "error": "Position cost would breach max_single_position_pct"
+                    }
 
         actual_risk = risk_per_unit * lot_size * lots
 
@@ -414,6 +454,9 @@ class RiskManager:
         # Update peak capital
         if self.current_capital > self.peak_capital:
             self.peak_capital = self.current_capital
+
+        if hasattr(self, "portfolio_scaler"):
+            self.portfolio_scaler.update_equity(self.current_capital)
 
         # Track consecutive losses
         if pnl < 0:

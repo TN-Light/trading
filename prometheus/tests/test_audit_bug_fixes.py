@@ -230,3 +230,323 @@ def test_live_intraday_freshness_enforcement():
         assert not res_fresh.empty, "Fresh candles from today must be accepted"
         assert len(res_fresh) == 6
 
+
+def test_paper_trailing_stop_constant_denominator():
+    """BUG-3 FIX: Trailing stop denominator must use constant initial_risk_distance."""
+    from prometheus.papertrade.position_tracker import PositionTracker
+    from prometheus.papertrade.types import Position, Direction
+    from unittest.mock import MagicMock
+    from datetime import datetime
+    import pytz
+
+    tracker = PositionTracker(fill_sim=MagicMock())
+    pos = Position(
+        trade_id="TEST-001",
+        symbol="NIFTY",
+        instrument="NIFTY2691523600CE",
+        underlying="NIFTY",
+        direction=Direction.LONG,
+        entry_price=100.0,
+        entry_time=datetime.now(pytz.timezone("Asia/Kolkata")),
+        stop_loss=80.0,  # initial risk distance = 20.0
+        target=160.0,
+        quantity=50,
+        max_bars=10,
+    )
+    tracker.open_positions["TEST-001"] = pos
+    assert pos.initial_risk_distance == 20.0
+    assert pos.initial_sl == 80.0
+
+    # Step 1: Move price up to 109 (0.45R -> triggers Breakeven Stage 0 at 0.4R)
+    tracker._maybe_advance_trailing_stop(pos, 109.0)
+    assert pos.breakeven_set is True
+    # SL is moved to entry + cost_buffer (0.9 for NIFTY) = 100.9
+    assert pos.stop_loss == 100.9
+    # Crucially, denominator must remain 20.0, NOT (100 - 100.9 = -0.9 -> 1e-9)
+    assert pos.initial_risk_distance == 20.0
+
+    # Step 2: Next tick moves to 110 (10 pts profit = 0.5R, NOT 1.0R)
+    # Under BUG-3, 10 / 1e-9 = 10 billion R, which triggered Stage 2, 3, 4, 5 instantly!
+    tracker._maybe_advance_trailing_stop(pos, 110.0)
+    # Stage 2 requires 1.0R (120.0), so trailing_floor should NOT be activated yet
+    assert getattr(pos, "trailing_activated", False) is False
+
+    # Step 3: Now move to 121 (1.05R -> triggers Stage 2)
+    tracker._maybe_advance_trailing_stop(pos, 121.0)
+    assert pos.trailing_floor == 0.2
+    assert pos.stop_loss == 104.0
+
+
+def test_paper_close_position_fallback_sl_vs_entry():
+    """ISSUE-12 FIX: Unquoted close_position should fallback to entry_price, not stop_loss."""
+    from prometheus.papertrade.position_tracker import PositionTracker
+    from prometheus.papertrade.types import Position, Direction, ExitReason
+    from prometheus.papertrade.fill_simulator import FillResult
+    from unittest.mock import MagicMock
+    from datetime import datetime
+    import pytz
+
+    IST = pytz.timezone("Asia/Kolkata")
+    mock_fill_sim = MagicMock()
+    mock_fill_sim.fill.side_effect = lambda inst, dir, price_hint=0.0, **kw: FillResult(
+        fill_price=price_hint, source="hint"
+    )
+    tracker = PositionTracker(fill_sim=mock_fill_sim)
+    now_ts = datetime.now(IST)
+    pos = Position(
+        trade_id="TEST-002",
+        symbol="NIFTY",
+        instrument="NIFTY2691523600CE",
+        underlying="NIFTY",
+        direction=Direction.LONG,
+        entry_price=100.0,
+        entry_time=now_ts,
+        stop_loss=50.0,
+        target=160.0,
+        quantity=50,
+        max_bars=10,
+    )
+    tracker.open_positions["TEST-002"] = pos
+
+    # Case A: Square off / manual exit without quotes should fallback to entry_price, NOT stop_loss!
+    closed_trade = tracker.close_position("TEST-002", exit_price=0.0, timestamp=now_ts, exit_reason=ExitReason.SQUARE_OFF)
+    assert closed_trade.exit_price == 100.0  # entry_price, not 50.0 phantom loss!
+
+    # Case B: When exit_reason IS STOP_LOSS without quote, it falls back to stop_loss
+    pos_sl = Position(
+        trade_id="TEST-003",
+        symbol="NIFTY",
+        instrument="NIFTY2691523600CE",
+        underlying="NIFTY",
+        direction=Direction.LONG,
+        entry_price=100.0,
+        entry_time=now_ts,
+        stop_loss=50.0,
+        target=160.0,
+        quantity=50,
+        max_bars=10,
+    )
+    tracker.open_positions["TEST-003"] = pos_sl
+    closed_sl = tracker.close_position("TEST-003", exit_price=0.0, timestamp=now_ts, exit_reason=ExitReason.STOP_LOSS)
+    assert closed_sl.exit_price == 50.0
+
+
+def test_small_account_sizing_one_lot_floor():
+    """BUG-4 FIX: Sizing for small accounts has a 1-lot floor when risk is within acceptable bounds."""
+    from prometheus.risk.manager import RiskManager
+
+    rm = RiskManager(config={}, initial_capital=15000.0)
+    sizing = rm.calculate_position_size(
+        entry_price=100.0,
+        stop_loss=90.0,
+        lot_size=65,
+    )
+    assert sizing["lots"] >= 1
+    assert sizing["quantity"] >= 65
+
+
+def test_drawdown_portfolio_scaler_integration():
+    """BUG-6 FIX: RiskPortfolioScaler is integrated into RiskManager."""
+    from prometheus.risk.manager import RiskManager
+
+    rm = RiskManager(config={}, initial_capital=100000.0)
+    assert rm.portfolio_scaler is not None
+
+    # Simulate losing trades: capital drops from 100K to 93K (7% DD)
+    rm.record_trade_result(pnl=-7000.0)
+    assert rm.current_capital == 93000.0
+
+    mult = rm.portfolio_scaler.get_drawdown_multiplier()
+    assert mult == 0.50
+
+    # Drops to 85K (15% DD) -> halts (mult == 0.0)
+    rm.record_trade_result(pnl=-8000.0)
+    assert rm.current_capital == 85000.0
+    mult_halt = rm.portfolio_scaler.get_drawdown_multiplier()
+    assert mult_halt == 0.0
+
+
+def test_backtest_entry_bar_sl_check():
+    """BUG-1 FIX: Positions that breach SL on the entry bar itself must exit immediately."""
+    import pandas as pd
+    from prometheus.backtest.engine import BacktestEngine
+
+    engine = BacktestEngine(initial_capital=100000.0)
+
+    # Bar 0: Signal generated at close
+    # Bar 1: Entered at Open=100. Bar 1 Low drops to 70 (SL=80).
+    df = pd.DataFrame({
+        "timestamp": pd.date_range("2026-09-01 09:15", periods=3, freq="15min"),
+        "open": [100.0, 100.0, 100.0],
+        "high": [105.0, 101.0, 105.0],
+        "low": [98.0, 70.0, 98.0],
+        "close": [102.0, 75.0, 102.0],
+        "volume": [1000, 1000, 1000],
+    })
+
+    def sig_gen(data):
+        if len(data) == 1:
+            return {
+                "symbol": "NIFTY",
+                "direction": "bullish",
+                "instrument_type": "options",
+                "entry_price": 100.0,
+                "stop_loss": 80.0,
+                "target": 150.0,
+                "underlying_sl": 80.0,
+                "quantity": 50,
+            }
+        return None
+
+    res = engine.run(df, sig_gen, warmup_bars=0)
+    assert len(res.trades) == 1
+    assert "stop_loss" in res.trades[0]["exit_reason"]
+
+
+def test_backtest_sl_before_target_precedence():
+    """BUG-2 FIX: On ambiguous bars touching both SL and Target, SL takes precedence."""
+    import pandas as pd
+    from prometheus.backtest.engine import BacktestEngine
+
+    engine = BacktestEngine(initial_capital=100000.0)
+    pos = {
+        "symbol": "NIFTY",
+        "direction": "bullish",
+        "instrument_type": "options",
+        "entry_price": 100.0,
+        "stop_loss": 80.0,
+        "target": 150.0,
+        "underlying_sl": 22000.0,
+        "underlying_target": 22500.0,
+        "prev_close": 22200.0,
+        "delta": 0.5,
+        "quantity": 50,
+    }
+
+    ambiguous_bar = pd.Series({
+        "open": 22200.0,
+        "high": 22600.0,
+        "low": 21900.0,
+        "close": 22300.0,
+    })
+
+    triggered, price, reason = engine._check_exit(pos, ambiguous_bar)
+    assert triggered is True
+    assert reason == "stop_loss_underlying"
+
+
+def test_backtest_credit_spread_exit_polarity():
+    """BUG-7 FIX: Credit spread short options do not trigger SL immediately on entry."""
+    import pandas as pd
+    from prometheus.backtest.engine import BacktestEngine
+
+    engine = BacktestEngine(initial_capital=100000.0)
+    pos = {
+        "symbol": "NIFTY",
+        "direction": "bullish",
+        "instrument_type": "options",
+        "entry_price": 100.0,
+        "stop_loss": 150.0,
+        "target": 50.0,
+        "quantity": 50,
+        "action": "SELL",
+        "is_credit": True,
+        "prev_close": 22000.0,
+        "delta": 0.5,
+    }
+
+    bar = pd.Series({
+        "open": 22000.0,
+        "high": 22010.0,
+        "low": 21990.0,
+        "close": 22000.0,
+    })
+
+    triggered, price, reason = engine._check_exit(pos, bar)
+    assert triggered is False  # Must NOT exit on normal bar
+
+    bar_against = pd.Series({
+        "open": 22000.0,
+        "high": 22500.0,
+        "low": 22000.0,
+        "close": 22450.0,
+    })
+    triggered_sl, sl_price, sl_reason = engine._check_exit(pos, bar_against)
+    assert triggered_sl is True
+    assert sl_reason == "stop_loss_premium"
+
+
+def test_backtest_option_slippage_floor_and_futures_charges():
+    """ISSUE-10 & ISSUE-11 FIX: 0.50 option slippage floor and 0.0019% futures charges."""
+    from prometheus.backtest.engine import BacktestEngine, ZerodhaCostModel
+    import pandas as pd
+
+    engine = BacktestEngine(initial_capital=100000.0)
+    bar = pd.Series({"open": 22000.0, "high": 22050.0, "low": 21950.0, "close": 22000.0, "vix": 14.0})
+
+    sig = {
+        "symbol": "NIFTY",
+        "direction": "bullish",
+        "instrument_type": "options",
+        "entry_price": 10.0,
+        "quantity": 50,
+    }
+    pos = engine._open_position(sig, bar, "2026-09-01 09:15")
+    assert pos["entry_price"] == 10.50
+
+    cost_model = ZerodhaCostModel()
+    costs_fut = cost_model.calculate_costs(buy_value=1000000.0, sell_value=1000000.0, instrument_type="futures")
+    assert costs_fut["transaction_charges"] == 38.0
+
+
+def test_backtest_monte_carlo_compounding_returns():
+    """ISSUE-9 FIX: Monte Carlo compounds trade percentage returns instead of raw rupee adds."""
+    from prometheus.backtest.engine import BacktestEngine, BacktestResult
+
+    engine = BacktestEngine(initial_capital=10000.0)
+    trades = [
+        {"pnl": 500.0, "net_pnl": 500.0, "capital_at_entry": 10000.0, "entry_price": 100, "quantity": 50},
+        {"pnl": -200.0, "net_pnl": -200.0, "capital_at_entry": 10500.0, "entry_price": 100, "quantity": 50},
+        {"pnl": 1000.0, "net_pnl": 1000.0, "capital_at_entry": 20000.0, "entry_price": 100, "quantity": 100},
+        {"pnl": -800.0, "net_pnl": -800.0, "capital_at_entry": 21000.0, "entry_price": 100, "quantity": 100},
+        {"pnl": 1500.0, "net_pnl": 1500.0, "capital_at_entry": 30000.0, "entry_price": 100, "quantity": 150},
+        {"pnl": -600.0, "net_pnl": -600.0, "capital_at_entry": 31500.0, "entry_price": 100, "quantity": 150},
+    ]
+    res = BacktestResult(
+        strategy="test",
+        start_date="2026-01-01",
+        end_date="2026-06-01",
+        initial_capital=10000.0,
+        final_capital=32400.0,
+        total_return_pct=224.0,
+        annualized_return_pct=100.0,
+        total_trades=6,
+        winning_trades=3,
+        losing_trades=3,
+        win_rate=50.0,
+        avg_win=1000.0,
+        avg_loss=-533.33,
+        profit_factor=1.875,
+        max_drawdown_pct=5.0,
+        max_drawdown_duration_days=10,
+        sharpe_ratio=1.5,
+        sortino_ratio=2.0,
+        calmar_ratio=3.0,
+        alpha_pct=10.0,
+        psr_pct=95.0,
+        min_track_record_len=50,
+        avg_trade_pnl=400.0,
+        avg_hold_duration_min=30.0,
+        total_costs=100.0,
+        equity_curve=[10000.0, 32400.0],
+        drawdown_curve=[0.0, 5.0],
+        monthly_returns={},
+        trades=trades,
+    )
+
+    mc = engine.monte_carlo_simulation(res, num_simulations=50)
+    assert "median_final_capital" in mc
+    assert mc["median_final_capital"] > 0
+    assert mc["median_max_drawdown"] < 25.0
+
+

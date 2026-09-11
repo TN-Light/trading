@@ -127,6 +127,14 @@ class Position:
     signal_score: float = 0.0
     signal_confidence: float = 0.0
     trade_mode: str = "intraday"     # "intraday" or "swing"
+    initial_sl: float = 0.0
+    initial_risk_distance: float = 0.0
+
+    def __post_init__(self):
+        if self.initial_sl <= 0.0 and self.stop_loss > 0.0:
+            self.initial_sl = self.stop_loss
+        if self.initial_risk_distance <= 0.0 and self.entry_price > 0.0 and self.initial_sl > 0.0:
+            self.initial_risk_distance = abs(self.entry_price - self.initial_sl)
 
     def unrealized_pnl(self, current_price: float) -> float:
         """Gross mark-to-market PnL at ``current_price`` (no costs).

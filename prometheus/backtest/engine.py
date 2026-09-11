@@ -64,6 +64,7 @@ class BacktestTrade:
     atr_at_entry: float = 0.0
     regime_at_entry: str = ""
     option_expiry_date: str = ""  # For DTE-aware theta
+    capital_at_entry: float = 0.0  # Account capital at trade entry for compounding math
 
 
 @dataclass
@@ -155,6 +156,7 @@ class ZerodhaCostModel:
         self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.10) / 100
         self.stt_futures_pct = cfg.get("stt_futures", 0.01) / 100
         self.transaction_charges_pct = cfg.get("transaction_charges", 0.053) / 100
+        self.transaction_charges_futures_pct = cfg.get("transaction_charges_futures", 0.0019) / 100
         self.gst_pct = cfg.get("gst", 18.0) / 100
         self.sebi_charges_pct = cfg.get("sebi_charges", 0.0001) / 100
         self.stamp_duty_pct = cfg.get("stamp_duty", 0.003) / 100
@@ -184,8 +186,11 @@ class ZerodhaCostModel:
         else:
             stt = sell_value * self.stt_futures_pct
 
-        # Transaction charges — on both sides
-        transaction = (buy_value + sell_value) * self.transaction_charges_pct
+        # Transaction charges — on both sides (NSE: 0.053% for options, 0.0019% for futures)
+        if instrument_type == "futures":
+            transaction = (buy_value + sell_value) * self.transaction_charges_futures_pct
+        else:
+            transaction = (buy_value + sell_value) * self.transaction_charges_pct
 
         # GST on brokerage + transaction charges
         gst = (brokerage + transaction) * self.gst_pct
@@ -638,10 +643,9 @@ class BacktestEngine:
                 self.risk_overlay_stats["dd_throttled"] += 1
             qty = max(1, int(qty * dd_scalar))
 
-        # Apply modified quantity
-        if qty != original_qty:
-            signal = signal.copy()
-            signal["quantity"] = qty
+        # Apply modified/sized quantity
+        signal = signal.copy()
+        signal["quantity"] = qty
 
         return signal
 
@@ -855,7 +859,19 @@ class BacktestEngine:
                             pending_signal, current_bar, current_time
                         )
                         if filled:
-                            positions.append(fill_result)
+                            # BUG-1 FIX: Immediate exit check on entry bar (eliminates entry-bar invincibility)
+                            exit_triggered, exit_price, exit_reason = self._check_exit(
+                                fill_result, current_bar
+                            )
+                            if exit_triggered:
+                                capital, trade = self._close_position(
+                                    fill_result, exit_price, current_time, capital, exit_reason, current_bar["close"], bar=current_bar
+                                )
+                                self.trades.append(trade)
+                                daily_pnl += trade.net_pnl
+                                self._sync_capital(capital)
+                            else:
+                                positions.append(fill_result)
                             daily_trades += 1
                             intraday_trades += 1
                             pending_signal = None
@@ -884,7 +900,19 @@ class BacktestEngine:
                         new_pos = self._open_position_at_open(
                             pending_signal, current_bar, current_time
                         )
-                        positions.append(new_pos)
+                        # BUG-1 FIX: Immediate exit check on entry bar (eliminates entry-bar invincibility)
+                        exit_triggered, exit_price, exit_reason = self._check_exit(
+                            new_pos, current_bar
+                        )
+                        if exit_triggered:
+                            capital, trade = self._close_position(
+                                new_pos, exit_price, current_time, capital, exit_reason, current_bar["close"], bar=current_bar
+                            )
+                            self.trades.append(trade)
+                            daily_pnl += trade.net_pnl
+                            self._sync_capital(capital)
+                        else:
+                            positions.append(new_pos)
                         daily_trades += 1
                         intraday_trades += 1
                         pending_signal = None
@@ -1016,49 +1044,56 @@ class BacktestEngine:
             "option_expiry_date": signal.get("option_expiry_date", ""),
         }
 
+        current_cap = self._capital_tracker.get("capital", self.initial_capital) if self._capital_tracker else self.initial_capital
+
         if is_options:
             # For options: entry_price is the premium, track it separately
             premium_entry = signal.get("entry_price", bar["close"] * 0.012)
             
-            # --- Finding 1: Sizing & Compounding Fix ---
-            current_cap = self._capital_tracker.get("capital", self.initial_capital) if self._capital_tracker else self.initial_capital
-            if current_cap < 30000:
-                risk_pct = 0.04
-            elif current_cap < 75000:
-                risk_pct = 0.03
+            # --- Finding 1: Sizing & Compounding Fix (BUG-5) ---
+            # If risk overlays already sized the quantity, preserve it!
+            if signal.get("quantity") and signal["quantity"] > 0:
+                quantity = signal["quantity"]
             else:
-                risk_pct = 0.02
-            
-            risk_per_trade = current_cap * risk_pct
-            lot_size = signal.get("lot_size", 25)
-            
-            premium_sl = signal.get("stop_loss", premium_entry * 0.8)
-            loss_per_lot = (premium_entry - premium_sl) * lot_size
-            if loss_per_lot <= 0:
-                loss_per_lot = premium_entry * 0.1 * lot_size
+                if current_cap < 30000:
+                    risk_pct = 0.04
+                elif current_cap < 75000:
+                    risk_pct = 0.03
+                else:
+                    risk_pct = 0.02
                 
-            lots = max(1, int(risk_per_trade / loss_per_lot))
-            premium_per_lot = premium_entry * lot_size
-            max_deploy = 0.45 if current_cap < 50000 else (0.35 if current_cap < 100000 else 0.25)
-            max_lots = max(1, int((current_cap * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
-            lots = min(lots, max_lots)
-            
-            # Enforce absolute physical liquidity ceiling
-            if lots > 50:
-                lots = 50
+                risk_per_trade = current_cap * risk_pct
+                lot_size = signal.get("lot_size", 25)
                 
-            quantity = lots * lot_size
+                premium_sl = signal.get("stop_loss", premium_entry * 0.8)
+                loss_per_lot = (premium_entry - premium_sl) * lot_size
+                if loss_per_lot <= 0:
+                    loss_per_lot = premium_entry * 0.1 * lot_size
+                    
+                lots = max(1, int(risk_per_trade / loss_per_lot))
+                premium_per_lot = premium_entry * lot_size
+                max_deploy = 0.45 if current_cap < 50000 else (0.35 if current_cap < 100000 else 0.25)
+                max_lots = max(1, int((current_cap * max_deploy) / premium_per_lot)) if premium_per_lot > 0 else 1
+                lots = min(lots, max_lots)
+                
+                # Enforce absolute physical liquidity ceiling
+                if lots > 50:
+                    lots = 50
+                    
+                quantity = lots * lot_size
             
-            # --- Finding 2: Dynamic VIX-scaled Slippage ---
+            # --- Finding 2: Dynamic VIX-scaled Slippage with Floor (ISSUE-10) ---
             vix_val = bar.get("vix", 14.0)
             base_slippage = 0.0025 # 25bps
             dynamic_slippage_pct = base_slippage * max(1.0, vix_val / 14.0)
             
-            slippage = premium_entry * dynamic_slippage_pct
-            if signal.get("direction") == "bullish":
-                premium_entry += slippage  # Buying call — pay more
+            # ISSUE-10 FIX: Enforce minimum floor of Rs 0.50 (10 ticks) per share
+            slippage = max(0.50, premium_entry * dynamic_slippage_pct)
+            is_credit = signal.get("action") == "SELL" or signal.get("side") == "SELL" or signal.get("is_credit", False)
+            if is_credit:
+                premium_entry = max(0.05, premium_entry - slippage)  # Selling: receive less
             else:
-                premium_entry += slippage  # Buying put — also pay more (you're buying)
+                premium_entry += slippage  # Buying: pay more
 
             delta_signed = signal.get("delta", 0.5)
             if signal.get("direction") == "bearish":
@@ -1071,16 +1106,21 @@ class BacktestEngine:
                 "entry_price": premium_entry,
                 "stop_loss": signal.get("stop_loss", 0),
                 "target": signal.get("target", 0),
+                "underlying_sl": signal.get("underlying_sl", 0),
+                "underlying_target": signal.get("underlying_target", 0),
                 "quantity": quantity,
                 "strategy": signal.get("strategy", "default"),
                 "instrument_type": "options",
                 "delta": delta_signed,
                 "current_premium": premium_entry,
-                "prev_close": bar["close"],
-                "underlying_entry_price": bar["close"],
+                "prev_close": bar.get("open", bar["close"]),
+                "underlying_entry_price": bar.get("open", bar["close"]),
                 "max_bars": signal.get("max_bars", 0),
                 "bar_interval": signal.get("bar_interval", "day"),
                 "breakeven_ratio": signal.get("breakeven_ratio", 0.4),
+                "action": signal.get("action", "SELL" if is_credit else "BUY"),
+                "is_credit": is_credit,
+                "capital_at_entry": current_cap,
             }
             pos.update(signal_meta)
             return pos
@@ -1099,10 +1139,13 @@ class BacktestEngine:
                 "entry_price": entry_price,
                 "stop_loss": signal.get("stop_loss", 0),
                 "target": signal.get("target", 0),
+                "underlying_sl": signal.get("underlying_sl", 0),
+                "underlying_target": signal.get("underlying_target", 0),
                 "quantity": signal.get("quantity", 1),
                 "strategy": signal.get("strategy", "default"),
                 "instrument_type": "futures",
-                "underlying_entry_price": bar["close"],
+                "underlying_entry_price": bar.get("open", bar["close"]),
+                "capital_at_entry": current_cap,
             }
             pos_f.update(signal_meta)
             return pos_f
@@ -1200,23 +1243,26 @@ class BacktestEngine:
             premium_entry = entry
             premium_exit = exit_price
 
-            # --- Finding 2: Dynamic VIX-scaled Slippage ---
+            # --- Finding 2: Dynamic VIX-scaled Slippage with Floor (ISSUE-10) ---
             vix_val = bar.get("vix", 14.0) if bar is not None else 14.0
             base_slippage = 0.0025 # 25bps
             dynamic_slippage_pct = base_slippage * max(1.0, vix_val / 14.0)
             
-            slippage = premium_exit * dynamic_slippage_pct
-            if position["direction"] == "bullish":
-                premium_exit -= slippage  # Sell lower
+            # ISSUE-10 FIX: Enforce minimum floor of Rs 0.50 (10 ticks) per share
+            slippage = max(0.50, premium_exit * dynamic_slippage_pct)
+            is_credit = position.get("action") == "SELL" or position.get("side") == "SELL" or position.get("is_credit", False)
+            if is_credit:
+                premium_exit += slippage  # Buying back to cover: pay more
+                gross_pnl = (premium_entry - premium_exit) * quantity
+                buy_value = premium_exit * quantity
+                sell_value = premium_entry * quantity
             else:
-                premium_exit -= slippage  # Sell lower (liquidating put)
-            premium_exit = max(premium_exit, 0)
-
-            gross_pnl = (premium_exit - premium_entry) * quantity
+                premium_exit = max(0.05, premium_exit - slippage)  # Selling to liquidate: receive less
+                gross_pnl = (premium_exit - premium_entry) * quantity
+                buy_value = premium_entry * quantity
+                sell_value = premium_exit * quantity
 
             # Costs based on premium values (options trade value)
-            buy_value = premium_entry * quantity
-            sell_value = premium_exit * quantity
             costs = self.cost_model.calculate_costs(buy_value, sell_value, "options")
             total_cost = costs["total"]
 
@@ -1260,6 +1306,7 @@ class BacktestEngine:
                 regime_at_entry=position.get("regime_at_entry", "unknown"),
                 option_expiry_date=position.get("option_expiry_date", ""),
                 entry_type=position.get("entry_type", "immediate"),
+                capital_at_entry=float(position.get("capital_at_entry", capital)),
             )
             return capital, trade
 
@@ -1280,7 +1327,7 @@ class BacktestEngine:
         # Costs
         buy_value = entry * quantity
         sell_value = exit_price * quantity
-        costs = self.cost_model.calculate_costs(buy_value, sell_value)
+        costs = self.cost_model.calculate_costs(buy_value, sell_value, "futures")
         total_cost = costs["total"]
 
         net_pnl = gross_pnl - total_cost
@@ -1323,6 +1370,7 @@ class BacktestEngine:
             regime_at_entry=position.get("regime_at_entry", "unknown"),
             option_expiry_date=position.get("option_expiry_date", ""),
             entry_type=position.get("entry_type", "immediate"),
+            capital_at_entry=float(position.get("capital_at_entry", capital)),
         )
 
         return capital, trade
@@ -1457,6 +1505,23 @@ class BacktestEngine:
             premium_low = max(premium_low, 0)
             premium_close = max(premium_close, 0)
 
+            is_credit = position.get("action") == "SELL" or position.get("side") == "SELL" or position.get("is_credit", False)
+
+            # Check raw index SL first (BUG-2 FIX: SL checked before Target to prevent optimistic fills)
+            underlying_sl = position.get("underlying_sl", 0)
+            if underlying_sl > 0:
+                direction = position.get("direction", "bullish")
+                hit_underlying = False
+                if direction == "bullish" and bar["low"] <= underlying_sl:
+                    hit_underlying = True
+                elif direction == "bearish" and bar["high"] >= underlying_sl:
+                    hit_underlying = True
+
+                if hit_underlying:
+                    position["current_premium"] = premium_low
+                    position["prev_close"] = bar["close"]
+                    return True, premium_low, "stop_loss_underlying"
+
             # Check raw index TARGET if provided
             underlying_target = position.get("underlying_target", 0)
             if underlying_target > 0:
@@ -1472,32 +1537,31 @@ class BacktestEngine:
                     position["prev_close"] = bar["close"]
                     return True, premium_high, "target"
 
-            # Check raw index SL if provided
-            underlying_sl = position.get("underlying_sl", 0)
-            if underlying_sl > 0:
-                direction = position.get("direction", "bullish")
-                hit_underlying = False
-                if direction == "bullish" and bar["low"] <= underlying_sl:
-                    hit_underlying = True
-                elif direction == "bearish" and bar["high"] >= underlying_sl:
-                    hit_underlying = True
-
-                if hit_underlying:
-                    position["current_premium"] = premium_low
+            # BUG-7 FIX: Handle credit spreads / short options (selling premium) vs long options
+            if is_credit:
+                # Credit spread: SL triggers when premium rises to or above SL
+                if sl > 0 and premium_high >= sl:
+                    position["current_premium"] = sl
                     position["prev_close"] = bar["close"]
-                    return True, premium_low, "stop_loss_underlying"
+                    return True, sl, "stop_loss_premium"
 
-            # Parallel Premium SL Floor Check (Strict Real-Market Execution: immediate SL exit)
-            if sl > 0 and premium_low <= sl:
-                position["current_premium"] = sl
-                position["prev_close"] = bar["close"]
-                return True, sl, "stop_loss_premium"
+                # Credit spread: Target triggers when premium drops to or below target
+                if target > 0 and premium_low <= target:
+                    position["current_premium"] = target
+                    position["prev_close"] = bar["close"]
+                    return True, target, "target"
+            else:
+                # Long option: Parallel Premium SL Floor Check (Strict Real-Market Execution)
+                if sl > 0 and premium_low <= sl:
+                    position["current_premium"] = sl
+                    position["prev_close"] = bar["close"]
+                    return True, sl, "stop_loss_premium"
 
-            # Fallback Premium Target Check (for older signal compatibility)
-            if target > 0 and premium_high >= target:
-                position["current_premium"] = target
-                position["prev_close"] = bar["close"]
-                return True, target, "target"
+                # Long option: Fallback Premium Target Check
+                if target > 0 and premium_high >= target:
+                    position["current_premium"] = target
+                    position["prev_close"] = bar["close"]
+                    return True, target, "target"
 
             # TIME STOP: exit after max_bars — checked AFTER SL/target
             # so a trade hitting target on the final bar gets target exit, not time stop.
@@ -1508,57 +1572,58 @@ class BacktestEngine:
                 position["prev_close"] = bar["close"]
                 return True, premium_close, "time_stop"
 
-            # TRAILING STOP with BREAKEVEN TRAP + PROFIT RUNNER
+            # TRAILING STOP with BREAKEVEN TRAP + PROFIT RUNNER (Long options only)
             # 5-stage system: breakeven → lock 20% → lock 50% → lock 70% → dynamic trail
             # Stages 0-3 use fixed R-multiple ratchets; stage 4 trails the high-water mark
-            risk_distance = entry_premium - sl if sl > 0 else entry_premium * 0.3
+            if not is_credit:
+                risk_distance = entry_premium - sl if sl > 0 else entry_premium * 0.3
 
-            if not position.get("breakeven_set", False):
-                # STAGE 0 — BREAKEVEN TRAP: at configurable R:R, move SL to entry + costs
-                # Converts full SL losses into near-zero losses (the KEY mechanism)
-                be_ratio = position.get("breakeven_ratio", 0.4)
-                breakeven_trigger = entry_premium + risk_distance * be_ratio
-                if premium_high >= breakeven_trigger:
-                    new_sl = entry_premium + risk_distance * 0.10
-                    position["stop_loss"] = new_sl
-                    position["breakeven_set"] = True
-            elif not position.get("trailing_activated", False):
-                # STAGE 1: at 1.0:1 R:R, lock 20% profit
-                trail_trigger = entry_premium + risk_distance * 1.0
-                if premium_high >= trail_trigger:
-                    new_sl = entry_premium + risk_distance * 0.20
-                    position["stop_loss"] = new_sl
-                    position["trailing_activated"] = True
-            elif not position.get("trailing_stage2", False):
-                # STAGE 2: at 2.0:1 R:R, lock 50% profit (big move confirmed)
-                trail_trigger_2 = entry_premium + risk_distance * 2.0
-                if premium_high >= trail_trigger_2:
-                    new_sl = entry_premium + risk_distance * 0.50
-                    position["stop_loss"] = new_sl
-                    position["trailing_stage2"] = True
-            elif not position.get("trailing_stage3", False):
-                # STAGE 3 — RUNNER START: at 3.0:1 R:R, lock 70% and begin dynamic trail
-                trail_trigger_3 = entry_premium + risk_distance * 3.0
-                if premium_high >= trail_trigger_3:
-                    new_sl = entry_premium + risk_distance * 0.70
-                    position["stop_loss"] = new_sl
-                    position["trailing_stage3"] = True
-                    position["premium_hwm"] = premium_high  # track high-water mark
-            else:
-                # STAGE 4 — DYNAMIC TRAIL: ratchet stop with high-water mark
-                # Trail offset = 30% of distance from entry to peak (keeps 70% of the move)
-                hwm = position.get("premium_hwm", premium_high)
-                if premium_high > hwm:
-                    hwm = premium_high
-                    position["premium_hwm"] = hwm
-                # Floor: never go below stage 3 level (entry + 0.70R)
-                floor_sl = entry_premium + risk_distance * 0.70
-                # Dynamic: trail 30% below the high-water mark
-                trail_offset = (hwm - entry_premium) * 0.30
-                dynamic_sl = hwm - trail_offset
-                new_sl = max(floor_sl, dynamic_sl)
-                if new_sl > position["stop_loss"]:
-                    position["stop_loss"] = new_sl
+                if not position.get("breakeven_set", False):
+                    # STAGE 0 — BREAKEVEN TRAP: at configurable R:R, move SL to entry + costs
+                    # Converts full SL losses into near-zero losses (the KEY mechanism)
+                    be_ratio = position.get("breakeven_ratio", 0.4)
+                    breakeven_trigger = entry_premium + risk_distance * be_ratio
+                    if premium_high >= breakeven_trigger:
+                        new_sl = entry_premium + risk_distance * 0.10
+                        position["stop_loss"] = new_sl
+                        position["breakeven_set"] = True
+                elif not position.get("trailing_activated", False):
+                    # STAGE 1: at 1.0:1 R:R, lock 20% profit
+                    trail_trigger = entry_premium + risk_distance * 1.0
+                    if premium_high >= trail_trigger:
+                        new_sl = entry_premium + risk_distance * 0.20
+                        position["stop_loss"] = new_sl
+                        position["trailing_activated"] = True
+                elif not position.get("trailing_stage2", False):
+                    # STAGE 2: at 2.0:1 R:R, lock 50% profit (big move confirmed)
+                    trail_trigger_2 = entry_premium + risk_distance * 2.0
+                    if premium_high >= trail_trigger_2:
+                        new_sl = entry_premium + risk_distance * 0.50
+                        position["stop_loss"] = new_sl
+                        position["trailing_stage2"] = True
+                elif not position.get("trailing_stage3", False):
+                    # STAGE 3 — RUNNER START: at 3.0:1 R:R, lock 70% and begin dynamic trail
+                    trail_trigger_3 = entry_premium + risk_distance * 3.0
+                    if premium_high >= trail_trigger_3:
+                        new_sl = entry_premium + risk_distance * 0.70
+                        position["stop_loss"] = new_sl
+                        position["trailing_stage3"] = True
+                        position["premium_hwm"] = premium_high  # track high-water mark
+                else:
+                    # STAGE 4 — DYNAMIC TRAIL: ratchet stop with high-water mark
+                    # Trail offset = 30% of distance from entry to peak (keeps 70% of the move)
+                    hwm = position.get("premium_hwm", premium_high)
+                    if premium_high > hwm:
+                        hwm = premium_high
+                        position["premium_hwm"] = hwm
+                    # Floor: never go below stage 3 level (entry + 0.70R)
+                    floor_sl = entry_premium + risk_distance * 0.70
+                    # Dynamic: trail 30% below the high-water mark
+                    trail_offset = (hwm - entry_premium) * 0.30
+                    dynamic_sl = hwm - trail_offset
+                    new_sl = max(floor_sl, dynamic_sl)
+                    if new_sl > position["stop_loss"]:
+                        position["stop_loss"] = new_sl
 
             # Update running premium for next bar
             position["current_premium"] = premium_close
@@ -1875,6 +1940,8 @@ class BacktestEngine:
                 "atr_at_entry": t.atr_at_entry,
                 "regime_at_entry": t.regime_at_entry,
                 "option_expiry_date": t.option_expiry_date,
+                "capital_at_entry": t.capital_at_entry,
+                "pct_return": (t.net_pnl / t.capital_at_entry) if t.capital_at_entry > 0 else 0.0,
             } for t in self.trades]
         )
 
@@ -1893,8 +1960,19 @@ class BacktestEngine:
         if not result.trades:
             return {"error": "No trades to simulate"}
 
-        trade_pnls = [t["pnl"] for t in result.trades]
-        n_trades = len(trade_pnls)
+        # ISSUE-9 FIX: Compounding Monte Carlo using percentage returns per trade
+        # Avoids distortion from applying large late-stage rupee PnLs to small initial capital
+        trade_returns = []
+        for t in result.trades:
+            cap_entry = t.get("capital_at_entry", 0)
+            pnl = t.get("pnl", t.get("net_pnl", 0))
+            if cap_entry and cap_entry > 0:
+                ret = pnl / cap_entry
+            else:
+                ret = pnl / self.initial_capital if self.initial_capital > 0 else 0.0
+            trade_returns.append(ret)
+
+        n_trades = len(trade_returns)
         block_size = min(5, max(1, n_trades // 10))  # 5 trades per block, min 1
 
         final_capitals = []
@@ -1904,17 +1982,19 @@ class BacktestEngine:
         for _ in range(num_simulations):
             # Block bootstrap: sample blocks of consecutive trades to preserve streaks
             equity = [self.initial_capital]
-            sampled_pnls = []
+            sampled_returns = []
 
-            while len(sampled_pnls) < n_trades:
+            while len(sampled_returns) < n_trades:
                 start_idx = np.random.randint(0, max(1, n_trades - block_size + 1))
-                block = trade_pnls[start_idx:start_idx + block_size]
-                sampled_pnls.extend(block)
+                block = trade_returns[start_idx:start_idx + block_size]
+                sampled_returns.extend(block)
 
-            sampled_pnls = sampled_pnls[:n_trades]  # trim to exact size
+            sampled_returns = sampled_returns[:n_trades]  # trim to exact size
 
-            for pnl in sampled_pnls:
-                equity.append(equity[-1] + pnl)
+            for ret in sampled_returns:
+                # Compound percentage return
+                new_equity = max(0.0, equity[-1] * (1.0 + ret))
+                equity.append(new_equity)
 
             equity_arr = np.array(equity)
             peak = np.maximum.accumulate(equity_arr)
@@ -1963,9 +2043,9 @@ class BacktestEngine:
     ) -> Dict:
         """
         Probability of Backtest Overfitting (PBO) via Combinatorially Symmetric
-        Cross-Validation (CSCV).
+        Cross-Validation (CSCV) on partitioned trade blocks.
 
-        Bailey et al. (2015) method:
+        Bailey et al. (2015) method applied to temporal sub-period trade slices:
           1. Split trade PnLs into N equal partitions
           2. For each C(N, N/2) combination, one half is "in-sample", other is "out-of-sample"
           3. Rank IS performance, pick best IS partition combo
@@ -1973,6 +2053,7 @@ class BacktestEngine:
           5. PBO = fraction of combos where best IS underperforms OOS median
 
         PBO < 0.30 = likely robust, 0.30–0.50 = borderline, > 0.50 = likely overfit
+        Note: Evaluates temporal stationarity across partitioned trade sequences.
         """
         if not result.trades or len(result.trades) < n_partitions * 2:
             return {"error": f"Need >= {n_partitions * 2} trades, got {len(result.trades)}"}
@@ -2042,4 +2123,5 @@ class BacktestEngine:
             "n_trades": n_trades,
             "mean_logit": round(np.mean(logit_values), 3) if logit_values else 0,
             "verdict": "ROBUST" if pbo < 0.30 else "BORDERLINE" if pbo < 0.50 else "LIKELY OVERFIT",
+            "method": "CSCV-partitioned temporal stationarity",
         }
