@@ -4868,6 +4868,10 @@ class Prometheus:
                         symbol, bar_interval, use_backtest_generator
                     )
                     if refined and refined.get("action") != "HOLD":
+                        traded_inst = refined.get("tradingsymbol", "") or refined.get("instrument", "")
+                        if traded_inst and traded_inst in _today_traded_instruments:
+                            logger.info(f"Skipping re-entry of {traded_inst} (already traded today)")
+                            continue
                         candidates.append(refined)
 
                 # 2. Sort by conviction/edge score descending (Option Buying >= 3.5 has natural priority)
@@ -4883,14 +4887,27 @@ class Prometheus:
                     strat = refined.get("strategy_type", refined.get("strategy", ""))
                     is_rank_1 = (rank_idx == 0)
 
+                    # Classify institutional signal tier (S, A, B, C, D)
+                    from prometheus.signals.tier_classifier import classify_signal_tier
+                    tier_info = classify_signal_tier(refined)
+                    refined["tier"] = tier_info["tier"]
+                    refined["tier_name"] = tier_info["tier_name"]
+                    refined["is_live_eligible"] = tier_info["is_live_eligible"]
+                    refined["tier_badge"] = tier_info["tier_badge"]
+                    refined["action_instruction"] = tier_info["action_instruction"]
+                    refined["classification_reasons"] = tier_info["classification_reasons"]
+
                     # Decorate with rank metadata
                     refined["leaderboard_rank"] = rank_idx + 1
                     refined["is_shadow_observation"] = not is_rank_1
 
                     self._alert_signal(refined)
 
-                    if is_rank_1:
-                        # Rank #1: Dispatch to primary account
+                    # Live Execution Gating: Only Rank #1 signals that are LIVE ELIGIBLE (Tier S, A, B)
+                    # execute on the primary live account. Tier C, Tier D, or Rank #2+ signals
+                    # route strictly to the paper trading engine for shadow tracking.
+                    if is_rank_1 and tier_info["is_live_eligible"]:
+                        # Rank #1 Live Eligible: Dispatch to primary account
                         position = self._execute_signal_with_feedback(
                             refined, confirm=False, context=mode_label
                         )
@@ -4932,15 +4949,17 @@ class Prometheus:
                                     self.position_monitor.add_position(ts)
                                     self._handle_state_persist(ts)
                     else:
-                        # Rank #2+: Shadow Paper Trading for full outcome observation
+                        # Rank #2+ OR Tier C/D Rank #1: Route to Paper Trading Engine for observation
                         shadow_trade_id = None
                         if getattr(self, "paper_capture", None):
                             try:
                                 shadow_trade_id = self.paper_capture.on_signal(refined)
                             except Exception as e:
                                 logger.debug(f"Shadow paper capture error for {symbol}: {e}")
+                        tier_label = tier_info.get("tier", "C")
+                        tag_desc = "SHADOW-OBSERVATION" if not is_rank_1 else f"TIER-{tier_label}-PAPER-ONLY"
                         logger.info(
-                            f"🥈 [SHADOW-OBSERVATION] Rank #{rank_idx + 1} signal paper-tracked: "
+                            f"📝 [{tag_desc}] Rank #{rank_idx + 1} ({tier_label}) signal paper-tracked: "
                             f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
                         )
 

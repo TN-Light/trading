@@ -879,27 +879,21 @@ class TelegramBot:
             else:
                 rank_header = ""
 
-            is_sure_shot = bool(signal.get("is_sure_shot", False)) or (float(signal.get("signal_score", 0.0) or 0.0) >= 9.0)
-            sig_score = float(signal.get("signal_score", 0.0) or 7.5)
+            from prometheus.signals.tier_classifier import classify_signal_tier
+            tier_info = classify_signal_tier(signal)
+            tier_badge = tier_info["tier_badge"]
+            action_line = tier_info["action_instruction"]
+
             pop = signal.get("pop_pct") or signal.get("theoretical_pop")
             sigma = signal.get("otm_sigma")
-            
-            pop_detail = f" | POP: ~{pop:.0f}%" if pop else ""
+            pop_detail = f" | Theoretical POP: ~{pop:.0f}%" if pop else ""
             sigma_detail = f" ({sigma}σ OTM)" if sigma else ""
             
-            if is_sure_shot:
-                pop_tag = f"Theoretical POP: ~{pop:.0f}%" if pop else f"High Conviction ({sig_score:.1f}/10)"
-                conviction_banner = (
-                    f"🎯 <b>[TIER 1 HIGH CONVICTION SPREAD — {sig_score:.1f}/10]</b>\n"
-                    f"💎 <b>REAL-TRADE READY ({pop_tag}{sigma_detail})</b>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                )
-            else:
-                conviction_banner = (
-                    "📊 <b>[STANDARD SPREAD — PAPER TRADE ONLY]</b>\n"
-                    f"⚠️ <i>Standard conviction ({sig_score:.1f}/10{pop_detail}{sigma_detail}). Keep in paper mode.</i>\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                )
+            conviction_banner = (
+                f"{tier_badge}\n"
+                f"{action_line}{pop_detail}{sigma_detail}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
 
             oi_wall_line = ""
             if signal.get("oi_wall_strike"):
@@ -1051,8 +1045,19 @@ class TelegramBot:
         else:
             rank_header = ""
 
+        from prometheus.signals.tier_classifier import classify_signal_tier
+        tier_info = classify_signal_tier(signal)
+        tier_badge = tier_info["tier_badge"]
+        action_line = tier_info["action_instruction"]
+        assigned_tier = tier_info["tier"]
+
         is_golden = bool(signal.get("is_golden_setup")) or ("Golden_Setup" in str(signal.get("strategy", "")))
-        header_title = f"⭐ <b>NEW GOLDEN SETUP SIGNAL</b>" if is_golden else f"{emoji} <b>NEW TRADING SIGNAL</b>"
+        if assigned_tier == "S":
+            header_title = "🏆 <b>PERFECT STORM IMPULSE SIGNAL</b>"
+        elif assigned_tier == "B" or is_golden:
+            header_title = "🌟 <b>NEW GOLDEN SETUP SIGNAL</b>"
+        else:
+            header_title = f"{emoji} <b>NEW TRADING SIGNAL</b>"
 
         strat_name = signal.get("strategy") or ("Golden_Setup (1H+VWAP+ORB)" if is_golden else "PriceAction_Momentum")
         edge_score = signal.get("edge_score") if signal.get("edge_score") is not None else signal.get("signal_score")
@@ -1063,23 +1068,14 @@ class TelegramBot:
         strategy_line = f"<b>Strategy:</b> <code>{strat_name}</code>{score_str}\n"
         confluence_line = f"<b>Confluences:</b> <i>{confluence_str}</i>\n" if confluence_str else ""
 
-        is_sure_shot_buy = bool(signal.get("is_sure_shot", False)) or (float(edge_score or 0.0) >= 9.0)
         rr_val = signal.get("risk_reward") or signal.get("rr")
         rr_detail = f" | R:R 1:{float(rr_val):.1f}" if rr_val else ""
-        edge_disp = f"{float(edge_score):.1f}/10" if edge_score is not None else "High"
-        
-        if is_sure_shot_buy:
-            conviction_badge = (
-                f"🎯 <b>[TIER 1 HIGH CONVICTION MOMENTUM — {edge_disp}]</b>\n"
-                f"💎 <b>REAL-TRADE READY (Edge Score: {edge_disp}{rr_detail})</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            )
-        else:
-            conviction_badge = (
-                "📊 <b>[STANDARD SIGNAL — PAPER TRADE ONLY]</b>\n"
-                f"⚠️ <i>Standard conviction ({edge_disp}{rr_detail}). Recommended for paper observation.</i>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            )
+
+        conviction_badge = (
+            f"{tier_badge}\n"
+            f"{action_line}{rr_detail}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
 
         text = (
             f"{rank_header}"
