@@ -274,40 +274,47 @@ class OIAnalyzer:
 
         total_call_oi_change = atm_calls["oi_change"].sum() if not atm_calls.empty else 0
         total_put_oi_change = atm_puts["oi_change"].sum() if not atm_puts.empty else 0
+        total_call_oi = atm_calls["oi"].sum() if not atm_calls.empty else 0
+        total_put_oi = atm_puts["oi"].sum() if not atm_puts.empty else 0
+
+        # ISSUE-13 FIX: Adaptive threshold based on near-ATM total OI (3% of total or min 5,000 shares)
+        # Prevents breaking on non-NIFTY symbols (SENSEX, MIDCPNIFTY, single stocks)
+        call_thresh = max(5000, total_call_oi * 0.03) if total_call_oi > 0 else 50000
+        put_thresh = max(5000, total_put_oi * 0.03) if total_put_oi > 0 else 50000
 
         # Significant call OI buildup near ATM = resistance strengthening
-        if total_call_oi_change > 0 and abs(total_call_oi_change) > 50000:
+        if total_call_oi_change > call_thresh:
             signals.append(OISignal(
                 signal_type="call_oi_buildup",
                 direction="bearish",
-                strength=min(total_call_oi_change / 500000, 0.8),
+                strength=min(total_call_oi_change / max(call_thresh * 5.0, 1.0), 0.8),
                 details=f"Call OI +{total_call_oi_change:,} near ATM = sellers adding positions, bearish"
             ))
 
         # Significant put OI buildup near ATM = support strengthening
-        if total_put_oi_change > 0 and abs(total_put_oi_change) > 50000:
+        if total_put_oi_change > put_thresh:
             signals.append(OISignal(
                 signal_type="put_oi_buildup",
                 direction="bullish",
-                strength=min(total_put_oi_change / 500000, 0.8),
+                strength=min(total_put_oi_change / max(put_thresh * 5.0, 1.0), 0.8),
                 details=f"Put OI +{total_put_oi_change:,} near ATM = put sellers defending support, bullish"
             ))
 
         # Call OI unwinding = resistance weakening = bullish
-        if total_call_oi_change < -50000:
+        if total_call_oi_change < -call_thresh:
             signals.append(OISignal(
                 signal_type="call_oi_unwinding",
                 direction="bullish",
-                strength=min(abs(total_call_oi_change) / 500000, 0.6),
+                strength=min(abs(total_call_oi_change) / max(call_thresh * 5.0, 1.0), 0.6),
                 details=f"Call OI {total_call_oi_change:,} near ATM = call writers covering, resistance weakening"
             ))
 
         # Put OI unwinding = support weakening = bearish
-        if total_put_oi_change < -50000:
+        if total_put_oi_change < -put_thresh:
             signals.append(OISignal(
                 signal_type="put_oi_unwinding",
                 direction="bearish",
-                strength=min(abs(total_put_oi_change) / 500000, 0.6),
+                strength=min(abs(total_put_oi_change) / max(put_thresh * 5.0, 1.0), 0.6),
                 details=f"Put OI {total_put_oi_change:,} near ATM = put writers covering, support weakening"
             ))
 
