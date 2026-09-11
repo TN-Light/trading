@@ -4777,9 +4777,18 @@ class Prometheus:
                     except Exception:
                         effective_last_entry = dtime(15, 5)
 
+                bar_interval = self._select_intraday_interval()
+
+                # Always evaluate exits on open paper positions regardless of cutoff or max trades
+                n_pos = self._get_active_positions_count()
+                if n_pos > 0:
+                    try:
+                        self._paper_capture_feed_bars(intraday_instruments, bar_interval)
+                    except Exception as e:
+                        logger.debug(f"[PaperCapture] continuous exit evaluation error: {e}")
+
                 # No new entries after cutoff — monitor only
                 if current_time >= effective_last_entry:
-                    n_pos = self._get_active_positions_count()
                     self.dashboard.show_status_line(
                         f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
                         f"Square-off at {square_off_str}."
@@ -4788,7 +4797,6 @@ class Prometheus:
                     continue
 
                 if _guardrail_breached and pilot_block_new:
-                    n_pos = self._get_active_positions_count()
                     self.dashboard.show_status_line(
                         f"{mode_label}: Guardrail active ({_guardrail_reason}). "
                         f"Monitoring {n_pos} position(s)."
@@ -4797,7 +4805,6 @@ class Prometheus:
                     continue
 
                 # ── INTRADAY SCAN ──
-                bar_interval = self._select_intraday_interval()
                 # Auto-match scan interval to bar interval (5min→300s, 15min→900s)
                 # During Expiry Power Hour (13:30 - 15:05 on expiry days), scan every 180s (3 minutes)
                 if any_expiry_today and current_time >= dtime(13, 30):

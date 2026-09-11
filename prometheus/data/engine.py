@@ -619,10 +619,26 @@ class DataEngine:
         if use_cache:
             cached = self.store.get_ohlcv(symbol, interval, start=start_date, end=end_date)
             if not cached.empty and len(cached) > (days * 0.5):
-                logger.debug(f"Using cached data for {symbol} ({len(cached)} rows)")
-                if hasattr(self, "_mem_cache"):
-                    self._mem_cache[mem_key] = (cached.copy(), time.time())
-                return cached
+                # Critical Freshness Guard (2026-09-11 audit):
+                # For intraday intervals during trading hours, cache is only valid if it includes today's bars.
+                # Serving yesterday's cache causes strategies to evaluate stale historical setups!
+                is_fresh = True
+                from prometheus.utils.indian_market import is_trading_day
+                from datetime import time as dtime
+                now_ist = datetime.now(IST)
+                today_d = now_ist.date()
+                if is_trading_day(today_d) and now_ist.time() >= dtime(9, 15):
+                    if interval in ("minute", "1minute", "3minute", "5minute", "15minute", "30minute", "60minute", "hour"):
+                        last_ts = cached.iloc[-1].get("timestamp")
+                        if last_ts is not None:
+                            last_bar_date = pd.to_datetime(last_ts).date()
+                            if last_bar_date < today_d:
+                                is_fresh = False
+                if is_fresh:
+                    logger.debug(f"Using cached data for {symbol} ({len(cached)} rows)")
+                    if hasattr(self, "_mem_cache"):
+                        self._mem_cache[mem_key] = (cached.copy(), time.time())
+                    return cached
 
         source_order = self._get_source_order(symbol, interval, days)
         for source in source_order:
