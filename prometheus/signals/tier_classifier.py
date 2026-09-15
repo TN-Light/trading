@@ -29,7 +29,23 @@ def classify_signal_tier(signal: Dict[str, Any]) -> Dict[str, Any]:
             - action_instruction: Plain English execution instruction
             - is_live_eligible: True if approved for live broker capital, False if paper-only/observe
             - classification_reasons: List of reasons justifying the tier assignment
+            - commitment_ratio: Optional shadow telemetry metric (|ΔOI|/Volume)
     """
+    res = _classify_signal_tier_core(signal)
+    if signal and isinstance(signal, dict):
+        comm_ratio = signal.get("commitment_ratio")
+        if comm_ratio is not None:
+            try:
+                cr_val = float(comm_ratio)
+                res["commitment_ratio"] = cr_val
+                if cr_val > 0:
+                    res["classification_reasons"].append(f"Institutional Commitment: {cr_val:.2f} (|ΔOI|/Vol)")
+            except Exception:
+                pass
+    return res
+
+
+def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
     if not signal or not isinstance(signal, dict):
         return _build_tier_result("D", "OBSERVE", False, ["Empty or invalid signal"])
 

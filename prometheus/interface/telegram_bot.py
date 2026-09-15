@@ -888,10 +888,12 @@ class TelegramBot:
             sigma = signal.get("otm_sigma")
             pop_detail = f" | Theoretical POP: ~{pop:.0f}%" if pop else ""
             sigma_detail = f" ({sigma}σ OTM)" if sigma else ""
-            
+            comm_val = signal.get("commitment_ratio")
+            comm_str = f" | Commitment: {float(comm_val):.2f}" if comm_val is not None else ""
+
             conviction_banner = (
                 f"{tier_badge}\n"
-                f"{action_line}{pop_detail}{sigma_detail}\n"
+                f"{action_line}{pop_detail}{sigma_detail}{comm_str}\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
 
@@ -1070,10 +1072,12 @@ class TelegramBot:
 
         rr_val = signal.get("risk_reward") or signal.get("rr")
         rr_detail = f" | R:R 1:{float(rr_val):.1f}" if rr_val else ""
+        comm_val = signal.get("commitment_ratio")
+        comm_str = f" | Commitment: {float(comm_val):.2f}" if comm_val is not None else ""
 
         conviction_badge = (
             f"{tier_badge}\n"
-            f"{action_line}{rr_detail}\n"
+            f"{action_line}{rr_detail}{comm_str}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
 

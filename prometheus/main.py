@@ -2130,6 +2130,18 @@ class Prometheus:
                         pa_sig["quantity"] = lot_sz
                         pa_sig["lot_cost"] = lot_cost
 
+                        # Shadow Telemetry: Institutional Commitment Ratio (|ΔOI| / Volume)
+                        comm_ratio = None
+                        try:
+                            if hasattr(self, "oi_analyzer"):
+                                chain_data = self.data.fetch_options_chain(symbol)
+                                if chain_data is not None and not chain_data.empty:
+                                    res_oi = self.oi_analyzer.analyze(chain_data, spot_price)
+                                    comm_ratio = res_oi.get("metrics", {}).get("commitment_ratio")
+                        except Exception:
+                            pass
+                        pa_sig["commitment_ratio"] = comm_ratio
+
                         # 3. ── Strict Same-Instrument Lockout & Profit-Locked Pyramiding Gate ──
                         repeat_entry_blocked = False
                         traded_set = getattr(self, "_today_traded_instruments", set())
@@ -2203,6 +2215,14 @@ class Prometheus:
                     if cs_sig:
                         cs_sig["strategy_type"] = "credit_spread"
                         cs_sig["signal_score"] = float(cs_sig.get("signal_score") or cs_sig.get("signal_strength", 3.5) or 3.5)
+                        try:
+                            if hasattr(self, "oi_analyzer"):
+                                chain_data = self.data.fetch_options_chain(symbol)
+                                if chain_data is not None and not chain_data.empty:
+                                    res_oi = self.oi_analyzer.analyze(chain_data, float(cs_sig.get("underlying_price", 0) or 0))
+                                    cs_sig["commitment_ratio"] = res_oi.get("metrics", {}).get("commitment_ratio")
+                        except Exception:
+                            pass
                         logger.info(
                             f"CreditSpread signal generated for {symbol}: "
                             f"{cs_sig.get('spread_type')} (Credit=Rs {cs_sig.get('net_credit', 0):.2f}) "

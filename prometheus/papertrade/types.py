@@ -85,6 +85,7 @@ class PaperTrade:
     signal_confidence: float = 0.0
     stop_loss: float = 0.0
     target: float = 0.0
+    commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -128,6 +129,7 @@ class Position:
     signal_confidence: float = 0.0
     trade_mode: str = "intraday"     # "intraday" or "swing"
     initial_sl: float = 0.0
+    commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
     initial_risk_distance: float = 0.0
 
     def __post_init__(self):

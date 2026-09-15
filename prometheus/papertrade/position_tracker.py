@@ -261,6 +261,7 @@ class PositionTracker:
             signal_confidence=pos.signal_confidence,
             stop_loss=pos.stop_loss,
             target=pos.target,
+            commitment_ratio=getattr(pos, "commitment_ratio", None),
         )
         self.closed_trades.append(trade)
         # Bug C.2 (2026-07-25 audit): the position has been popped from

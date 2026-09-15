@@ -44,6 +44,7 @@ TRADE_COLUMNS = [
     "signal_confidence",
     "stop_loss",
     "target",
+    "commitment_ratio",
 ]
 
 
@@ -104,9 +105,15 @@ class TradeRecorder:
                 signal_confidence REAL,
                 stop_loss REAL,
                 target REAL,
+                commitment_ratio REAL,
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Safe migration for existing databases
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN commitment_ratio REAL")
+        except Exception:
+            pass
         self._db.execute("""
             CREATE TABLE IF NOT EXISTS paper_stats_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

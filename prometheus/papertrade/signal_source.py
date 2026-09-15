@@ -64,6 +64,7 @@ class SignalNotification:
     strategy: str = ""                # for logging/audit
 
     bar_timestamp: Optional[datetime] = None  # when the signal was generated
+    commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
     metadata: dict = None            # bag for any extra context
 
 
@@ -233,6 +234,7 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
         trade_mode=signal.get("trade_mode", "intraday"),
         strategy=signal.get("strategy", "Hedged_Credit_Spread" if is_spread else ""),
         bar_timestamp=_parse_bar_timestamp(signal.get("bar_timestamp")),
+        commitment_ratio=float(signal["commitment_ratio"]) if signal.get("commitment_ratio") is not None else None,
         metadata={"raw": signal},
     )
 

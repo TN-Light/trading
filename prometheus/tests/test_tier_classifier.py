@@ -262,3 +262,64 @@ class TestPrometheusRuntimeInitialization:
         assert hasattr(p, "_intraday_guardrail_audit")
         assert hasattr(p, "paper_capture")
 
+
+class TestCommitmentRatioTelemetry:
+    """Test suite for Option C: Institutional Commitment Ratio (|ΔOI| / Volume) shadow telemetry."""
+
+    def test_oi_analyzer_calculates_commitment_ratio(self):
+        from prometheus.signals.oi_analyzer import OIAnalyzer
+        import pandas as pd
+
+        analyzer = OIAnalyzer()
+        chain_df = pd.DataFrame([
+            {"option_type": "CE", "strike": 24000.0, "oi": 50000, "oi_change": 12000, "volume": 30000},
+            {"option_type": "PE", "strike": 24000.0, "oi": 60000, "oi_change": 8000, "volume": 20000},
+        ])
+        res = analyzer.analyze(chain_df, spot_price=24000.0)
+        metrics = res.get("metrics", {})
+        assert "commitment_ratio" in metrics
+        # (|12000| + |8000|) / (30000 + 20000) = 20000 / 50000 = 0.40
+        assert metrics["commitment_ratio"] == 0.40
+
+    def test_tier_classifier_preserves_commitment_ratio(self):
+        signal = {
+            "action": "BUY_CE",
+            "symbol": "NIFTY 50",
+            "strategy": "PriceAction_Momentum",
+            "edge_score": 8.5,
+            "bar_timestamp": "2026-09-15 09:45:00",
+            "reasons": ["15M_ORB_High_Breakout", "Session_VWAP_Bullish", "Volume_Surge_Confirmed", "1H_Trend_Bullish"],
+            "has_volume_surge": True,
+            "commitment_ratio": 0.45,
+        }
+        res = classify_signal_tier(signal)
+        assert res["tier"] == "S"
+        assert res["commitment_ratio"] == 0.45
+        assert any("Institutional Commitment: 0.45" in r for r in res["classification_reasons"])
+
+    def test_telegram_alert_displays_commitment_ratio(self):
+        bot = TelegramBot()
+        bot.send_message = MagicMock()
+
+        signal = {
+            "action": "BUY_CE",
+            "symbol": "NIFTY 50",
+            "strategy": "PriceAction_Momentum",
+            "edge_score": 8.0,
+            "bar_timestamp": "2026-09-15 09:45:00",
+            "reasons": ["15M_ORB_High_Breakout", "Session_VWAP_Bullish"],
+            "entry": 145.0,
+            "sl": 125.0,
+            "target": 185.0,
+            "strike": 24900,
+            "option_type": "CE",
+            "expiry": "2026-09-17",
+            "commitment_ratio": 0.42,
+            "leaderboard_rank": 1,
+        }
+        bot.alert_new_signal(signal)
+        assert bot.send_message.called
+        msg = bot.send_message.call_args[0][0]
+        assert "Commitment: 0.42" in msg
+
+

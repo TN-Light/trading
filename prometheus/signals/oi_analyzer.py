@@ -132,6 +132,15 @@ class OIAnalyzer:
         # 7. Overall OI Sentiment
         metrics["oi_sentiment"] = self._calculate_oi_sentiment(signals)
 
+        # 8. Institutional Commitment Ratio (Residual Flow Telemetry)
+        # Ratio of Net Absolute OI Change to Total Volume near ATM
+        atm_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.02
+        atm_df = chain_df[atm_mask] if not chain_df.empty else chain_df
+        tot_oi_change = float(abs(atm_df["oi_change"]).sum()) if not atm_df.empty and "oi_change" in atm_df.columns else 0.0
+        tot_volume = float(atm_df["volume"].sum()) if not atm_df.empty and "volume" in atm_df.columns else 0.0
+        commitment_ratio = round(tot_oi_change / max(tot_volume, 1.0), 3) if tot_volume > 0 else 0.0
+        metrics["commitment_ratio"] = commitment_ratio
+
         return {"signals": signals, "metrics": metrics}
 
     def _calculate_pcr(self, calls: pd.DataFrame, puts: pd.DataFrame) -> Dict:
