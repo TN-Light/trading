@@ -245,3 +245,20 @@ class TestTelegramAlertFormatting:
         msg = bot.send_message.call_args[0][0]
         assert "TIER A: HIGH CONVICTION SPREAD" in msg
         assert "Live Trade" in msg
+
+
+class TestPrometheusRuntimeInitialization:
+    """Regression test: Ensure Prometheus __init__ does not truncate prematurely."""
+
+    def test_prometheus_runtime_attributes_initialized(self):
+        from prometheus.main import Prometheus
+        p = Prometheus(mode_override="paper")
+        assert hasattr(p, "_scan_lock"), "Prometheus must have _scan_lock initialized"
+        assert p._scan_lock is not None
+        assert hasattr(p, "_alerted_signals"), "Prometheus must have _alerted_signals initialized"
+        assert isinstance(p._alerted_signals, dict)
+        assert hasattr(p, "_last_trade_reject_alerts")
+        assert hasattr(p, "gamma_ambush_log_file")
+        assert hasattr(p, "_intraday_guardrail_audit")
+        assert hasattr(p, "paper_capture")
+
