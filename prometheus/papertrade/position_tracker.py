@@ -418,7 +418,24 @@ class PositionTracker:
         if snap.high >= tgt:
             return tgt, ExitReason.TARGET
 
-        # -- 2. Time stop — order matters: SL/target already checked above -
+        # -- 2. 45-minute (3-bar) Inactivity Kill-Switch --------------------
+        # Liquidates stagnant option buying positions after 3 bars (45 min)
+        # to prevent theta decay when underlying momentum fails to advance >= 0.5*ATR.
+        if pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
+            is_stagnant = False
+            entry_spot = getattr(pos, "entry_spot", 0.0)
+            atr = getattr(pos, "atr", 0.0)
+            if entry_spot > 0 and atr > 0:
+                spot_disp = (snap.close - entry_spot) if pos.direction == Direction.LONG else (entry_spot - snap.close)
+                if spot_disp < 0.5 * atr and snap.close < pos.entry_price * 1.05:
+                    is_stagnant = True
+            elif snap.close < pos.entry_price * 1.03:
+                is_stagnant = True
+
+            if is_stagnant:
+                return snap.close, ExitReason.INACTIVITY_KILL_SWITCH
+
+        # -- 3. Time stop — order matters: SL/target already checked above -
         # don't exit on time if SL/target was hit; but we exited earlier in
         # that case so we don't reach here.
         max_bars = pos.max_bars_allowed or pos.max_bars
@@ -497,6 +514,24 @@ class PositionTracker:
                     return ltp, ExitReason.TARGET
         # Otherwise no LTP — skip SL/target evaluation this bar (don't
         # fabricate an exit price from the underlying snapshot).
+
+        # 45-minute (3-bar) Inactivity Kill-Switch via feed
+        if pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
+            is_stagnant = False
+            entry_spot = getattr(pos, "entry_spot", 0.0)
+            atr = getattr(pos, "atr", 0.0)
+            current_spot = snap.close if (snap and snap.close > 0) else 0.0
+
+            if entry_spot > 0 and atr > 0 and current_spot > 0:
+                spot_disp = (current_spot - entry_spot) if pos.direction == Direction.LONG else (entry_spot - current_spot)
+                if spot_disp < 0.5 * atr and (ltp <= 0 or ltp < pos.entry_price * 1.05):
+                    is_stagnant = True
+            elif ltp > 0 and ltp < pos.entry_price * 1.03:
+                is_stagnant = True
+
+            if is_stagnant:
+                exit_price = ltp if ltp > 0 else (pos.entry_price if pos.entry_price > 0 else snap.close)
+                return exit_price, ExitReason.INACTIVITY_KILL_SWITCH
 
         # Time stop: check max_bars (order matters: SL/target already checked above)
         max_bars = pos.max_bars_allowed or pos.max_bars

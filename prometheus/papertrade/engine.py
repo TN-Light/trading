@@ -256,6 +256,8 @@ class PaperTradeEngine:
             signal_confidence=signal.signal_confidence,
             trade_mode=signal.trade_mode,
             commitment_ratio=getattr(signal, "commitment_ratio", None),
+            entry_spot=getattr(signal, "entry_spot", 0.0) or 0.0,
+            atr=getattr(signal, "atr", 0.0) or 0.0,
         )
         self.tracker.open_position(position)
         return trade_id

@@ -30,6 +30,7 @@ class ExitReason(str, Enum):
     END_OF_SESSION = "end_OF_session"   # explicit session close (rare)
     REVERSE_SIGNAL = "reverse_signal"   # opposite-direction signal arrived
     MANUAL = "manual"
+    INACTIVITY_KILL_SWITCH = "inactivity_kill_switch"  # 45-min / 3-bar stagnation stop
 
     def __str__(self) -> str:
         return self.value
@@ -131,6 +132,8 @@ class Position:
     initial_sl: float = 0.0
     commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
     initial_risk_distance: float = 0.0
+    entry_spot: float = 0.0
+    atr: float = 0.0
 
     def __post_init__(self):
         if self.initial_sl <= 0.0 and self.stop_loss > 0.0:

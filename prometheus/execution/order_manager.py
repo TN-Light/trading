@@ -598,6 +598,8 @@ class OrderManager:
             max_bars=managed.max_bars,
             breakeven_ratio=managed.breakeven_ratio,
             entry_orders_json=orders_json,
+            entry_spot=float(getattr(managed, "spot_at_signal", 0.0) or 0.0),
+            atr=float(getattr(managed, "atr", 0.0) or 0.0),
         )
 
     # -------------------------------------------------------------------------

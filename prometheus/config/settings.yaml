@@ -192,6 +192,12 @@ intraday:
   square_off_time: '15:15'
   time_stop_bars_15min: 16
   time_stop_bars_5min: 36
+  inactivity_kill_switch:
+    enabled: true
+    stagnation_bars_15min: 3  # 45 minutes
+    stagnation_bars_5min: 9   # 45 minutes
+    atr_displacement_threshold: 0.5  # Spot must advance >= 0.5 * ATR_15m
+    premium_gain_threshold_pct: 0.05  # Premium must gain >= +5% to avoid cut
   trailing_poll_seconds: 10
   v2:
     ab_test:

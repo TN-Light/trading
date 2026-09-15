@@ -76,6 +76,8 @@ class TrailingState:
     breakeven_decay_price: float = 0.0
     hard_sl_price: float = 0.0
     low_vix_mode: bool = False
+    entry_spot: float = 0.0
+    atr: float = 0.0
 
     def __post_init__(self):
         if self.risk_distance == 0.0 and self.entry_premium > 0:
@@ -408,15 +410,50 @@ class PositionMonitor:
                 self._on_exit(state.position_id, current_price, "time_stop")
             return
 
-        # ── Stagnation Exit (cut stagnant options after 4 bars to prevent theta decay) ──
-        if state.trade_mode == "intraday" and state.entry_bar_count >= 4 and not state.breakeven_set:
-            if current_price < entry * 1.03:
-                logger.info(
-                    f"[MONITOR] Stagnation cut: {state.position_id} "
-                    f"after {state.entry_bar_count} bars (LTP={current_price:.2f} <= Entry*1.03={entry*1.03:.2f})"
+        # ── 45-Minute (3-Bar) ATR-Adaptive Inactivity Kill-Switch ──
+        # Liquidates stagnant option buying positions where underlying momentum has stalled (< 0.5*ATR)
+        # within 3 bars (45 min) to prevent prolonged theta decay.
+        if state.trade_mode == "intraday" and state.entry_bar_count >= 3 and not state.breakeven_set:
+            is_stagnant = False
+            stagnation_detail = ""
+
+            # 1. Evaluate underlying spot progress against ATR if data engine and entry_spot are available
+            if self._data_engine and getattr(state, "entry_spot", 0.0) > 0:
+                try:
+                    data = self._data_engine.fetch_historical(
+                        state.symbol, days=3, interval=getattr(state, "bar_interval", "15minute")
+                    )
+                    if data is not None and len(data) >= 14:
+                        curr_spot = float(data.iloc[-1]["close"])
+                        from prometheus.signals.technical import calculate_atr
+                        atr_s = calculate_atr(data, period=14)
+                        current_atr = float(atr_s.iloc[-1]) if not atr_s.empty else getattr(state, "atr", 0.0)
+
+                        if current_atr > 0:
+                            trade_is_bullish = (state.direction == "bullish")
+                            spot_disp = (curr_spot - state.entry_spot) if trade_is_bullish else (state.entry_spot - curr_spot)
+                            min_progress = 0.5 * current_atr
+                            if spot_disp < min_progress and current_price < entry * 1.05:
+                                is_stagnant = True
+                                stagnation_detail = (
+                                    f"underlying moved {spot_disp:+.1f} pts < 0.5*ATR ({min_progress:.1f} pts) "
+                                    f"and premium LTP={current_price:.2f} < 1.05x entry={entry*1.05:.2f}"
+                                )
+                except Exception as e:
+                    logger.debug(f"Error checking ATR progress in inactivity kill-switch for {state.position_id}: {e}")
+
+            # 2. Fallback: option premium stagnation (< +3% gain after 3 bars / 45 min)
+            if not is_stagnant and current_price < entry * 1.03:
+                is_stagnant = True
+                stagnation_detail = f"premium LTP={current_price:.2f} <= Entry*1.03={entry*1.03:.2f}"
+
+            if is_stagnant:
+                logger.warning(
+                    f"[MONITOR] Inactivity Kill-Switch triggered: {state.position_id} "
+                    f"after {state.entry_bar_count} bars (45m) — {stagnation_detail}"
                 )
                 if self._on_exit:
-                    self._on_exit(state.position_id, current_price, "stagnation_exit")
+                    self._on_exit(state.position_id, current_price, "inactivity_kill_switch")
                 return
 
         # ── 5-STAGE TRAILING STOP (bullish — long options) ──

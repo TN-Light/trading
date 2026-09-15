@@ -65,6 +65,8 @@ class SignalNotification:
 
     bar_timestamp: Optional[datetime] = None  # when the signal was generated
     commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
+    entry_spot: float = 0.0                   # underlying spot price at entry
+    atr: float = 0.0                          # 14-period ATR of underlying
     metadata: dict = None            # bag for any extra context
 
 
@@ -124,6 +126,8 @@ def from_executable_signal(executable, max_bars_default: int = 16) -> SignalNoti
         trade_mode="swing",                                         # SignalConverter path is swing
         strategy=executable.strategy or "",
         bar_timestamp=_parse_bar_timestamp(executable.bar_timestamp),
+        entry_spot=float(getattr(executable, "spot_price", 0.0) or getattr(executable, "spot", 0.0) or 0.0),
+        atr=float(getattr(executable, "atr", 0.0) or 0.0),
         metadata={"raw": executable.raw or {}},
     )
 
@@ -172,6 +176,8 @@ def from_trend_setup(setup, symbol: str, max_bars_default: int = 16) -> SignalNo
         trade_mode="intraday",
         strategy=setup.strategy or "trend",
         bar_timestamp=_parse_bar_timestamp(getattr(setup, "bar_timestamp", None) or None),
+        entry_spot=float(getattr(setup, "spot_price", 0.0) or 0.0),
+        atr=float(getattr(setup, "atr", 0.0) or 0.0),
     )
 
 
@@ -235,6 +241,8 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
         strategy=signal.get("strategy", "Hedged_Credit_Spread" if is_spread else ""),
         bar_timestamp=_parse_bar_timestamp(signal.get("bar_timestamp")),
         commitment_ratio=float(signal["commitment_ratio"]) if signal.get("commitment_ratio") is not None else None,
+        entry_spot=float(signal.get("entry_spot") or signal.get("spot") or signal.get("spot_price") or signal.get("spot_at_signal") or 0.0),
+        atr=float(signal.get("atr") or signal.get("atr_15m") or 0.0),
         metadata={"raw": signal},
     )
 
