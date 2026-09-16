@@ -262,6 +262,8 @@ class Prometheus:
             min_rr=2.0,
         )
         self.oi_analyzer = OIAnalyzer()
+        from prometheus.signals.gamma_engine import GammaEngine
+        self.gamma_engine = GammaEngine()
         self.regime_detector = RegimeDetector()
 
         # Strategies
@@ -2130,17 +2132,25 @@ class Prometheus:
                         pa_sig["quantity"] = lot_sz
                         pa_sig["lot_cost"] = lot_cost
 
-                        # Shadow Telemetry: Institutional Commitment Ratio (|ΔOI| / Volume)
+                        # Shadow Telemetry: Institutional Commitment Ratio & Net Gamma Exposure (GEX / ZGL)
                         comm_ratio = None
+                        net_gex = None
+                        zgl_val = None
                         try:
-                            if hasattr(self, "oi_analyzer"):
-                                chain_data = self.data.fetch_options_chain(symbol)
-                                if chain_data is not None and not chain_data.empty:
+                            chain_data = self.data.fetch_options_chain(symbol)
+                            if chain_data is not None and not chain_data.empty:
+                                if hasattr(self, "oi_analyzer"):
                                     res_oi = self.oi_analyzer.analyze(chain_data, spot_price)
                                     comm_ratio = res_oi.get("metrics", {}).get("commitment_ratio")
+                                if hasattr(self, "gamma_engine"):
+                                    gex_res = self.gamma_engine.calculate_gex(chain_data, spot_price, symbol)
+                                    net_gex = gex_res.get("net_gex")
+                                    zgl_val = gex_res.get("zgl")
                         except Exception:
                             pass
                         pa_sig["commitment_ratio"] = comm_ratio
+                        pa_sig["net_gex"] = net_gex
+                        pa_sig["zgl"] = zgl_val
 
                         # 3. ── Strict Same-Instrument Lockout & Profit-Locked Pyramiding Gate ──
                         repeat_entry_blocked = False
@@ -2216,11 +2226,16 @@ class Prometheus:
                         cs_sig["strategy_type"] = "credit_spread"
                         cs_sig["signal_score"] = float(cs_sig.get("signal_score") or cs_sig.get("signal_strength", 3.5) or 3.5)
                         try:
-                            if hasattr(self, "oi_analyzer"):
-                                chain_data = self.data.fetch_options_chain(symbol)
-                                if chain_data is not None and not chain_data.empty:
-                                    res_oi = self.oi_analyzer.analyze(chain_data, float(cs_sig.get("underlying_price", 0) or 0))
+                            chain_data = self.data.fetch_options_chain(symbol)
+                            und_px = float(cs_sig.get("underlying_price", 0) or 0)
+                            if chain_data is not None and not chain_data.empty and und_px > 0:
+                                if hasattr(self, "oi_analyzer"):
+                                    res_oi = self.oi_analyzer.analyze(chain_data, und_px)
                                     cs_sig["commitment_ratio"] = res_oi.get("metrics", {}).get("commitment_ratio")
+                                if hasattr(self, "gamma_engine"):
+                                    gex_res = self.gamma_engine.calculate_gex(chain_data, und_px, symbol)
+                                    cs_sig["net_gex"] = gex_res.get("net_gex")
+                                    cs_sig["zgl"] = gex_res.get("zgl")
                         except Exception:
                             pass
                         logger.info(
@@ -3310,12 +3325,24 @@ class Prometheus:
                 reason=adv_reason,
             )
         else:
-            self.telegram.send_message(
-                f"\U0001f6a8 <b>POSITION CLOSED — {label}</b>\n"
-                f"{kite_text}{entry_text}\n"
-                f"Exit: <code>{exit_price:.2f}</code>\n"
-                f"{pnl_emoji} P&L: <b>{pnl_text}</b>"
-            )
+            tradingsymbol = state.tradingsymbol if state else ""
+            symbol = state.symbol if state else "UNKNOWN"
+            entry_premium = state.entry_premium if state else 0.0
+            qty = getattr(state, "quantity", 0) if state else 0
+            side = "BUY CE" if getattr(state, "direction", "bullish") == "bullish" else "BUY PE"
+            trade_info = {
+                "trade_id": position_id,
+                "symbol": symbol,
+                "instrument": tradingsymbol,
+                "side": side,
+                "quantity": qty,
+                "entry_price": entry_premium,
+                "exit_price": exit_price,
+                "net_pnl": pnl if pnl is not None else 0.0,
+                "gross_pnl": pnl if pnl is not None else 0.0,
+                "exit_reason": reason,
+            }
+            self.telegram.alert_trade_closed(trade_info)
 
     def _handle_trailing_update(self, state, old_sl: float, current_price: float = 0.0):
         """Callback when trailing stop advances a stage — sends actionable trigger values for live execution."""
@@ -6061,20 +6088,23 @@ class Prometheus:
 
             target_premium = float(overrides.get("target_premium_rs", 200.0) or 200.0)
 
-            # ── UNIFIED per-tier delta band ──
-            # Replaces the previous bifurcated logic (1-OTM-for-small-accounts when
-            # premium_targeting was off; separate 0.55–0.70 search when on).
-            # Now a single search across ±3 strikes from ATM serves every tier,
-            # with a capital-appropriate delta band so smaller accounts can still
-            # reach affordable OTM contracts while larger accounts stay ITM-ish.
-            if capital < 30000:
-                tier_delta_min, tier_delta_max = 0.30, 0.45
-            elif capital < 50000:
-                tier_delta_min, tier_delta_max = 0.35, 0.50
-            elif capital < 100000:
-                tier_delta_min, tier_delta_max = 0.45, 0.60
+            # ── DTE-AWARE STRIKE SELECTION (Phase 2) ──
+            # 0-DTE / 1-DTE: Option buying on expiry day or eve requires ATM contracts (Delta ~0.45–0.55).
+            # OTM contracts suffer lethal theta burn and wide bid-ask spread friction.
+            # >= 2 DTE: Standard delta envelope (0.35–0.48 Delta) to optimize capital leverage vs theta decay.
+            if int(dte) <= 1:
+                tier_delta_min, tier_delta_max = 0.45, 0.55
+                is_atm_priority = True
             else:
-                tier_delta_min, tier_delta_max = 0.55, 0.70
+                is_atm_priority = False
+                if capital < 30000:
+                    tier_delta_min, tier_delta_max = 0.35, 0.48
+                elif capital < 50000:
+                    tier_delta_min, tier_delta_max = 0.35, 0.50
+                elif capital < 100000:
+                    tier_delta_min, tier_delta_max = 0.45, 0.60
+                else:
+                    tier_delta_min, tier_delta_max = 0.55, 0.70
 
             # Allow caller overrides to tighten/loosen the band (e.g. session-1 expiry scalp)
             o_dmin = overrides.get("target_delta_min", None)
@@ -6101,6 +6131,9 @@ class Prometheus:
                     c_delta = max(abs(c_greeks.get("delta", 0.5)), 0.20)
 
                     score = abs(c_premium_bs - target_premium)
+                    if is_atm_priority:
+                        # Heavy penalty for moving away from ATM on 0-DTE / 1-DTE
+                        score += abs(off) * target_premium * 3.0
                     if c_delta < tier_delta_min:
                         score += (tier_delta_min - c_delta) * target_premium * 2.0
                     elif c_delta > tier_delta_max:
@@ -6455,8 +6488,19 @@ class Prometheus:
                 return None
             premium, delta, lot_size, strike, sigma, expiry_str, dte_now = pricing
 
+            # --- VPR60 Regime Overlay (Phase 2) ---
+            vpr60, vpr_regime = 0.50, "NORMAL_VOL"
+            try:
+                if hasattr(self, "data") and hasattr(self.data, "get_vpr60"):
+                    vpr60, vpr_regime = self.data.get_vpr60()
+            except Exception:
+                pass
+
             # --- SL & TARGET ---
             sl_atr_mult = bracket.sl_atr_mult
+            if vpr_regime == "HIGH_VOL":
+                # High IV: option premiums are expensive, higher vol-crush risk -> tighten SL ATR
+                sl_atr_mult = min(sl_atr_mult, 1.2)
 
             if ind["recent_sweep"] and ind["sweep_direction"] == direction:
                 sl_level = ind["recent_sweep"]["level"]
@@ -6503,6 +6547,10 @@ class Prometheus:
             else:
                 target_multiplier = base_target
 
+            if vpr_regime == "HIGH_VOL":
+                # High IV: demand higher reward-to-risk expansion
+                target_multiplier += 0.5
+
             target_index_move = atr * target_multiplier
 
             # F6: Expiry-day late session scalp mode.
@@ -6514,6 +6562,8 @@ class Prometheus:
 
             # Min R:R — from bracket configuration
             min_rr = float(overrides.get("min_rr", bracket.min_rr))
+            if vpr_regime == "HIGH_VOL":
+                min_rr = max(min_rr, 1.8)
 
             reward = premium_target - premium
             if risk_check > 0 and reward / risk_check < min_rr:
@@ -6589,6 +6639,8 @@ class Prometheus:
             sig["vol_adaptive_trailing"] = bool(overrides.get("vol_adaptive_trailing", False))
             vol_frac = float(atr) / max(float(current), 1e-9)
             sig["vol_trail_factor"] = max(0.8, min(1.6, 1.0 + (vol_frac - 0.003) * 80.0))
+            sig["vpr60"] = float(vpr60)
+            sig["vpr_regime"] = str(vpr_regime)
             return sig
 
         # ================================================================

@@ -11,7 +11,7 @@ NSE direct: For options chain and OI data
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import time
 import requests
 import json
@@ -912,6 +912,75 @@ class DataEngine:
         except Exception as e:
             logger.debug(f"get_vix: realized vol estimate failed: {e}")
         return None
+
+    def get_vpr60(self) -> Tuple[float, str]:
+        """Compute rolling 60-day India VIX Percentile Rank (VPR60).
+
+        Returns:
+            Tuple of (vpr60_percentile, regime_name)
+            where regime_name is 'HIGH_VOL' (>0.70), 'LOW_VOL' (<0.30), or 'NORMAL_VOL'.
+        """
+        now = datetime.now()
+        if hasattr(self, '_vpr60_cache') and self._vpr60_cache is not None:
+            cached_val, cached_time = self._vpr60_cache
+            if (now - cached_time).total_seconds() < 900:  # 15 min cache
+                return cached_val
+
+        closes: List[float] = []
+
+        # 1. Angel One daily VIX candles (last 90 calendar days ~ 60 trading days)
+        if self.angelone:
+            try:
+                from datetime import timedelta
+                params = {
+                    "exchange": "NSE",
+                    "symboltoken": "99926004",  # INDIA VIX
+                    "interval": "ONE_DAY",
+                    "fromdate": (now - timedelta(days=90)).strftime("%Y-%m-%d 09:15"),
+                    "todate": now.strftime("%Y-%m-%d 15:40"),
+                }
+                if self.angelone._ensure_connected():
+                    self.angelone._rate_limiter.wait()
+                    res = self.angelone._obj.getCandleData(params)
+                    if res and res.get("status") and res.get("data"):
+                        candles = res["data"]
+                        for c in candles:
+                            v = float(c[4])
+                            if 5 < v < 100:
+                                closes.append(v)
+            except Exception as e:
+                logger.debug(f"get_vpr60: Angel One fetch failed: {e}")
+
+        # 2. Fallback: yfinance (^INDIAVIX)
+        if len(closes) < 20:
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker("^INDIAVIX")
+                hist = ticker.history(period="3mo")
+                if not hist.empty and "Close" in hist:
+                    closes = [float(v) for v in hist["Close"].dropna() if 5 < float(v) < 100]
+            except Exception as e:
+                logger.debug(f"get_vpr60: yfinance fetch failed: {e}")
+
+        # 3. Compute Percentile Rank
+        if len(closes) >= 10:
+            curr_vix = self.get_vix()
+            vpr60 = round(sum(1 for v in closes if v <= curr_vix) / len(closes), 2)
+        else:
+            vpr60 = 0.50
+
+        if vpr60 > 0.70:
+            regime = "HIGH_VOL"
+        elif vpr60 < 0.30:
+            regime = "LOW_VOL"
+        else:
+            regime = "NORMAL_VOL"
+
+        result = (vpr60, regime)
+        self._vpr60_cache = (result, now)
+        logger.info(f"get_vpr60: VPR60={vpr60:.2f} ({regime}) across {len(closes)} daily VIX bars")
+        return result
+
 
     def fetch_options_chain(self, symbol: str = "NIFTY 50") -> pd.DataFrame:
         """Fetch and parse options chain data. Prefers Angel One, falls back to NSE."""

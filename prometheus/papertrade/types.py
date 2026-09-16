@@ -87,6 +87,8 @@ class PaperTrade:
     stop_loss: float = 0.0
     target: float = 0.0
     commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
+    net_gex: Optional[float] = None           # shadow telemetry: Net Gamma Exposure
+    zgl: Optional[float] = None               # shadow telemetry: Zero Gamma Level
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -131,6 +133,8 @@ class Position:
     trade_mode: str = "intraday"     # "intraday" or "swing"
     initial_sl: float = 0.0
     commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
+    net_gex: Optional[float] = None           # shadow telemetry: Net Gamma Exposure
+    zgl: Optional[float] = None               # shadow telemetry: Zero Gamma Level
     initial_risk_distance: float = 0.0
     entry_spot: float = 0.0
     atr: float = 0.0

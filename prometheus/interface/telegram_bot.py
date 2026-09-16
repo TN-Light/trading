@@ -890,10 +890,16 @@ class TelegramBot:
             sigma_detail = f" ({sigma}σ OTM)" if sigma else ""
             comm_val = signal.get("commitment_ratio")
             comm_str = f" | Commitment: {float(comm_val):.2f}" if comm_val is not None else ""
+            vpr_val = signal.get("vpr60")
+            vpr_str = f" | VPR₆₀: {float(vpr_val):.0%}" if vpr_val is not None else ""
+            gex_val = signal.get("net_gex")
+            gex_str = f" | GEX: {float(gex_val)/1e7:+.1f}Cr" if gex_val is not None and abs(float(gex_val)) > 0 else ""
+            zgl_val = signal.get("zgl")
+            zgl_str = f" | ZGL: {float(zgl_val):.0f}" if zgl_val is not None and float(zgl_val) > 0 else ""
 
             conviction_banner = (
                 f"{tier_badge}\n"
-                f"{action_line}{pop_detail}{sigma_detail}{comm_str}\n"
+                f"{action_line}{pop_detail}{sigma_detail}{comm_str}{vpr_str}{gex_str}{zgl_str}\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
 
@@ -1074,10 +1080,16 @@ class TelegramBot:
         rr_detail = f" | R:R 1:{float(rr_val):.1f}" if rr_val else ""
         comm_val = signal.get("commitment_ratio")
         comm_str = f" | Commitment: {float(comm_val):.2f}" if comm_val is not None else ""
+        vpr_val = signal.get("vpr60")
+        vpr_str = f" | VPR₆₀: {float(vpr_val):.0%}" if vpr_val is not None else ""
+        gex_val = signal.get("net_gex")
+        gex_str = f" | GEX: {float(gex_val)/1e7:+.1f}Cr" if gex_val is not None and abs(float(gex_val)) > 0 else ""
+        zgl_val = signal.get("zgl")
+        zgl_str = f" | ZGL: {float(zgl_val):.0f}" if zgl_val is not None and float(zgl_val) > 0 else ""
 
         conviction_badge = (
             f"{tier_badge}\n"
-            f"{action_line}{rr_detail}{comm_str}\n"
+            f"{action_line}{rr_detail}{comm_str}{vpr_str}{gex_str}{zgl_str}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         )
 
@@ -1363,38 +1375,103 @@ class TelegramBot:
         self.send_message(text)
 
     def alert_trade_closed(self, trade_info: Dict):
-        """Alert when a paper trade is closed, with full cost breakdown."""
-        gross_pnl = trade_info.get("gross_pnl", 0)
-        net_pnl = trade_info.get("net_pnl", 0)
+        """Alert when a trade is closed, with full context, Kite search, and action directive."""
+        gross_pnl = float(trade_info.get("gross_pnl", 0.0) or 0.0)
+        net_pnl = float(trade_info.get("net_pnl", 0.0) or 0.0)
         costs = trade_info.get("costs", {})
         symbol = trade_info.get("symbol", "")
         side = trade_info.get("side", "")
         qty = trade_info.get("quantity", 0)
-        price = trade_info.get("price", 0)
-        equity = trade_info.get("equity", 0)
+        entry_price = float(trade_info.get("entry_price", 0.0) or 0.0)
+        exit_price = float(trade_info.get("exit_price") or trade_info.get("price", 0.0) or 0.0)
+        return_pct = float(trade_info.get("return_pct", 0.0) or 0.0)
+        if return_pct == 0.0 and entry_price > 0:
+            return_pct = round((exit_price - entry_price) / entry_price * 100, 2)
 
-        pnl_emoji = "\U0001f4c8" if net_pnl >= 0 else "\U0001f4c9"
-        result = "PROFIT" if net_pnl >= 0 else "LOSS"
+        instrument = trade_info.get("instrument", "")
+        kite_search = trade_info.get("kite_search", "")
+        if not kite_search and instrument:
+            try:
+                from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+                kite_search = human_search_name_from_api_symbol(instrument)
+            except Exception:
+                kite_search = instrument
 
-        text = (
-            f"{pnl_emoji} <b>TRADE CLOSED ({result})</b>\n"
-            f"{side} {qty}x {symbol}\n"
-            f"Exit: <code>Rs {price:,.2f}</code>\n\n"
-            f"Gross P&L: <code>Rs {gross_pnl:+,.2f}</code>\n"
-            f"<b>Net P&L: <code>Rs {net_pnl:+,.2f}</code></b>\n"
+        raw_reason = str(trade_info.get("exit_reason", "")).lower()
+        reason_title = trade_info.get("reason_title", "")
+        reason_desc = trade_info.get("reason_desc", "")
+        action_directive = trade_info.get("action_directive", "")
+
+        # Resolve reason title & description if not explicitly provided
+        if not reason_title:
+            if "inactivity_kill_switch" in raw_reason:
+                reason_title = "🛑 <b>45-MIN INACTIVITY KILL-SWITCH</b>"
+                reason_desc = "Price stagnated for 3 consecutive 15-min bars (45 min) without moving ≥ 0.5x ATR. Theta decay destroys option premium in flat markets. Trade closed early to preserve capital."
+                action_directive = "<b>Exit position immediately on Kite</b> to prevent further theta burn and free margin."
+            elif "target" in raw_reason:
+                reason_title = "🎯 <b>TARGET ACHIEVED</b>"
+                reason_desc = f"Profit target hit at Rs {exit_price:,.2f}."
+                action_directive = "<b>Book profit on Kite now</b> and cancel pending Stop Loss / GTT orders."
+            elif "stop_loss" in raw_reason:
+                if "phase" in raw_reason or "trail" in raw_reason or "lock" in raw_reason:
+                    reason_title = "📈 <b>TRAILING PROFIT LOCKED</b>"
+                    reason_desc = f"Trailing stop triggered at Rs {exit_price:,.2f} to protect locked profits."
+                    action_directive = "<b>Exit position on Kite</b> or confirm trailing stop executed."
+                else:
+                    reason_title = "🛑 <b>STOP LOSS TRIGGERED</b>"
+                    reason_desc = f"Hard stop loss breached at Rs {exit_price:,.2f}."
+                    action_directive = "<b>Exit immediately on Kite</b> and cancel open GTT to cap loss."
+            elif "square_off" in raw_reason:
+                reason_title = "⏰ <b>INTRADAY SQUARE-OFF (3:15 PM)</b>"
+                reason_desc = "Mandatory session end square-off triggered before market close."
+                action_directive = "Ensure position is closed on Kite if not auto-squared off by broker."
+            elif "adverse" in raw_reason or "invalidation" in raw_reason:
+                reason_title = "⚠️ <b>ADVERSE STRUCTURAL EXIT</b>"
+                reason_desc = "Underlying broke key structural support (session VWAP / SuperTrend) against the trade."
+                action_directive = "<b>Close Kite position immediately</b> to cap loss before hard SL."
+            else:
+                pnl_label = "PROFIT" if net_pnl >= 0 else "LOSS"
+                clean_reason = raw_reason.replace("exitreason.", "").replace("_", " ").title()
+                reason_title = f"📋 <b>POSITION CLOSED ({pnl_label})</b>"
+                reason_desc = f"Exit reason: {clean_reason}"
+                action_directive = "Ensure position is squared off on Kite."
+
+        pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
+        duration_sec = trade_info.get("holding_duration_seconds", 0)
+        dur_str = f"{duration_sec // 60}m {duration_sec % 60}s" if duration_sec else ""
+        dur_line = f"⏱️ <b>Hold Time:</b> <code>{dur_str}</code>\n" if dur_str else ""
+
+        contract_box = (
+            f"📋 <b>Zerodha Kite Contract (Tap to Copy):</b>\n"
+            f"<code>{kite_search}</code>\n"
+            f"<i>API: <code>{instrument}</code></i>\n"
+            if kite_search else (f"<code>{instrument}</code>\n" if instrument else "")
         )
 
+        cost_line = ""
         if costs:
-            total_cost = costs.get("total", 0)
-            text += (
-                f"\n<i>Costs: Rs {total_cost:,.2f}</i>\n"
-                f"<i>(Brokerage {costs.get('brokerage', 0):.1f} + "
-                f"STT {costs.get('stt', 0):.1f} + "
-                f"GST {costs.get('gst', 0):.1f} + others)</i>\n"
-            )
+            total_cost = costs.get("total", 0.0) if isinstance(costs, dict) else float(costs)
+            cost_line = f"<i>Costs: ~Rs {total_cost:,.2f}</i>\n"
 
-        text += f"\n\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
-        self.send_message(text)
+        lines = [
+            f"🚨 {reason_title}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"<b>Symbol:</b> <code>{symbol}</code> ({side} {qty}x)",
+            contract_box,
+            f"<b>Entry:</b> Rs {entry_price:,.2f} ➔ <b>Exit:</b> Rs {exit_price:,.2f} (<b>{return_pct:+.2f}%</b>)",
+            f"{pnl_emoji} <b>Gross P&L:</b> Rs {gross_pnl:+,.2f} | <b>Net P&L:</b> Rs {net_pnl:+,.2f}",
+            cost_line + dur_line,
+            f"ℹ️ <b>Why Exit Triggered:</b>\n<i>{reason_desc}</i>\n",
+            "⚡ <b>ACTION REQUIRED ON KITE:</b>",
+            f"👉 {action_directive}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        trade_id = trade_info.get("trade_id")
+        if trade_id:
+            lines.append(f"<code>ID: {trade_id}</code>")
+
+        self.send_message("\n".join(lines))
 
     def alert_risk_breach(self, risk_info: Dict):
         """Alert when a risk limit is breached."""

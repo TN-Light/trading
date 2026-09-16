@@ -65,6 +65,8 @@ class SignalNotification:
 
     bar_timestamp: Optional[datetime] = None  # when the signal was generated
     commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
+    net_gex: Optional[float] = None           # shadow telemetry: Net Gamma Exposure
+    zgl: Optional[float] = None               # shadow telemetry: Zero Gamma Level
     entry_spot: float = 0.0                   # underlying spot price at entry
     atr: float = 0.0                          # 14-period ATR of underlying
     metadata: dict = None            # bag for any extra context
@@ -241,6 +243,8 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
         strategy=signal.get("strategy", "Hedged_Credit_Spread" if is_spread else ""),
         bar_timestamp=_parse_bar_timestamp(signal.get("bar_timestamp")),
         commitment_ratio=float(signal["commitment_ratio"]) if signal.get("commitment_ratio") is not None else None,
+        net_gex=float(signal["net_gex"]) if signal.get("net_gex") is not None else None,
+        zgl=float(signal["zgl"]) if signal.get("zgl") is not None else None,
         entry_spot=float(signal.get("entry_spot") or signal.get("spot") or signal.get("spot_price") or signal.get("spot_at_signal") or 0.0),
         atr=float(signal.get("atr") or signal.get("atr_15m") or 0.0),
         metadata={"raw": signal},

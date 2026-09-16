@@ -505,60 +505,31 @@ class LivePaperCapture:
             return
         try:
             side = "BUY CE" if trade.direction.value == "LONG" else "BUY PE"
+            raw_reason = trade.exit_reason.value if hasattr(trade.exit_reason, "value") else str(trade.exit_reason)
+
+            from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+            kite_search = human_search_name_from_api_symbol(trade.instrument) if trade.instrument else trade.symbol
+
             trade_info = {
+                "trade_id": trade.trade_id,
                 "symbol": trade.symbol,
+                "instrument": trade.instrument,
+                "kite_search": kite_search,
                 "side": side,
                 "quantity": trade.quantity,
-                "price": trade.exit_price,
+                "entry_price": trade.entry_price,
                 "exit_price": trade.exit_price,
-                "pnl": trade.net_pnl,
-                "net_pnl": trade.net_pnl,
+                "return_pct": trade.return_pct,
                 "gross_pnl": trade.gross_pnl,
+                "net_pnl": trade.net_pnl,
                 "costs": {"total": trade.costs},
-                "equity": 0,   # we don't track equity here — leave 0
+                "holding_duration_seconds": trade.holding_duration_seconds,
+                "exit_reason": raw_reason,
             }
-            reason = str(trade.exit_reason)
-            try:
-                if reason == "target":
-                    self._telegram.alert_target_hit(trade_info)
-                elif reason == "stop_loss":
-                    self._telegram.alert_stop_loss_hit(trade_info)
-                elif reason in ("stop_loss_premium_phase2",
-                                "stop_loss_premium_phase3"):
-                    # Trailing-stop lock: phase3 locks ≥70% of peak profit,
-                    # phase2 locks ≥20%. Calling these "STOP LOSS HIT"
-                    # mislabels a profitable exit as a loss (per backtest
-                    # NIFTY 50: phase3 = 67%WR, +Rs 9,952; phase2 = 0%WR,
-                    # small Rs -215). Route to a distinct alert so the
-                    # operator sees what actually happened.
-                    phase = "phase3" if reason.endswith("phase3") else "phase2"
-                    self._telegram.alert_trailing_lock_hit(trade_info, phase=phase)
-                else:
-                    # time_stop / square_off / end_of_day / end_of_data /
-                    # reverse_signal / manual — use generic close
-                    self._telegram.alert_trade_closed(trade_info)
-            except Exception:
-                pass
-            # Custom paper-capture summary line — gives full forensic detail
-            try:
-                pnl_emoji = "\U0001f4c8" if trade.net_pnl >= 0 else "\U0001f4c9"
-                self._telegram.send_message(
-                    f"{pnl_emoji} <b>PAPER CAPTURE closed</b>\n"
-                    f"{trade.symbol} {side} {trade.instrument}\n"
-                    f"Entry: Rs {trade.entry_price:.2f} → "
-                    f"Exit: Rs {trade.exit_price:.2f}\n"
-                    f"Reason: <b>{reason}</b>\n"
-                    f"Gross: Rs {trade.gross_pnl:+,.2f} | "
-                    f"Costs: Rs {trade.costs:.2f} | "
-                    f"Net: Rs {trade.net_pnl:+,.2f} "
-                    f"({trade.return_pct:+.2f}%)\n"
-                    f"Hold: {trade.holding_duration_seconds // 60} min\n"
-                    f"ID: <code>{trade.trade_id}</code>"
-                )
-            except Exception:
-                pass
+
+            self._telegram.alert_trade_closed(trade_info)
         except Exception as e:
-            logger.debug(f"[PaperCapture] _alert_position_closed failed: {e}")
+            logger.warning(f"[PaperCapture] _alert_position_closed failed: {e}")
 
     def _on_trade_closed(self, trade) -> None:
         """Single chokepoint invoked by the wrapped process_bar on every

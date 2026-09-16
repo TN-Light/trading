@@ -45,6 +45,8 @@ TRADE_COLUMNS = [
     "stop_loss",
     "target",
     "commitment_ratio",
+    "net_gex",
+    "zgl",
 ]
 
 
@@ -106,12 +108,22 @@ class TradeRecorder:
                 stop_loss REAL,
                 target REAL,
                 commitment_ratio REAL,
+                net_gex REAL,
+                zgl REAL,
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
         # Safe migration for existing databases
         try:
             self._db.execute("ALTER TABLE paper_trades ADD COLUMN commitment_ratio REAL")
+        except Exception:
+            pass
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN net_gex REAL")
+        except Exception:
+            pass
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN zgl REAL")
         except Exception:
             pass
         self._db.execute("""
