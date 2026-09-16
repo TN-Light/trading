@@ -147,8 +147,8 @@ def test_data_engine_short_term_mem_cache():
 
     de = DataEngine()
     de.historical_source = "auto"
-    # Use a fixed market hour timestamp so the test passes consistently regardless of execution time
-    now_dt = pd.Timestamp("2026-09-11 11:30:00")
+    # Use current datetime so the live market hours freshness check accepts the mock batch
+    now_dt = pd.Timestamp.now()
     mock_df = pd.DataFrame({
         "timestamp": pd.date_range(now_dt - pd.Timedelta(minutes=60), periods=5, freq="15min"),
         "open": [100, 101, 102, 103, 104],

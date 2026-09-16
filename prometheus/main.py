@@ -4601,6 +4601,22 @@ class Prometheus:
                 pass
         return count
 
+    def _get_active_positions_symbols(self) -> set:
+        """Return set of symbols with active open positions across live and paper."""
+        syms = set()
+        if getattr(self, "position_monitor", None):
+            for s in self.position_monitor.get_positions().values():
+                if hasattr(s, "symbol") and s.symbol:
+                    syms.add(s.symbol)
+        if getattr(self, "_paper_capture", None) and hasattr(self._paper_capture, "open_positions_view"):
+            try:
+                for p_pos in self._paper_capture.open_positions_view():
+                    if hasattr(p_pos, "symbol") and p_pos.symbol:
+                        syms.add(p_pos.symbol)
+            except Exception:
+                pass
+        return syms
+
     def run_intraday_mode(self, interval_seconds: int = 180):
         """
         Intraday trading — continuous scanning during market hours.
@@ -4652,6 +4668,7 @@ class Prometheus:
         _intraday_trades_today = self._get_daily_state("dry_intraday_trades_today", 0)
         _did_square_off = self._get_daily_state("dry_did_square_off", False)
         _last_scan_time = None
+        _last_feed_bars_time = None
         _did_send_daily_summary = self._get_daily_state("dry_did_send_daily_summary", False)
         _guardrail_breached = self._get_daily_state("dry_guardrail_breached", False)
         _guardrail_reason = self._get_daily_state("dry_guardrail_reason", "")
@@ -4807,10 +4824,14 @@ class Prometheus:
                 # Always evaluate exits on open paper positions regardless of cutoff or max trades
                 n_pos = self._get_active_positions_count()
                 if n_pos > 0:
-                    try:
-                        self._paper_capture_feed_bars(intraday_instruments, bar_interval)
-                    except Exception as e:
-                        logger.debug(f"[PaperCapture] continuous exit evaluation error: {e}")
+                    now_ts = time.time()
+                    if (_last_feed_bars_time is None) or (now_ts - _last_feed_bars_time >= 60.0):
+                        _last_feed_bars_time = now_ts
+                        try:
+                            active_syms = list(self._get_active_positions_symbols()) or intraday_instruments
+                            self._paper_capture_feed_bars(active_syms, bar_interval)
+                        except Exception as e:
+                            logger.debug(f"[PaperCapture] continuous exit evaluation error: {e}")
 
                 # No new entries after cutoff — monitor only
                 if current_time >= effective_last_entry:
@@ -4864,17 +4885,7 @@ class Prometheus:
                 self._paper_capture_feed_bars(intraday_instruments, bar_interval)
 
                 allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", True))
-                active_pos_symbols = set()
-                if hasattr(self, "position_monitor") and self.position_monitor:
-                    for s in self.position_monitor.get_positions().values():
-                        active_pos_symbols.add(s.symbol)
-                if getattr(self, "paper_capture", None) and hasattr(self.paper_capture, "open_positions_view"):
-                    try:
-                        for p_pos in self.paper_capture.open_positions_view():
-                            if hasattr(p_pos, "symbol") and p_pos.symbol:
-                                active_pos_symbols.add(p_pos.symbol)
-                    except Exception:
-                        pass
+                active_pos_symbols = self._get_active_positions_symbols()
 
                 # 1. Collect all candidates across all instruments
                 candidates = []

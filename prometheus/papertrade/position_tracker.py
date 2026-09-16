@@ -330,7 +330,9 @@ class PositionTracker:
         for tid, p in list(self.open_positions.items()):
             if p.instrument == snapshot.instrument and snapshot.instrument:
                 # True match: same option contract. Full evaluation.
-                p.bars_held += 1
+                if getattr(p, "_last_seen_bar_ts", None) != snapshot.timestamp:
+                    p.bars_held += 1
+                    p._last_seen_bar_ts = snapshot.timestamp
                 exit_price, exit_reason = self._evaluate_exit(
                     p, snapshot,
                     is_session_end=is_session_end,
@@ -347,8 +349,10 @@ class PositionTracker:
 
             if p.symbol == snapshot.symbol and not snapshot.instrument:
                 # Underlying bar (e.g. NIFTY 50 index bar) for an open option
-                # position on the same symbol. Advance bars-held.
-                p.bars_held += 1
+                # position on the same symbol. Advance bars-held only on new bars.
+                if getattr(p, "_last_seen_bar_ts", None) != snapshot.timestamp:
+                    p.bars_held += 1
+                    p._last_seen_bar_ts = snapshot.timestamp
                 # Always evaluate SL/target/trailing/square-off via the live LTP feed
                 # on EVERY bar (never evaluate against the underlying snapshot's index price).
                 exit_price, exit_reason = self._evaluate_exit_via_feed(

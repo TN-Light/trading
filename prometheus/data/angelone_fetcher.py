@@ -144,13 +144,11 @@ class AngelOneFetcher:
         self._auth_token = None
         self._login_time = None
         self._lock = threading.Lock()
-        # Shared rate limiter — 0.4s minimum gap = ~2.5 req/sec.
-        # Pre-Aug-17 used 1.0s (2.5x too conservative) — Angel One's cap
-        # is ~3 req/sec, and the shared limiter now coordinates ALL
-        # callers (fetcher + option-chain + VIX), so even with
-        # max_workers=5 the effective dispatch rate stays under cap.
-        # See 2026-08-17 audit follow-up (commit 31e9d15).
-        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=0.4)
+        # Shared rate limiter — 1.0s minimum gap = 1.0 req/sec.
+        # Angel One's cap is ~3 req/sec, but burst limits trip if calls arrive
+        # too closely (<0.5s). Pacing at 1.0s ensures completely clean throughput across all
+        # callers (fetcher + option-chain + VIX).
+        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=1.0)
 
     def _login(self) -> bool:
         """Login to Angel One SmartAPI with TOTP."""
