@@ -255,10 +255,16 @@ class PriceActionMomentumScanner:
                     bear_reasons.append("Volume_Surge_Confirmed")
 
         # ── 5. Decision & Trade Structuring ──
-        is_golden_bull = is_orb_bull and is_vwap_bull and (htf_trend in ("BULLISH", "NEUTRAL"))
-        is_golden_bear = is_orb_bear and is_vwap_bear and (htf_trend in ("BEARISH", "NEUTRAL"))
-
-        min_threshold = 4.0 if golden_mode else 3.5
+        # Strict Golden Setup requires TRUE 1-Hour Trend Alignment when 1H data is available
+        has_1h_data = (df_1h is not None and len(df_1h) >= 2)
+        if has_1h_data:
+            is_golden_bull = is_orb_bull and is_vwap_bull and (htf_trend == "BULLISH")
+            is_golden_bear = is_orb_bear and is_vwap_bear and (htf_trend == "BEARISH")
+            min_threshold = 5.5 if golden_mode else 3.5
+        else:
+            is_golden_bull = is_orb_bull and is_vwap_bull
+            is_golden_bear = is_orb_bear and is_vwap_bear
+            min_threshold = 3.5
         net_edge = bull_score - bear_score
 
         if bull_score >= min_threshold and net_edge >= 1.5:

@@ -98,8 +98,16 @@ class CreditSpreadStrategy:
         today_low = float(today_bars["low"].min())
         day_range = today_high - today_low
 
-        if day_range > 2.5 * atr:
-            # Market is already trending strongly — skip credit spread
+        # Dynamic, index-aware range gate:
+        # Runaway trend days typically exceed 1.2% of spot or 4.0x ATR.
+        # Fixed 2.5x 15m ATR was too tight for large indices like SENSEX (75,000 pts) where
+        # normal 350-450 pt opening rotations (0.5%) were falsely flagged as runaway trends.
+        max_allowed_range = max(4.0 * atr, close * 0.012)
+        if day_range > max_allowed_range:
+            logger.info(
+                f"CreditSpread skipped for {symbol}: Day range {day_range:.1f} pts exceeds "
+                f"max sideways threshold {max_allowed_range:.1f} pts (strong trend day detected)."
+            )
             return None
 
         # Check VWAP and EMAs for rigorous alignment
@@ -254,11 +262,13 @@ class CreditSpreadStrategy:
             return None
 
         net_credit = round(short_premium - long_premium, 2)
-        min_required_credit = round(strike_width * self.min_credit_pct, 2)
+        # On 0-DTE expiry days, options naturally trade lower as theta decays; require >= 8% width vs 15% on multi-day
+        effective_min_pct = 0.08 if (current_date and expiry_date and (expiry_date - current_date).days == 0) else self.min_credit_pct
+        min_required_credit = round(strike_width * effective_min_pct, 2)
         if net_credit < min_required_credit or net_credit <= 0:
             logger.info(
                 f"CreditSpread skipped for {symbol}: Net credit Rs {net_credit:.2f} is below "
-                f"minimum threshold Rs {min_required_credit:.2f} ({self.min_credit_pct*100:.0f}% of strike width) "
+                f"minimum threshold Rs {min_required_credit:.2f} ({effective_min_pct*100:.0f}% of strike width) "
                 f"or non-positive — refusing synthetic fill."
             )
             return None

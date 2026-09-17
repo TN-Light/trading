@@ -2123,6 +2123,8 @@ class Prometheus:
                         pa_sig["strike"] = strike
                         pa_sig["option_type"] = opt_type
                         pa_sig["expiry"] = expiry_str
+                        today_cur = datetime.now(IST).date()
+                        pa_sig["is_0dte"] = bool(expiry_dt and expiry_dt == today_cur)
                         pa_sig["underlying_price"] = spot_price
                         pa_sig["spot_price"] = spot_price
                         pa_sig["timeframe"] = "intraday"
@@ -2246,21 +2248,50 @@ class Prometheus:
         except Exception as e:
             logger.debug(f"Credit Spread check failed for {symbol}: {e}")
 
-        # 3. Prioritize Highest Probability / Edge Signal (Option Buying vs Option Selling)
+        # 3. Prioritize Highest Probability / Edge Signal (Dual-Regime Barbell Engine)
         if execution_signal and cs_sig:
             buy_score = float(execution_signal.get("signal_score", 3.8))
             spread_score = float(cs_sig.get("signal_score", 3.5))
-            # Directional Breakout with momentum >= 3.5 takes natural priority due to higher R:R
-            if buy_score >= 3.5:
+            is_0dte_expiry = bool(cs_sig.get("is_0dte", False))
+            if not is_0dte_expiry and execution_signal.get("expiry") and execution_signal.get("bar_timestamp"):
+                try:
+                    exp_d = pd.to_datetime(execution_signal["expiry"]).date()
+                    curr_d = pd.to_datetime(execution_signal["bar_timestamp"]).date()
+                    is_0dte_expiry = (exp_d == curr_d)
+                except Exception:
+                    pass
+
+            # EXPIRY REGIME (0-DTE):
+            # Defined-risk credit spreads have an 85%+ theoretical win rate from terminal theta collapse.
+            # Naked option buying on 0-DTE is strictly restricted to elite breakouts (Tier S, score >= 7.5).
+            if is_0dte_expiry:
+                if buy_score >= 7.5 and execution_signal.get("is_golden_setup", False):
+                    logger.info(
+                        f"Signal Priority on {symbol} (0-DTE Expiry): Choosing Tier S Breakout Option Buying "
+                        f"({execution_signal.get('action')}, score={buy_score:.1f}) over Credit Spread (score={spread_score:.1f})"
+                    )
+                    return execution_signal
+                else:
+                    logger.info(
+                        f"Signal Priority on {symbol} (0-DTE Expiry): Prioritizing High-Edge Credit Spread "
+                        f"({cs_sig.get('spread_type')}, score={spread_score:.1f}, POP={cs_sig.get('pop_pct', 0)}%) "
+                        f"over non-Tier-S Option Buying (score={buy_score:.1f})"
+                    )
+                    return cs_sig
+
+            # NON-EXPIRY REGIME:
+            # Directional Breakout with high score (>= 6.5) takes priority due to higher R:R.
+            # Moderate/partial signals defer to Credit Spread.
+            if buy_score >= 6.5:
                 logger.info(
-                    f"Signal Priority on {symbol}: Choosing Directional Option Buying "
+                    f"Signal Priority on {symbol}: Choosing Strong Directional Option Buying "
                     f"({execution_signal.get('action')}, score={buy_score:.1f}) over Credit Spread (score={spread_score:.1f})"
                 )
                 return execution_signal
             else:
                 logger.info(
                     f"Signal Priority on {symbol}: Choosing Credit Spread "
-                    f"({cs_sig.get('spread_type')}, score={spread_score:.1f}) over Option Buying (score={buy_score:.1f})"
+                    f"({cs_sig.get('spread_type')}, score={spread_score:.1f}) over Moderate Option Buying (score={buy_score:.1f})"
                 )
                 return cs_sig
         elif execution_signal:

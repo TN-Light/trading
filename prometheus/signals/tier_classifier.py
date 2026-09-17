@@ -172,17 +172,30 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 instruction="🔥 <b>ACTION:</b> Live Trade — Scaled Size (Max 2 Lots / 10% Capital Risk Cap)"
             )
 
+        # Check if 0-DTE expiry session for this option buying signal
+        is_0dte_buying = False
+        if signal.get("expiry") and signal.get("bar_timestamp"):
+            try:
+                exp_d = pd.to_datetime(signal["expiry"]).date()
+                curr_d = pd.to_datetime(signal["bar_timestamp"]).date()
+                is_0dte_buying = (exp_d == curr_d)
+            except Exception:
+                pass
+        if not is_0dte_buying and bool(signal.get("is_0dte", False)):
+            is_0dte_buying = True
+
         # TIER B ("Golden Setup" — Primary High-Probability Option Buying):
         # Requirements:
-        #   1. Golden setup flag OR (ORB + VWAP alignment)
-        #   2. Edge score >= 4.0
-        #   3. 1H Trend non-conflicting (BULLISH, BEARISH, or NEUTRAL)
-        #   4. Time window: before 11:45 AM (or before 13:00)
+        #   1. 15M ORB + Session VWAP alignment
+        #   2. STRICT 1H HTF Trend Alignment (BULLISH for CE, BEARISH for PE; NEUTRAL is banned)
+        #   3. Edge score >= 6.5 (real institutional confluence)
+        #   4. Time window: before 11:45 AM
+        #   5. Non-0DTE: 0-DTE option buying strictly requires Tier S; weak/moderate 0-DTE buys are paper-only
         is_morning_window = True
         if bar_time:
             is_morning_window = (bar_time <= dtime(11, 45))
 
-        if (is_golden or (has_orb and has_vwap)) and score >= 4.0 and is_morning_window:
+        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= 6.5 and is_morning_window and not is_0dte_buying:
             return _build_tier_result(
                 tier="B",
                 tier_name="GOLDEN_SETUP",
@@ -190,7 +203,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 reasons=[
                     "15M Opening Range Breakout (with ATR Buffer)",
                     "Session VWAP Clearance >= 0.10%",
-                    "1-Hour HTF Trend Non-Conflicting (BULLISH / BEARISH / NEUTRAL)",
+                    "1-Hour HTF Trend Strictly Aligned (BULLISH for CE / BEARISH for PE)",
                     f"Confluence Edge Score: {score:.1f}/10"
                 ],
                 badge="🌟 <b>[TIER B: GOLDEN SETUP — 1 LOT CONSERVATIVE]</b>",
@@ -198,13 +211,19 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
             )
 
         # TIER C (Standard Momentum / Partial Confluences):
-        # Triggered when 2-3 factors are present but missing decisive ORB or 1H confirmation
+        # Triggered when score >= 3.5 but missing decisive 1H trend, score < 6.5, or 0-DTE buying
         if score >= 3.5:
             missing = []
+            if not is_htf_aligned:
+                missing.append("1H HTF Trend is NEUTRAL or Conflicting (Chop Risk)")
             if not has_orb:
                 missing.append("Missing 15M ORB Breakout")
             if not has_vwap:
                 missing.append("Missing VWAP Clearance")
+            if score < 6.5:
+                missing.append(f"Score {score:.1f}/10 is below Tier B requirement (6.5+)")
+            if is_0dte_buying:
+                missing.append("0-DTE Expiry Option Buying gated (Requires Tier S Perfect Storm to trade live)")
             if not is_morning_window:
                 missing.append("Outside Morning Window (After 11:45 AM)")
             return _build_tier_result(

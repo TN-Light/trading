@@ -35,8 +35,8 @@ class TestTierClassifier:
         assert "TIER S" in res["tier_badge"]
         assert "Live Trade" in res["action_instruction"]
 
-    def test_tier_s_falls_back_to_tier_b_if_htf_neutral(self):
-        """If 1H trend is NEUTRAL (e.g. before 10:15 AM candle closes), Tier S is rejected but Tier B accepted."""
+    def test_tier_s_falls_back_to_tier_c_if_htf_neutral(self):
+        """If 1H trend is NEUTRAL (chop), signal cannot be Golden Setup (Tier B); it is safely relegated to Tier C (Paper Only)."""
         signal = {
             "action": "BUY_CE",
             "symbol": "NIFTY 50",
@@ -52,9 +52,9 @@ class TestTierClassifier:
             ],
         }
         res = classify_signal_tier(signal)
-        assert res["tier"] == "B"
-        assert res["tier_name"] == "GOLDEN_SETUP"
-        assert res["is_live_eligible"] is True
+        assert res["tier"] == "C"
+        assert res["tier_name"] == "STANDARD_MOMENTUM"
+        assert res["is_live_eligible"] is False
 
     def test_tier_s_falls_back_to_tier_b_outside_power_hour(self):
         """After 10:35 AM, an impulse signal is classified as Tier B, not Tier S."""
@@ -123,24 +123,47 @@ class TestTierClassifier:
         assert "TIER C" in res["tier_badge"]
 
     def test_tier_b_golden_setup(self):
-        """Tier B Golden Setup with morning window and >=4.0 score."""
+        """Tier B Golden Setup requires strict 1H trend alignment, morning window, and >=6.5 score."""
         signal = {
             "action": "BUY_PE",
             "symbol": "NIFTY 50",
             "strategy": "Golden_Setup (1H+VWAP+ORB)",
             "is_golden_setup": True,
-            "edge_score": 5.2,
+            "edge_score": 6.8,
             "bar_timestamp": "2026-09-11 10:00:00",
             "reasons": [
                 "15M_ORB_Low_Breakout",
                 "Session_VWAP_Bearish",
-                "1H_Trend_Neutral",
+                "1H_Trend_Bearish",
             ],
+            "is_0dte": False,
         }
         res = classify_signal_tier(signal)
         assert res["tier"] == "B"
         assert res["tier_name"] == "GOLDEN_SETUP"
         assert res["is_live_eligible"] is True
+
+    def test_0dte_option_buying_gated_to_tier_c_unless_tier_s(self):
+        """On 0-DTE expiry sessions, moderate/Tier-B option buying is gated to Tier C (Paper Only) to prevent theta burn."""
+        signal = {
+            "action": "BUY_CE",
+            "symbol": "SENSEX",
+            "strategy": "Golden_Setup (1H+VWAP+ORB)",
+            "is_golden_setup": True,
+            "edge_score": 6.8,
+            "bar_timestamp": "2026-09-17 10:00:00",
+            "reasons": [
+                "15M_ORB_High_Breakout",
+                "Session_VWAP_Bullish",
+                "1H_Trend_Bullish",
+            ],
+            "is_0dte": True,
+        }
+        res = classify_signal_tier(signal)
+        assert res["tier"] == "C"
+        assert res["tier_name"] == "STANDARD_MOMENTUM"
+        assert res["is_live_eligible"] is False
+        assert any("0-DTE Expiry Option Buying gated" in r for r in res["classification_reasons"])
 
     def test_tier_c_standard_momentum(self):
         """Score >= 3.5 but missing primary ORB or VWAP."""
