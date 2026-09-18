@@ -462,9 +462,13 @@ class PositionMonitor:
         price_for_trail = current_price
 
         if not state.breakeven_set:
-            # Stage 0: BREAKEVEN TRAP — triggers at +10% gain (+8% in Low-VIX mode)
+            # Stage 0: BREAKEVEN TRAP — triggers at 50% target progress or +10% gain (+8% in Low-VIX mode)
             be_pct = 1.08 if state.low_vix_mode else 1.10
-            be_trigger = min(entry + rd * state.breakeven_ratio if rd > 0 else entry * be_pct, entry * be_pct)
+            pct_trigger = entry * be_pct
+            rd_trigger = entry + rd * state.breakeven_ratio if rd > 0 else pct_trigger
+            tgt_distance = getattr(state, "target_gain_pts", 0.0) or ((state.target - entry) if state.target > entry else 0.0)
+            tgt_trigger = (entry + tgt_distance * 0.50) if tgt_distance > 0 else pct_trigger
+            be_trigger = min(pct_trigger, rd_trigger, tgt_trigger)
             if price_for_trail >= be_trigger:
                 new_sl = round(max(entry * 1.015, entry + max(rd * 0.10, entry * 0.015)), 2)
                 if new_sl > state.current_sl:

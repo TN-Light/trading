@@ -611,9 +611,16 @@ class PositionTracker:
 
         gain_pts = current_price - pos.entry_price
 
-        # Stage 1 — breakeven (at +10 pts + brokerage OR 0.4R progress)
+        # Stage 1 — breakeven (at 50% target progress or +10 pts + brokerage or 0.4R progress)
+        tgt_distance = (
+            getattr(pos, "target_gain_pts", 0.0)
+            or ((pos.target - pos.entry_price) if pos.target > pos.entry_price else 0.0)
+        )
+        be_gain_threshold = min(10.0, tgt_distance * 0.50) if tgt_distance > 0 else 10.0
+        be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
+
         # Sets SL to Entry + brokerage so the trade is guaranteed 100% zero-risk.
-        if not pos.breakeven_set and (gain_pts >= (10.0 + cost_buffer_pts) or progress >= 0.4):
+        if not pos.breakeven_set and (gain_pts >= be_trigger_pts or progress >= 0.4):
             new_sl = pos.entry_price + cost_buffer_pts
             # Only advance (never retreat)
             if new_sl > pos.stop_loss:
@@ -624,6 +631,11 @@ class PositionTracker:
                     f"[{pos.trade_id}] BREAKEVEN_SET: SL {old_sl:.2f} -> {new_sl:.2f} "
                     f"(Covering entry + Rs {cost_buffer_pts:.2f} brokerage/taxes at gain=+{gain_pts:.2f} pts)"
                 )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
                 if self.on_sl_update:
                     try:
                         self.on_sl_update(pos, old_sl, new_sl, "breakeven", current_price, gain_pts, cost_buffer_pts)
@@ -637,6 +649,11 @@ class PositionTracker:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.trailing_floor = lock
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
                 if self.on_sl_update:
                     try:
                         self.on_sl_update(pos, old_sl, new_sl, "lock_20pct", current_price, gain_pts, cost_buffer_pts)
@@ -650,6 +667,11 @@ class PositionTracker:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.trailing_floor = lock
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
                 if self.on_sl_update:
                     try:
                         self.on_sl_update(pos, old_sl, new_sl, "lock_50pct", current_price, gain_pts, cost_buffer_pts)
@@ -663,6 +685,11 @@ class PositionTracker:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.trailing_floor = lock
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
                 if self.on_sl_update:
                     try:
                         self.on_sl_update(pos, old_sl, new_sl, "lock_70pct", current_price, gain_pts, cost_buffer_pts)
@@ -677,6 +704,11 @@ class PositionTracker:
             if new_sl > pos.stop_loss:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
                 if self.on_sl_update:
                     try:
                         self.on_sl_update(pos, old_sl, new_sl, "high_water_trail", current_price, gain_pts, cost_buffer_pts)

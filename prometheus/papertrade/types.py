@@ -138,12 +138,15 @@ class Position:
     initial_risk_distance: float = 0.0
     entry_spot: float = 0.0
     atr: float = 0.0
+    target_gain_pts: float = 0.0
 
     def __post_init__(self):
         if self.initial_sl <= 0.0 and self.stop_loss > 0.0:
             self.initial_sl = self.stop_loss
         if self.initial_risk_distance <= 0.0 and self.entry_price > 0.0 and self.initial_sl > 0.0:
             self.initial_risk_distance = abs(self.entry_price - self.initial_sl)
+        if self.target_gain_pts <= 0.0 and self.target > self.entry_price:
+            self.target_gain_pts = round(self.target - self.entry_price, 2)
 
     def unrealized_pnl(self, current_price: float) -> float:
         """Gross mark-to-market PnL at ``current_price`` (no costs).

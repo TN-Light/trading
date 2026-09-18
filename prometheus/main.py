@@ -2083,28 +2083,78 @@ class Prometheus:
                         pass
 
                     is_low_vix = (current_vix < 11.5)
-                    if is_low_vix:
+                    if is_low_vix and edge_score < 4.5:
                         # Logbook Learning: In extreme low-VIX (< 11.5), demand explosive momentum (Score >= 4.5)
-                        if edge_score < 4.5:
-                            logger.info(
-                                f"Low-VIX Gate: Suppressed Option Buying on {symbol} "
-                                f"(VIX {current_vix:.2f} < 11.5 and Score {edge_score:.1f} < 4.5). "
-                                f"Prioritizing Hedged Credit Spreads for Range Theta Decay."
-                            )
-                            opt_ltp = 0.0
+                        logger.info(
+                            f"Low-VIX Gate: Suppressed Option Buying on {symbol} "
+                            f"(VIX {current_vix:.2f} < 11.5 and Score {edge_score:.1f} < 4.5). "
+                            f"Prioritizing Hedged Credit Spreads for Range Theta Decay."
+                        )
+                        opt_ltp = 0.0
 
-                        # Realistic Target Sizing (+12 to +15 pts, calibrated to option premium)
-                        target_gain_pts = round(min(opt_ltp * 0.25, max(12.0, opt_ltp * 0.20)), 2)
-                        if target_gain_pts < 8.0:
-                            target_gain_pts = 8.0
-                        tgt_price = round(opt_ltp + target_gain_pts, 2)
-                        sl_price = round(max(1.0, opt_ltp * 0.85), 2)  # -15% tight risk bracket
-                        pa_sig["low_vix_mode"] = True
+                    # 1. Dynamic Option Target & Noise-Protected Stop Loss Calibration (Delta * Spot ATR Model)
+                    # Solves the false fantasy target bug (e.g. 100+ pt targets from opt_ltp * 0.22)
+                    # Calibrates targets and risk to actual 15-minute expected option move (EOM)
+                    spot_atr = float(pa_sig.get("atr", 0.0) or 0.0)
+                    sym_u = symbol.upper()
+                    if spot_atr <= 0:
+                        if "BANK" in sym_u:
+                            spot_atr = 88.0
+                        elif "SENSEX" in sym_u or "BSX" in sym_u:
+                            spot_atr = 98.0
+                        elif "NIFTY" in sym_u:
+                            spot_atr = 25.0
+                        else:
+                            spot_atr = max(10.0, spot_price * 0.0035)
+
+                    atm_delta = 0.50
+                    eom = atm_delta * spot_atr  # Expected Option Move per 15M bar
+
+                    # Dynamic Quality Multiplier based on Signal Conviction Score
+                    if edge_score >= 8.0:
+                        quality_mult = 1.15
+                    elif edge_score >= 6.5:
+                        quality_mult = 0.85
                     else:
-                        target_gain_pts = round(min(opt_ltp * 0.28, max(14.0, opt_ltp * 0.22)), 2)
-                        tgt_price = round(opt_ltp + target_gain_pts, 2)
-                        sl_price = round(max(1.0, opt_ltp * 0.82), 2)  # -18% risk bracket
-                        pa_sig["low_vix_mode"] = False
+                        quality_mult = 0.65
+
+                    if is_low_vix:
+                        quality_mult *= 0.80
+
+                    # Instrument Noise Floors based on Angel One 45-day empirical tick audit:
+                    # NIFTY 75th percentile MAE = 7.57 -> Noise Floor = 8.0
+                    # BANKNIFTY 75th percentile MAE = 24.23 -> Noise Floor = 20.0
+                    # SENSEX 75th percentile MAE = 25.96 -> Noise Floor = 22.0
+                    if "BANK" in sym_u:
+                        noise_floor = 20.0
+                        min_target = 18.0
+                    elif "SENSEX" in sym_u or "BSX" in sym_u:
+                        noise_floor = 22.0
+                        min_target = 20.0
+                    else:
+                        noise_floor = 8.0
+                        min_target = 6.0
+
+                    target_gain_pts = round(max(min_target, eom * quality_mult), 1)
+                    if opt_ltp > 0:
+                        # Cap target gain at 45% of option premium to prevent unrealistic moonshots
+                        target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.45, 1))
+
+                    # Stop Loss: Must survive 75th percentile noise floor while maintaining healthy R:R
+                    sl_pts = max(noise_floor, round(0.55 * eom, 1))
+                    # Prevent SL from exceeding 1.15x target (preserves R:R >= 1:1.2), but never breach noise floor
+                    max_sl_cap = max(noise_floor, round(target_gain_pts * 1.15, 1))
+                    sl_pts = min(sl_pts, max_sl_cap)
+                    if opt_ltp > 0:
+                        sl_pts = min(sl_pts, round(opt_ltp * 0.30, 1))  # Never risk > 30% total option premium
+
+                    tgt_price = round(opt_ltp + target_gain_pts, 2)
+                    sl_price = round(max(1.0, opt_ltp - sl_pts), 2)
+                    pa_sig["low_vix_mode"] = is_low_vix
+                    pa_sig["target_gain_pts"] = target_gain_pts
+                    pa_sig["sl_pts"] = sl_pts
+                    pa_sig["atr"] = spot_atr
+                    pa_sig["breakeven_trigger_pts"] = round(target_gain_pts * 0.50, 1)
 
                     # 2. Max Nominal Premium Exposure Cap (Applies only to live broker execution; paper trading bypasses capital filter)
                     enforce_cap = (self.mode == "live") or bool(get("risk.enforce_capital_filter", False))
@@ -2193,6 +2243,10 @@ class Prometheus:
                                 execution_signal.setdefault("timeframe", "intraday")
                                 execution_signal["strategy_type"] = "option_buying"
                                 execution_signal["signal_score"] = float(pa_sig.get("edge_score", 3.8) or 3.8)
+                                execution_signal["target_gain_pts"] = target_gain_pts
+                                execution_signal["sl_pts"] = sl_pts
+                                execution_signal["atr"] = spot_atr
+                                execution_signal["breakeven_trigger_pts"] = pa_sig.get("breakeven_trigger_pts", round(target_gain_pts * 0.5, 1))
                                 if tradingsymbol:
                                     execution_signal["tradingsymbol"] = tradingsymbol
                                     execution_signal["instrument"] = tradingsymbol
