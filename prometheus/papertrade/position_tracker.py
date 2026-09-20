@@ -264,6 +264,9 @@ class PositionTracker:
             commitment_ratio=getattr(pos, "commitment_ratio", None),
             net_gex=getattr(pos, "net_gex", None),
             zgl=getattr(pos, "zgl", None),
+            tier=getattr(pos, "tier", ""),
+            entry_spot=getattr(pos, "entry_spot", 0.0),
+            target_gain_pts=getattr(pos, "target_gain_pts", 0.0),
         )
         self.closed_trades.append(trade)
         # Bug C.2 (2026-07-25 audit): the position has been popped from

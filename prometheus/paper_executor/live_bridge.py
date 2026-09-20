@@ -677,6 +677,13 @@ class LivePaperCapture:
                     signal_score=float(r.get("signal_score") or 0),
                     signal_confidence=float(r.get("signal_confidence") or 0),
                     trade_mode=r.get("trade_mode", "intraday") or "intraday",
+                    commitment_ratio=r.get("commitment_ratio"),
+                    net_gex=r.get("net_gex"),
+                    zgl=r.get("zgl"),
+                    tier=r.get("tier", "") or "",
+                    entry_spot=float(r.get("entry_spot") or 0.0),
+                    atr=float(r.get("atr") or 0.0),
+                    target_gain_pts=float(r.get("target_gain_pts") or 0.0),
                 )
                 # Inject into the tracker's in-memory dict ONLY if not
                 # already present (defensive — should never happen, but

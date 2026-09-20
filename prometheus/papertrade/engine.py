@@ -261,6 +261,7 @@ class PaperTradeEngine:
             entry_spot=getattr(signal, "entry_spot", 0.0) or 0.0,
             atr=getattr(signal, "atr", 0.0) or 0.0,
             target_gain_pts=float(getattr(signal, "target_gain_pts", 0.0) or 0.0),
+            tier=getattr(signal, "tier", "") or "",
         )
         self.tracker.open_position(position)
         return trade_id

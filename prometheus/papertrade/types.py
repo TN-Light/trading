@@ -89,6 +89,9 @@ class PaperTrade:
     commitment_ratio: Optional[float] = None  # shadow telemetry: abs(OI_change)/volume
     net_gex: Optional[float] = None           # shadow telemetry: Net Gamma Exposure
     zgl: Optional[float] = None               # shadow telemetry: Zero Gamma Level
+    tier: str = ""
+    entry_spot: float = 0.0
+    target_gain_pts: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -139,6 +142,7 @@ class Position:
     entry_spot: float = 0.0
     atr: float = 0.0
     target_gain_pts: float = 0.0
+    tier: str = ""
 
     def __post_init__(self):
         if self.initial_sl <= 0.0 and self.stop_loss > 0.0:

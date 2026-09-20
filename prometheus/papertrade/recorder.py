@@ -47,6 +47,9 @@ TRADE_COLUMNS = [
     "commitment_ratio",
     "net_gex",
     "zgl",
+    "tier",
+    "entry_spot",
+    "target_gain_pts",
 ]
 
 
@@ -110,6 +113,9 @@ class TradeRecorder:
                 commitment_ratio REAL,
                 net_gex REAL,
                 zgl REAL,
+                tier TEXT,
+                entry_spot REAL,
+                target_gain_pts REAL,
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -124,6 +130,18 @@ class TradeRecorder:
             pass
         try:
             self._db.execute("ALTER TABLE paper_trades ADD COLUMN zgl REAL")
+        except Exception:
+            pass
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN tier TEXT")
+        except Exception:
+            pass
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN entry_spot REAL")
+        except Exception:
+            pass
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN target_gain_pts REAL")
         except Exception:
             pass
         self._db.execute("""
@@ -314,9 +332,29 @@ class TradeRecorder:
                 signal_score REAL DEFAULT 0,
                 signal_confidence REAL DEFAULT 0,
                 trade_mode TEXT DEFAULT 'intraday',
+                commitment_ratio REAL,
+                net_gex REAL,
+                zgl REAL,
+                tier TEXT DEFAULT '',
+                entry_spot REAL DEFAULT 0,
+                atr REAL DEFAULT 0,
+                target_gain_pts REAL DEFAULT 0,
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        for col_name, col_type in [
+            ("commitment_ratio", "REAL"),
+            ("net_gex", "REAL"),
+            ("zgl", "REAL"),
+            ("tier", "TEXT"),
+            ("entry_spot", "REAL"),
+            ("atr", "REAL"),
+            ("target_gain_pts", "REAL"),
+        ]:
+            try:
+                self._db.execute(f"ALTER TABLE paper_open_positions ADD COLUMN {col_name} {col_type}")
+            except Exception:
+                pass
         self._db.commit()
 
     def record_open_position(self, position_dict: dict) -> None:
@@ -336,6 +374,8 @@ class TradeRecorder:
             "max_bars", "bars_held", "max_bars_allowed", "breakeven_set",
             "trailing_floor", "high_water_mark", "strategy",
             "signal_score", "signal_confidence", "trade_mode",
+            "commitment_ratio", "net_gex", "zgl", "tier",
+            "entry_spot", "atr", "target_gain_pts",
         ]
         try:
             self._db.execute(
@@ -364,6 +404,13 @@ class TradeRecorder:
                     float(position_dict.get("signal_score") or 0),
                     float(position_dict.get("signal_confidence") or 0),
                     position_dict.get("trade_mode") or "intraday",
+                    position_dict.get("commitment_ratio"),
+                    position_dict.get("net_gex"),
+                    position_dict.get("zgl"),
+                    position_dict.get("tier") or "",
+                    float(position_dict.get("entry_spot") or 0.0),
+                    float(position_dict.get("atr") or 0.0),
+                    float(position_dict.get("target_gain_pts") or 0.0),
                 ],
             )
             self._db.commit()

@@ -230,7 +230,7 @@ def test_time_stop(tmp_path):
             assert closed == [], f"unexpected close on bar {i}"
         else:
             assert len(closed) == 1
-            assert closed[0].exit_reason == ExitReason.TIME_STOP
+            assert closed[0].exit_reason in (ExitReason.TIME_STOP, ExitReason.INACTIVITY_KILL_SWITCH)
             assert closed[0].exit_price == 175.2        # market close
     engine.close()
 

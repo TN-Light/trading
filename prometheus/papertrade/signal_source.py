@@ -69,6 +69,8 @@ class SignalNotification:
     zgl: Optional[float] = None               # shadow telemetry: Zero Gamma Level
     entry_spot: float = 0.0                   # underlying spot price at entry
     atr: float = 0.0                          # 14-period ATR of underlying
+    tier: str = ""                            # 5-tier pyramid: S, A, B, C, D
+    target_gain_pts: float = 0.0              # calibrated target gain in option points
     metadata: dict = None            # bag for any extra context
 
 
@@ -247,6 +249,8 @@ def from_signal_dict(signal: dict, max_bars_default: int = 16) -> SignalNotifica
         zgl=float(signal["zgl"]) if signal.get("zgl") is not None else None,
         entry_spot=float(signal.get("entry_spot") or signal.get("spot") or signal.get("spot_price") or signal.get("spot_at_signal") or 0.0),
         atr=float(signal.get("atr") or signal.get("atr_15m") or 0.0),
+        tier=str(signal.get("tier") or signal.get("signal_tier") or ""),
+        target_gain_pts=float(signal.get("target_gain_pts") or 0.0),
         metadata={"raw": signal},
     )
 
