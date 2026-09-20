@@ -4812,6 +4812,29 @@ class Prometheus:
         square_off_h, square_off_m = map(int, square_off_str.split(":"))
         last_entry_time = dtime(last_entry_h, last_entry_m)
         square_off_time = dtime(square_off_h, square_off_m)
+
+        tw_cfg = intraday_cfg.get("trading_windows", {})
+        morning_start_str = str(tw_cfg.get("morning_start", "09:30"))
+        morning_end_str = str(tw_cfg.get("morning_end", "11:30"))
+        lunch_start_str = str(tw_cfg.get("lunch_dead_zone_start", "11:30"))
+        lunch_end_str = str(tw_cfg.get("lunch_dead_zone_end", "13:15"))
+        afternoon_start_str = str(tw_cfg.get("afternoon_start", "13:15"))
+        afternoon_end_str = str(tw_cfg.get("afternoon_end", "14:15"))
+
+        def _safe_parse_dtime(t_str: str, def_h: int, def_m: int) -> dtime:
+            try:
+                h, m = map(int, str(t_str).split(":"))
+                return dtime(h, m)
+            except Exception:
+                return dtime(def_h, def_m)
+
+        morning_start_time = _safe_parse_dtime(morning_start_str, 9, 30)
+        morning_end_time = _safe_parse_dtime(morning_end_str, 11, 30)
+        lunch_start_time = _safe_parse_dtime(lunch_start_str, 11, 30)
+        lunch_end_time = _safe_parse_dtime(lunch_end_str, 13, 15)
+        afternoon_start_time = _safe_parse_dtime(afternoon_start_str, 13, 15)
+        afternoon_end_time = _safe_parse_dtime(afternoon_end_str, 14, 15)
+
         intraday_instruments = self._get_intraday_instruments(self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
         use_backtest_generator = bool(intraday_cfg.get("use_backtest_generator", False))
@@ -4998,6 +5021,7 @@ class Prometheus:
 
                 allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", True))
                 active_pos_symbols = self._get_active_positions_symbols()
+                is_lunch_dead_zone = (lunch_start_time <= current_time < lunch_end_time)
 
                 # 1. Collect all candidates across all instruments
                 candidates = []
@@ -5011,6 +5035,17 @@ class Prometheus:
                         symbol, bar_interval, use_backtest_generator
                     )
                     if refined and refined.get("action") != "HOLD":
+                        strat_type = str(refined.get("strategy_type", "")).lower()
+                        is_buying = "option_buying" in strat_type or "BUY" in str(refined.get("action", ""))
+
+                        # Lunch Dead Zone Gate: strictly block Option Buying between 11:30 and 13:15 to eliminate theta decay
+                        if is_lunch_dead_zone and is_buying:
+                            logger.info(
+                                f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {symbol} "
+                                f"({lunch_start_str}-{lunch_end_str} IST theta decay chop zone). Credit spreads remain active."
+                            )
+                            continue
+
                         traded_inst = refined.get("tradingsymbol", "") or refined.get("instrument", "")
                         if traded_inst and traded_inst in _today_traded_instruments:
                             logger.info(f"Skipping re-entry of {traded_inst} (already traded today)")
@@ -5329,6 +5364,25 @@ class Prometheus:
         square_off_h, square_off_m = map(int, square_off_str.split(":"))
         last_entry_time = dtime(last_entry_h, last_entry_m)
         square_off_time = dtime(square_off_h, square_off_m)
+
+        tw_cfg = intraday_cfg.get("trading_windows", {})
+        morning_start_str = str(tw_cfg.get("morning_start", "09:30"))
+        morning_end_str = str(tw_cfg.get("morning_end", "11:30"))
+        lunch_start_str = str(tw_cfg.get("lunch_dead_zone_start", "11:30"))
+        lunch_end_str = str(tw_cfg.get("lunch_dead_zone_end", "13:15"))
+        afternoon_start_str = str(tw_cfg.get("afternoon_start", "13:15"))
+        afternoon_end_str = str(tw_cfg.get("afternoon_end", "14:15"))
+
+        def _safe_parse_dtime_live(t_str: str, def_h: int, def_m: int) -> dtime:
+            try:
+                h, m = map(int, str(t_str).split(":"))
+                return dtime(h, m)
+            except Exception:
+                return dtime(def_h, def_m)
+
+        lunch_start_time = _safe_parse_dtime_live(lunch_start_str, 11, 30)
+        lunch_end_time = _safe_parse_dtime_live(lunch_end_str, 13, 15)
+
         intraday_instruments = self._get_intraday_instruments(self.symbols)
         be_ratio = intraday_cfg.get("breakeven_ratio", 0.5)
         use_backtest_generator = bool(intraday_cfg.get("use_backtest_generator", False))
@@ -5547,6 +5601,17 @@ class Prometheus:
                                     isym, bar_interval, use_backtest_generator
                                 )
                                 if refined and refined.get("action") != "HOLD":
+                                    strat_type = str(refined.get("strategy_type", "")).lower()
+                                    is_buying = "option_buying" in strat_type or "BUY" in str(refined.get("action", ""))
+
+                                    # Lunch Dead Zone Gate: strictly block Option Buying between 11:30 and 13:15 to eliminate theta decay
+                                    if (lunch_start_time <= current_time < lunch_end_time) and is_buying:
+                                        logger.info(
+                                            f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {isym} "
+                                            f"({lunch_start_str}-{lunch_end_str} IST theta decay chop zone). Credit spreads remain active."
+                                        )
+                                        continue
+
                                     # Block same-instrument re-entry
                                     tsym = refined.get("tradingsymbol", "")
                                     inst = refined.get("instrument", "")

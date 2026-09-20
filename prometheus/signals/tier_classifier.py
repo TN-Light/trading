@@ -142,10 +142,44 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         is_htf_aligned = (("CE" in action and is_htf_bull) or ("PE" in action and is_htf_bear))
         
         is_golden = bool(signal.get("is_golden_setup", False)) or "golden_setup" in strat_name
+
+        # Time Window Validation (60-day Angel One empirical tick distribution):
+        # Window A (Morning): 09:30 - 11:30 IST (Primary ORB & momentum impulses)
+        # Lunch Dead Zone: 11:30 - 13:15 IST (Directional movement collapses by ~60%; Option Buying BLOCKED)
+        # Window B (Afternoon): 13:15 - 14:15 IST (High-conviction breakout & expiry continuation)
         is_morning_power_hour = True
+        is_afternoon_squeeze = True
+        is_valid_entry_window = True
+        is_lunch_dead_zone = False
+
         if bar_time:
-            # 09:35 to 10:35 AM IST is prime institutional impulse window
-            is_morning_power_hour = (bar_time >= dtime(9, 35) and bar_time <= dtime(10, 35))
+            # Morning power hour: 09:35 - 10:35 AM IST
+            is_morning_power_hour = (dtime(9, 35) <= bar_time <= dtime(10, 35))
+            # Afternoon squeeze window: 13:15 - 14:15 PM IST
+            is_afternoon_squeeze = (dtime(13, 15) <= bar_time <= dtime(14, 15))
+            # Lunch dead zone: 11:30 - 13:15 IST
+            is_lunch_dead_zone = (dtime(11, 30) < bar_time < dtime(13, 15))
+            # Valid entry windows (09:30-11:30 or 13:15-14:15)
+            is_valid_entry_window = (
+                (dtime(9, 30) <= bar_time <= dtime(11, 30)) or
+                (dtime(13, 15) <= bar_time <= dtime(14, 15))
+            )
+
+        # LUNCH DEAD ZONE HARD GATE:
+        # Strictly prevent option buying between 11:30 and 13:15 to eliminate theta decay cremation
+        if is_lunch_dead_zone:
+            return _build_tier_result(
+                tier="C",
+                tier_name="STANDARD_MOMENTUM",
+                is_live_eligible=False,
+                reasons=[
+                    "Lunch Dead Zone Gate (11:30-13:15 IST)",
+                    "15M directional range collapses by ~60%; Option Buying strictly blocked to prevent theta decay chop",
+                    f"Confluence Edge Score: {score:.1f}/10"
+                ],
+                badge="📊 <b>[TIER C: LUNCH DEAD ZONE — PAPER ONLY]</b>",
+                instruction="📝 <b>ACTION:</b> Paper Trading Engine Only (Lunch Dead Zone 11:30-13:15: Option Buying Gated)"
+            )
 
         # TIER S ("Perfect Storm" — Elite 5-Factor Confluence):
         # Requirements:
@@ -154,8 +188,9 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         #   3. Volume Surge Confirmed (>=1.15x)
         #   4. Strict 1H HTF Trend Aligned (BULLISH for CE, BEARISH for PE; NEUTRAL not allowed for S)
         #   5. High Edge Score (>= 7.0)
-        #   6. Morning Power Hour (09:35 - 10:35)
-        if has_orb and has_vwap and has_vol_surge and is_htf_aligned and score >= 7.0 and is_morning_power_hour:
+        #   6. Morning Power Hour (09:35 - 10:35) OR Afternoon Squeeze Window (13:15 - 14:15)
+        if has_orb and has_vwap and has_vol_surge and is_htf_aligned and score >= 7.0 and (is_morning_power_hour or is_afternoon_squeeze):
+            window_label = "Morning Power Hour (09:35-10:35 AM)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Squeeze Window (13:15-14:15 PM)"
             return _build_tier_result(
                 tier="S",
                 tier_name="PERFECT_STORM",
@@ -165,7 +200,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                     "Session VWAP Confluence",
                     "Volume Expansion Surge Confirmed (>=1.15x SMA10)",
                     "1-Hour HTF EMA20/50 Strict Trend Alignment",
-                    "Morning Power Hour Execution Window (09:35-10:35 AM)",
+                    f"{window_label} Execution Window",
                     f"Confluence Edge Score: {score:.1f}/10"
                 ],
                 badge="🏆 <b>[TIER S: PERFECT STORM — FULL CONVICTION]</b>",
@@ -189,13 +224,10 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         #   1. 15M ORB + Session VWAP alignment
         #   2. STRICT 1H HTF Trend Alignment (BULLISH for CE, BEARISH for PE; NEUTRAL is banned)
         #   3. Edge score >= 6.5 (real institutional confluence)
-        #   4. Time window: before 11:45 AM
+        #   4. Valid Trading Window: 09:30-11:30 AM OR 13:15-14:15 PM
         #   5. Non-0DTE: 0-DTE option buying strictly requires Tier S; weak/moderate 0-DTE buys are paper-only
-        is_morning_window = True
-        if bar_time:
-            is_morning_window = (bar_time <= dtime(11, 45))
-
-        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= 6.5 and is_morning_window and not is_0dte_buying:
+        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= 6.5 and is_valid_entry_window and not is_0dte_buying:
+            window_desc = "Morning Window (09:30-11:30)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Window (13:15-14:15)"
             return _build_tier_result(
                 tier="B",
                 tier_name="GOLDEN_SETUP",
@@ -204,6 +236,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                     "15M Opening Range Breakout (with ATR Buffer)",
                     "Session VWAP Clearance >= 0.10%",
                     "1-Hour HTF Trend Strictly Aligned (BULLISH for CE / BEARISH for PE)",
+                    f"Valid Trading Window ({window_desc})",
                     f"Confluence Edge Score: {score:.1f}/10"
                 ],
                 badge="🌟 <b>[TIER B: GOLDEN SETUP — 1 LOT CONSERVATIVE]</b>",
@@ -224,8 +257,11 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 missing.append(f"Score {score:.1f}/10 is below Tier B requirement (6.5+)")
             if is_0dte_buying:
                 missing.append("0-DTE Expiry Option Buying gated (Requires Tier S Perfect Storm to trade live)")
-            if not is_morning_window:
-                missing.append("Outside Morning Window (After 11:45 AM)")
+            if not is_valid_entry_window:
+                if bar_time and bar_time > dtime(14, 15):
+                    missing.append("Post-Cutoff Window (After 14:15 IST)")
+                else:
+                    missing.append("Outside Valid Entry Windows (09:30-11:30, 13:15-14:15)")
             return _build_tier_result(
                 tier="C",
                 tier_name="STANDARD_MOMENTUM",

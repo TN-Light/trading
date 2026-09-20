@@ -182,8 +182,15 @@ intraday:
     target_pts: 14.0
     trailing_be_pts: 10.0
     partial_profit_pct: 0.60
-  last_entry_time: '11:45'
-  max_daily_trades: 2  # Focus on top 2 high-probability morning trades; no afternoon overtrading
+  last_entry_time: '14:15'
+  max_daily_trades: 4  # Up to 2 morning trades + 2 afternoon trades; strictly caps daily risk
+  trading_windows:
+    morning_start: '09:30'
+    morning_end: '11:30'
+    lunch_dead_zone_start: '11:30'
+    lunch_dead_zone_end: '13:15'
+    afternoon_start: '13:15'
+    afternoon_end: '14:15'
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
   skip_first_minutes: 15
@@ -229,7 +236,7 @@ intraday:
       vix_buy_only_above: 18.0
       vix_sell_only_below: 12.0
       vol_adaptive_trailing: true
-    afternoon_window_start: '14:00'
+    afternoon_window_start: '13:15'
     allow_counter_bias_when_strong: false
     breakout_atr_buffer: 0.1
     breakout_lookback: 0
@@ -238,12 +245,12 @@ intraday:
     confluence_trending: 2.5
     counter_bias_breakout_atr: 0.8
     counter_bias_min_net_edge: 2.4
-    dead_zone_end: '13:00'
-    dead_zone_start: '11:45'
+    dead_zone_end: '13:15'
+    dead_zone_start: '11:30'
     disable_mean_reversion: false
     mr_min_score: 2.0
     enabled: true
-    entry_cutoff_time: '14:30'
+    entry_cutoff_time: '14:15'
     entry_start_time: '09:50'
     skip_first_minutes: 35
     target_premium_pct_t1: 0.18
@@ -305,7 +312,7 @@ intraday:
         confluence_sideways: 3.6
         confluence_trending: 2.9
         kelly_wr: 0.4
-        max_daily_trades: 3
+        max_daily_trades: 4
         min_net_edge: 1.5
         min_rr: 2.0
         target_atr_mult: 2.2
@@ -314,7 +321,7 @@ intraday:
         confluence_sideways: 3.5
         confluence_trending: 2.8
         kelly_wr: 0.4
-        max_daily_trades: 3
+        max_daily_trades: 4
         min_net_edge: 1.4
         min_rr: 1.9
         target_atr_mult: 2.4
