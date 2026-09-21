@@ -37,13 +37,20 @@ eports/papertrade/live_ledger.sqlite.
 
 ## 2. Daily Trading Audit Logs (Days 1 to 10)
 
-### Day 1: Monday, September 21, 2026 (SENSEX Expiry)
+### Day 1: Monday, September 21, 2026 (SENSEX Expiry / NIFTY 1-DTE Spreads)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| `4EBDCC` | 10:03 | NIFTY 50 | `23450CE/23600CE` | Bear Call Spread | C | 8.5 | 32.10 | 9.60 | 48.00 | 28.85 | 10:30 | inactivity_kill_switch | 30m | +87.47 | +3.25 |
+| `E47090` | 10:34 | NIFTY 50 | `23450CE/23600CE` | Bear Call Spread | C | 8.5 | 26.99 | 8.43 | 42.15 | 42.70 | 13:35 | stop_loss | 180m | -1,144.99 | -15.71 |
+| `A80685` | 13:37 | NIFTY 50 | `23500CE/23650CE` | Bear Call Spread | C | 8.5 | 26.99 | 8.15 | 40.72 | 29.55 | 15:15 | square_off | 105m | -289.54 | -2.56 |
 
-- **Lunch Dead Zone Blocks (11:30-13:15)**: 0 | **Junk Rejections (<6.5)**: 0 | **Daily Cap Rejections (>4)**: 0
-- **45-Min Kill Switch Activated**: 0 times | **GEX / Telemetry Notes**: Passive observation
+- **Day 1 Result**: 3 Trades | 1 Win / 2 Losses (Win Rate: 33.3%) | Net Realized PnL: **-Rs 1,347.06** (100% Paper Mode; Rs 0.00 Live Loss).
+- **Execution Defense**: All 3 trades were gated to **Tier C (Paper Only)** because they were 1-DTE with $< 1.95\sigma$ OTM clearance and score 8.5 ($<9.0$). Tier C gating successfully protected live capital.
+- **Key Post-Mortem Findings**:
+  1. *45-Min Inactivity Kill-Switch*: Fired abnormally on Trade #1 (Credit Spread) after 30 min, cutting a winning theta decay position (+Rs 211 gross) early. Permanent fix deployed: credit spreads strictly exempted (`not is_spread`).
+  2. *Strike Buffer Flaw*: 15M ATR was used ($2.0 \times 25\text{ pts} = 50\text{ pts}$), placing the short strike only 63 pts OTM on Nifty. When Nifty staged a +110-pt short squeeze to 23,467, the short call was overrun. Fixed: minimum index clearance ($\ge 150$ pts on Nifty, $\ge 400$ pts on Bank Nifty).
+  3. *Telegram Alert Side Label*: Corrected `(BUY PE 65x)` label to `BEAR CALL SPREAD`.
+  4. *Churn Guard*: Added same-instrument re-entry protection to paper capture.
 
 ### Day 2: Tuesday, September 22, 2026 (FINNIFTY Expiry)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |

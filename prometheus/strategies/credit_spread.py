@@ -161,8 +161,15 @@ class CreditSpreadStrategy:
                 is_bullish = True  # Below range midpoint -> sell Bull Put Spread below support
 
         # ── Dynamic 2.0σ Strike Buffer (Pillar 2) ──
-        sigma_buffer = round((2.0 * atr) / interval) * interval
-        sigma_buffer = max(interval, sigma_buffer)
+        min_index_buffer = {
+            "NIFTY 50": 150.0,
+            "NIFTY BANK": 400.0,
+            "SENSEX": 600.0,
+            "NIFTY MIDCAP SELECT": 100.0,
+        }.get(symbol, 3.0 * interval)
+
+        daily_proxy_buffer = round((3.5 * atr) / interval) * interval
+        sigma_buffer = max(min_index_buffer, daily_proxy_buffer)
 
         # ── Institutional Open Interest (OI) Wall Scan (Pillar 3) ──
         oi_wall_strike = None
@@ -180,7 +187,7 @@ class CreditSpreadStrategy:
             except Exception as e:
                 logger.debug(f"OI wall discovery error for {symbol}: {e}")
 
-        otm_steps = self.strike_otm_steps
+        otm_steps = max(self.strike_otm_steps, int(min_index_buffer / interval))
         
         if is_bearish:
             # Bear Call Spread: Place short strike above today's high / resistance + 2.0σ buffer
@@ -339,7 +346,8 @@ class CreditSpreadStrategy:
         # ── Quantitative Conviction & Probability of Profit Classifier ──
         is_0dte = bool(current_date and expiry_date and (expiry_date - current_date).days == 0)
         strike_dist = abs(short_strike - close)
-        otm_sigma = round(strike_dist / max(atr, 1.0), 2)
+        daily_move = max(min_index_buffer, 3.5 * max(atr, 1.0))
+        otm_sigma = round((strike_dist / daily_move) * 2.0, 2)
         
         # Rigorous Pillar Checks:
         # Pillar 1: Statistical buffer (requires >= 2.0σ away from spot for true Tier 1 conviction)

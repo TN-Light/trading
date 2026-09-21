@@ -229,6 +229,7 @@ class LivePaperCapture:
         # Capture every closed trade so we can alert after each process_bar.
         # The wrapped process_bar (below) emits a callback per close.
         self._on_close_listeners = []
+        self._today_closed_instruments = set()
 
         # Construct the recorder (CSV+SQLite) directory-safe.
         Path(config.csv_path).parent.mkdir(parents=True, exist_ok=True)
@@ -356,6 +357,13 @@ class LivePaperCapture:
 
         # Anti-Overtrading Guard: Never open concurrent duplicate positions on the same symbol
         is_spread = "/" in (notif.instrument or "") or "SPREAD" in getattr(notif, "strategy", "").upper()
+        if notif.instrument and notif.instrument in self._today_closed_instruments:
+            logger.info(
+                f"[PaperCapture] Skipping re-entry of {notif.instrument} on {notif.symbol} "
+                f"(already traded and closed today)"
+            )
+            return None
+
         for open_pos in self._engine.tracker.open_positions.values():
             if open_pos.symbol == notif.symbol:
                 if is_spread and ("/" in (open_pos.instrument or "") or "SPREAD" in getattr(open_pos, "strategy", "").upper()):
@@ -504,7 +512,11 @@ class LivePaperCapture:
         if self._telegram is None:
             return
         try:
-            side = "BUY CE" if trade.direction.value == "LONG" else "BUY PE"
+            is_spread = "/" in (trade.instrument or "") or "SPREAD" in getattr(trade, "strategy", "").upper()
+            if is_spread:
+                side = "BEAR CALL SPREAD" if trade.direction.value == "SHORT" else "BULL PUT SPREAD"
+            else:
+                side = "BUY CE" if trade.direction.value == "LONG" else "BUY PE"
             raw_reason = trade.exit_reason.value if hasattr(trade.exit_reason, "value") else str(trade.exit_reason)
 
             from prometheus.utils.symbol_format import human_search_name_from_api_symbol
@@ -535,6 +547,8 @@ class LivePaperCapture:
         """Single chokepoint invoked by the wrapped process_bar on every
         closed PaperTrade. Updates in-memory listeners and pushes telegram.
         """
+        if trade.instrument:
+            self._today_closed_instruments.add(trade.instrument)
         self._alert_position_closed(trade)
         for listener in self._on_close_listeners:
             try:

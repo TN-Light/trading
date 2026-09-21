@@ -410,6 +410,7 @@ class PositionTracker:
         # (premium rallied). The old `else` branch applied inverted
         # conventions assuming SHORT = "short the asset", which was wrong
         # for our BUY_PE convention. (Fix 2026-07-18.)
+        is_spread = "/" in (pos.instrument or "") or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in (pos.instrument or "").upper()
         sl = pos.stop_loss
         tgt = pos.target
 
@@ -430,7 +431,8 @@ class PositionTracker:
         # -- 2. 45-minute (3-bar) Inactivity Kill-Switch --------------------
         # Liquidates stagnant option buying positions after 3 bars (45 min)
         # to prevent theta decay when underlying momentum fails to advance >= 0.5*ATR.
-        if pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
+        # Strictly EXEMPT credit spreads (option selling), where stagnation benefits theta decay.
+        if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
             atr = getattr(pos, "atr", 0.0)
@@ -524,8 +526,8 @@ class PositionTracker:
         # Otherwise no LTP — skip SL/target evaluation this bar (don't
         # fabricate an exit price from the underlying snapshot).
 
-        # 45-minute (3-bar) Inactivity Kill-Switch via feed
-        if pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
+        # 45-minute (3-bar) Inactivity Kill-Switch via feed (strictly option buying only)
+        if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
             atr = getattr(pos, "atr", 0.0)

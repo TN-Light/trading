@@ -3,7 +3,7 @@
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
 **Current Realized Net P&L:** **🔴 -Rs 24,428.27 (-162.86%)**  
-**Last Updated:** 2026-09-16 16:00:27 IST  
+**Last Updated:** 2026-09-21 16:00:31 IST  
 
 ---
 
@@ -13,10 +13,10 @@
 | :--- | :---: | :---: | :---: |
 | **Net Realized P&L** | **-Rs 24,428.27** | +Rs 5,000 / month | 🔴 |
 | **Month Return %** | **-162.86%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **16** | 20–22 days | In Progress |
-| **Green / Red Days** | **5 Green / 7 Red / 4 BE** | > 65% Green | 31.2% |
+| **Total Trading Days** | **17** | 20–22 days | In Progress |
+| **Green / Red Days** | **5 Green / 7 Red / 5 BE** | > 65% Green | 29.4% |
 | **Total Trades** | **57** | ~3–5 / day | Tracked |
-| **Win Rate** | **43.9%** (25W / 36L) | > 55.0% | ⚠️ Under Review |
+| **Win Rate** | **45.6%** (26W / 36L) | > 55.0% | ⚠️ Under Review |
 | **Profit Factor** | **0.53** | > 1.50 | ⚠️ Under Review |
 | **Gross Profit** | +Rs 26,144.12 | — | Winning Trades |
 | **Gross Loss** | -Rs 49,488.19 | — | Losing Trades |
@@ -43,6 +43,7 @@
 | **2026-09-11** | 1 | 0W / 1L | 0% | +Rs 0 | -Rs 6,730 | **🔴 -Rs 6,881.1** | -45.9% | **-Rs 24,428.3** | Deep gap-down (-0.8%) & massive V-reversal (+1351pt Bank Nifty). Morning MIDCAP PE trade caught on stale SQLite candle; system hardened to strictly reject stale cache during market hours. |
 | **2026-09-15** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
 | **2026-09-16** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
+| **2026-09-21** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
 
 ---
 
