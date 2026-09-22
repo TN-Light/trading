@@ -3,7 +3,7 @@
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
 **Current Realized Net P&L:** **🔴 -Rs 24,428.27 (-162.86%)**  
-**Last Updated:** 2026-09-21 16:00:31 IST  
+**Last Updated:** 2026-09-22 16:00:06 IST  
 
 ---
 
@@ -13,8 +13,8 @@
 | :--- | :---: | :---: | :---: |
 | **Net Realized P&L** | **-Rs 24,428.27** | +Rs 5,000 / month | 🔴 |
 | **Month Return %** | **-162.86%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **17** | 20–22 days | In Progress |
-| **Green / Red Days** | **5 Green / 7 Red / 5 BE** | > 65% Green | 29.4% |
+| **Total Trading Days** | **18** | 20–22 days | In Progress |
+| **Green / Red Days** | **5 Green / 7 Red / 6 BE** | > 65% Green | 27.8% |
 | **Total Trades** | **57** | ~3–5 / day | Tracked |
 | **Win Rate** | **45.6%** (26W / 36L) | > 55.0% | ⚠️ Under Review |
 | **Profit Factor** | **0.53** | > 1.50 | ⚠️ Under Review |
@@ -44,6 +44,7 @@
 | **2026-09-15** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
 | **2026-09-16** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
 | **2026-09-21** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
+| **2026-09-22** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,428.3** | Intraday paper trading session |
 
 ---
 
