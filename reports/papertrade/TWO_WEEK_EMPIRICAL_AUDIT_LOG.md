@@ -52,10 +52,29 @@ eports/papertrade/live_ledger.sqlite.
   3. *Telegram Alert Side Label*: Corrected `(BUY PE 65x)` label to `BEAR CALL SPREAD`.
   4. *Churn Guard*: Added same-instrument re-entry protection to paper capture.
 
-### Day 2: Tuesday, September 22, 2026 (FINNIFTY Expiry)
+### Day 2: Tuesday, September 22, 2026 (NIFTY 0-DTE & FINNIFTY Expiry)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| *NO TRADES* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | **Rs 0.00** | -- |
+
+- **Day 2 Result**: 0 Trades | Net Realized PnL: **Rs 0.00** (Live & Paper).
+- **Service Liveness**: System auto-started via Windows Service at 08:15 AM IST and successfully performed 31 scan cycles across the day (09:30 to 14:15).
+- **Market Dynamics**:
+  - NIFTY opened at 23,454, consolidated in a tight 20-pt range (23,450–23,470) for the first hour, broke down at 10:30 AM to 23,382, chopped horizontally through the lunch dead zone (23,330–23,390), spiked +80 pts at 14:00 to 23,383, and flushed at 15:15 to close at 23,329 (-125 pts, -0.53%).
+  - India VIX remained extremely suppressed at 10.96–11.05.
+- **Forensic Audit & Bug Diagnosis**:
+  1. *Credit Spread Rigid Hedge Strike Bug (Lost 100% Win)*:
+     - Starting from 10:00 AM, the strategy correctly detected the market breakdown on NIFTY 50 and generated a Bear Call Spread (`23650 CE` Short / `23800 CE` Hedge).
+     - However, Angel One omitted `23800 CE` from its instrument master on 22-Sep-2026 (only `23800 PE` was listed).
+     - Because the strategy rigidly demanded `23800 CE` without fallback probing, `long_premium` returned 0.00, skipping the trade across **29 consecutive scans**.
+     - `23650 CE` expired at **Rs 0.05** at 15:30 IST — this would have been a 100% textbook full-profit decay win (+Rs 2.80/share).
+     - **Fix Deployed**: Added dynamic liquid hedge strike probing (+1, +2, or -1 step, e.g. `23850 CE`) so broker contract omissions never drop valid spreads.
+  2. *Option Buying 1H Trend Gate vs Tier Pyramid*:
+     - At 10:30 AM, Nifty staged an ORB breakdown below 23,425, scored at **6.5 / 10** (`BUY_PE`), which hit target (+28 spot pts) in 45 min.
+     - However, because the 1-Hour chart had EMA20 (23,374) > EMA50 (23,350), `price_action_momentum.py` had `golden_mode=True` which executed a blanket `return None`.
+     - **Fix Deployed**: Harmonized `evaluate_bar` with the 5-Tier Pyramid. NEUTRAL 1H trends now pass to `tier_classifier.py` and are cleanly gated to **Tier C (Paper Trading Only)**, preserving capital on live broker while tracking high-conviction momentum in paper logs.
+  3. *FINNIFTY Expiry Coverage*:
+     - Added `NIFTY FIN SERVICE` to `intraday.instruments` in `settings.yaml` for active Tuesday expiry coverage.
 
 ### Day 3: Wednesday, September 23, 2026 (BANKNIFTY Expiry)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |

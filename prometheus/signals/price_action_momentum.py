@@ -260,7 +260,7 @@ class PriceActionMomentumScanner:
         if has_1h_data:
             is_golden_bull = is_orb_bull and is_vwap_bull and (htf_trend == "BULLISH")
             is_golden_bear = is_orb_bear and is_vwap_bear and (htf_trend == "BEARISH")
-            min_threshold = 5.5 if golden_mode else 3.5
+            min_threshold = 5.0 if golden_mode else 3.5
         else:
             is_golden_bull = is_orb_bull and is_vwap_bull
             is_golden_bear = is_orb_bear and is_vwap_bear
@@ -268,7 +268,11 @@ class PriceActionMomentumScanner:
         net_edge = bull_score - bear_score
 
         if bull_score >= min_threshold and net_edge >= 1.5:
-            if golden_mode and not is_golden_bull:
+            # If golden_mode is active and 1H data is present, require either:
+            # 1) Full Golden Setup (1H BULLISH + ORB + VWAP) -> Eligible for Tier S / B Live
+            # 2) Valid ORB/VWAP breakout with NEUTRAL 1H trend -> Passes to Tier C (Paper Only)
+            # Strictly reject conflicting trends (e.g. BEARISH 1H for CE)
+            if golden_mode and has_1h_data and not is_golden_bull and htf_trend != "NEUTRAL":
                 return None
             action = "BUY_CE"
             direction = "bullish"
@@ -302,7 +306,11 @@ class PriceActionMomentumScanner:
             }
 
         elif bear_score >= min_threshold and net_edge <= -1.5:
-            if golden_mode and not is_golden_bear:
+            # If golden_mode is active and 1H data is present, require either:
+            # 1) Full Golden Setup (1H BEARISH + ORB + VWAP) -> Eligible for Tier S / B Live
+            # 2) Valid ORB/VWAP breakdown with NEUTRAL 1H trend -> Passes to Tier C (Paper Only)
+            # Strictly reject conflicting trends (e.g. BULLISH 1H for PE)
+            if golden_mode and has_1h_data and not is_golden_bear and htf_trend != "NEUTRAL":
                 return None
             action = "BUY_PE"
             direction = "bearish"

@@ -166,6 +166,7 @@ class CreditSpreadStrategy:
             "NIFTY BANK": 400.0,
             "SENSEX": 600.0,
             "NIFTY MIDCAP SELECT": 100.0,
+            "NIFTY FIN SERVICE": 150.0,
         }.get(symbol, 3.0 * interval)
 
         daily_proxy_buffer = round((3.5 * atr) / interval) * interval
@@ -222,6 +223,7 @@ class CreditSpreadStrategy:
             "NIFTY BANK": "BANKNIFTY",
             "SENSEX": "SENSEX",
             "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+            "NIFTY FIN SERVICE": "FINNIFTY",
         }
         underlying = sym_map.get(symbol, symbol.upper())
         short_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, short_strike, opt_str)
@@ -254,6 +256,41 @@ class CreditSpreadStrategy:
                         short_premium = float(s_ltp)
                     if l_ltp and float(l_ltp) > 0:
                         long_premium = float(l_ltp)
+
+                # 3. Hedge Leg Fallback Probing:
+                # If the primary calculated hedge strike is unlisted or missing in the broker API
+                # (e.g. 23800 CE omitted from Angel One on 2026-09-22), probe adjacent liquid strikes
+                # (+1, +2, or -1 step) so profitable, defined-risk spreads are not discarded.
+                if short_premium > 0 and long_premium <= 0 and hasattr(option_chain, "get_real_premium"):
+                    candidate_steps = [
+                        self.hedge_otm_steps + 1,
+                        self.hedge_otm_steps + 2,
+                        self.hedge_otm_steps - 1,
+                    ]
+                    for step in candidate_steps:
+                        if step < 2:
+                            continue
+                        probe_strike = (
+                            short_strike + (step * interval)
+                            if is_bearish
+                            else short_strike - (step * interval)
+                        )
+                        cand_q = option_chain.get_real_premium(
+                            symbol, probe_strike, opt_str, expiry=expiry_str, spot_price=close
+                        )
+                        if cand_q and float(cand_q.get("ltp", 0) or 0) > 0:
+                            long_strike = probe_strike
+                            long_premium = float(cand_q["ltp"])
+                            long_tradingsymbol = cand_q.get(
+                                "tradingsymbol",
+                                generate_tradingsymbol(underlying, expiry_str, long_strike, opt_str)
+                            )
+                            logger.info(
+                                f"CreditSpread hedge strike fallback for {symbol}: Primary "
+                                f"{short_strike + (self.hedge_otm_steps * interval if is_bearish else -self.hedge_otm_steps * interval)} "
+                                f"unavailable; adjusted to liquid hedge strike {long_strike}{opt_str} @ Rs {long_premium:.2f} ({long_tradingsymbol})"
+                            )
+                            break
             except Exception as e:
                 logger.warning(f"CreditSpread live premium fetch error for {symbol}: {e}")
 
@@ -294,10 +331,13 @@ class CreditSpreadStrategy:
             "NIFTY BANK": "BANKNIFTY",
             "SENSEX": "SENSEX",
             "NIFTY MIDCAP SELECT": "MIDCPNIFTY",
+            "NIFTY FIN SERVICE": "FINNIFTY",
         }
         underlying = sym_map.get(symbol, symbol.upper())
-        short_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, short_strike, opt_str)
-        long_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, long_strike, opt_str)
+        if not short_tradingsymbol:
+            short_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, short_strike, opt_str)
+        if not long_tradingsymbol:
+            long_tradingsymbol = generate_tradingsymbol(underlying, expiry_str, long_strike, opt_str)
 
         # 2-Leg structure (Hedge leg executed first to ensure SEBI margin reduction)
         legs = [
