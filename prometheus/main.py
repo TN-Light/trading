@@ -2121,29 +2121,49 @@ class Prometheus:
                     if is_low_vix:
                         quality_mult *= 0.80
 
-                    # Instrument Noise Floors based on Angel One 45-day empirical tick audit:
-                    # NIFTY 75th percentile MAE = 7.57 -> Noise Floor = 8.0
-                    # BANKNIFTY 75th percentile MAE = 24.23 -> Noise Floor = 20.0
-                    # SENSEX 75th percentile MAE = 25.96 -> Noise Floor = 22.0
+                    # Instrument Noise Floors — empirical tick audit + ORB retest analysis:
+                    # Bank Nifty routinely retests ORB by 60-100 spot pts (~27-45 option pts).
+                    # Old 20-pt floor was inside the retest range, causing premature stop-outs
+                    # on trades whose direction was ultimately correct (e.g. Day 3 trade D379FD).
                     if "BANK" in sym_u:
-                        noise_floor = 20.0
-                        min_target = 18.0
+                        noise_floor = 35.0
+                        min_target = 25.0
                     elif "SENSEX" in sym_u or "BSX" in sym_u:
-                        noise_floor = 22.0
-                        min_target = 20.0
+                        noise_floor = 30.0
+                        min_target = 22.0
                     else:
-                        noise_floor = 8.0
-                        min_target = 6.0
+                        noise_floor = 10.0
+                        min_target = 8.0
 
                     target_gain_pts = round(max(min_target, eom * quality_mult), 1)
                     if opt_ltp > 0:
                         # Cap target gain at 45% of option premium to prevent unrealistic moonshots
                         target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.45, 1))
 
-                    # Stop Loss: Must survive 75th percentile noise floor while maintaining healthy R:R
-                    sl_pts = max(noise_floor, round(0.55 * eom, 1))
-                    # Prevent SL from exceeding 1.15x target (preserves R:R >= 1:1.2), but never breach noise floor
-                    max_sl_cap = max(noise_floor, round(target_gain_pts * 1.15, 1))
+                    # ── Structural Stop Loss (Anchored to ORB Breakout Level) ──
+                    # Instead of a fixed 0.55 × EOM multiplier, compute the SL from
+                    # the distance between entry spot and the ORB breakout level,
+                    # then convert to option points via delta.  This gives Bank Nifty
+                    # the ~100-120 spot points of breathing room it needs to survive
+                    # routine ORB retests rather than choking on 60-pt noise.
+                    orb_high = pa_sig.get("orb_high")
+                    orb_low = pa_sig.get("orb_low")
+                    direction = pa_sig.get("direction", "bullish")
+
+                    structural_sl_pts = noise_floor
+                    if direction == "bullish" and orb_high and orb_high > 0:
+                        spot_to_orb = max(0, spot_price - orb_high)
+                        structural_spot_sl = spot_to_orb + (0.3 * spot_atr)
+                        structural_sl_pts = max(noise_floor, round(atm_delta * structural_spot_sl, 1))
+                    elif direction == "bearish" and orb_low and orb_low > 0:
+                        spot_to_orb = max(0, orb_low - spot_price)
+                        structural_spot_sl = spot_to_orb + (0.3 * spot_atr)
+                        structural_sl_pts = max(noise_floor, round(atm_delta * structural_spot_sl, 1))
+
+                    # SL: use structural distance or EOM-based, whichever is larger
+                    sl_pts = max(structural_sl_pts, noise_floor, round(0.55 * eom, 1))
+                    # Cap at 1.5x target to maintain minimum 1:1.5 R:R expectation
+                    max_sl_cap = max(noise_floor, round(target_gain_pts * 1.5, 1))
                     sl_pts = min(sl_pts, max_sl_cap)
                     if opt_ltp > 0:
                         sl_pts = min(sl_pts, round(opt_ltp * 0.30, 1))  # Never risk > 30% total option premium

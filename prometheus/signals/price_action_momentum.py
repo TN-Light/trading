@@ -302,6 +302,8 @@ class PriceActionMomentumScanner:
                 "strategy": strat_name,
                 "is_golden_setup": is_golden_bull,
                 "reasons": reasons,
+                "orb_high": round(orb_high, 2) if orb_high else None,
+                "orb_low": round(orb_low, 2) if orb_low else None,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
             }
 
@@ -340,6 +342,8 @@ class PriceActionMomentumScanner:
                 "strategy": strat_name,
                 "is_golden_setup": is_golden_bear,
                 "reasons": reasons,
+                "orb_high": round(orb_high, 2) if orb_high else None,
+                "orb_low": round(orb_low, 2) if orb_low else None,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
             }
 
