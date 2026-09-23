@@ -497,6 +497,7 @@ class LivePaperCapture:
                 current_price=current_price,
                 gain_pts=gain_pts,
                 cost_pts=cost_buffer_pts,
+                entry_price=getattr(pos, "entry_price", 0.0),
             )
         except Exception as e:
             logger.debug(f"[PaperCapture] alert_trailing_stop_updated failed: {e}")

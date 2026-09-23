@@ -1308,11 +1308,12 @@ class TelegramBot:
         current_price: float,
         gain_pts: float,
         cost_pts: float = 0.9,
+        entry_price: float = 0.0,
     ):
         """Alert whenever trailing stop ratchets up, e.g. moving SL to Breakeven (+brokerage)."""
         from prometheus.utils.symbol_format import human_search_name_from_api_symbol
         kite_name = human_search_name_from_api_symbol(instrument) if instrument else symbol
-        entry_est = new_sl - cost_pts
+        entry_est = entry_price if entry_price > 0 else (new_sl - cost_pts)
         gain_pct = (gain_pts / entry_est * 100) if entry_est > 0 else 0.0
 
         if "breakeven" in stage.lower():
@@ -1326,12 +1327,18 @@ class TelegramBot:
             headline = f"📈 <b>TRAILING STOP ADVANCED ({stage.upper()})</b>"
             action_desc = f"Ratcheting profit lock: Move Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b>."
 
+        entry_line = (
+            f"🔥 <b>Entry Fill:</b> Rs {entry_est:.2f} ➔ <b>Current LTP:</b> Rs {current_price:.2f} (<b>+{gain_pts:.1f} pts</b> | +{gain_pct:.1f}%)\n"
+            if entry_est > 0
+            else f"🔥 <b>Current LTP:</b> Rs {current_price:.2f} (<b>+{gain_pts:.1f} pts</b> | +{gain_pct:.1f}%)\n"
+        )
+
         msg = (
             f"{headline}\n\n"
             f"<b>Symbol:</b> <code>{symbol}</code>\n"
             f"<b>Contract:</b> <code>{kite_name}</code>\n"
             f"📋 <b>Search Name:</b> <code>{instrument}</code>\n\n"
-            f"🔥 <b>Current LTP:</b> Rs {current_price:.2f} (<b>+{gain_pts:.1f} pts</b> | +{gain_pct:.1f}%)\n"
+            f"{entry_line}"
             f"🛑 <b>Old SL:</b> Rs {old_sl:.2f} ➔ <b>New Trailing SL:</b> <b>Rs {new_sl:.2f}</b>\n"
             f"💼 <b>Brokerage & Taxes:</b> ~Rs {cost_pts:.2f} pts/share covered\n\n"
             f"⚡ <b>ACTION REQUIRED ON KITE:</b>\n"
