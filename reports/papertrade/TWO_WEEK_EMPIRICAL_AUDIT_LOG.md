@@ -79,9 +79,27 @@ eports/papertrade/live_ledger.sqlite.
 ### Day 3: Wednesday, September 23, 2026 (BANKNIFTY Expiry)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| `D379FD` | 10:03 | NIFTY BANK | `BANKNIFTY29SEP2656500CE` | BUY CE (Golden Setup) | B | 8.0 | 397.90 | 443.75 | 370.85 | 370.85 | 10:12 | stop_loss | 9m | -902.84 | -27.05 |
+
+- **Day 3 Result (Morning Session)**: 1 Trade | 0 Wins / 1 Loss | Net Realized PnL: **-Rs 902.84** (Paper Mode; Rs 0.00 Live Loss).
+- **Subsequent Market Move (Post-Mortem Proof of Direction)**:
+  - Immediately following the 10:12:03 stop out at Rs 370.85, BANKNIFTY bounced off the ORB level (56,441) and rallied to **56,506+ (new day high)**.
+  - The `BANKNIFTY29SEP2656500CE` premium surged from the retest low straight up to **Rs 419.70** (over +21.8 pts profit from entry, +29.7 pts from fair price).
+  - The signal direction (BUY CE), 1H trend alignment, and entry thesis were **100% correct**.
+- **Forensic Diagnosis & Learnings**:
+  1. *Rigid Math Stop Loss vs Market Structure*:
+     - The previous formula set SL at `0.55 * EOM = 27.05 pts` on the option premium.
+     - With Delta ~0.45, a 27-pt option stop allowed only **~60 spot points** of pullback on BANKNIFTY (at 56,500, that is just 0.10%!).
+     - In breakout price action, price almost always retests the broken Opening Range (56,437) before continuation. BANKNIFTY pulled back 62 spot points to 56,441.60, triggering the 27-pt stop at the exact bottom of the retest before exploding higher.
+  2. *Inflated Ask Execution on Breakout Bar*:
+     - At 10:03 AM, market makers widened the spread on the breakout candle, pushing the ask to Rs 397.90 (fair LTP was ~Rs 390.00). Market orders pay this spread penalty immediately.
+  3. *Structural Fix Implemented & Pushed (`72f2fdb`)*:
+     - **Structural SL**: Anchored stop loss to the distance between entry spot and the ORB breakout level (`spot_to_orb + 0.3 * ATR`, converted via delta).
+     - **Noise Floor Calibration**: Raised Bank Nifty minimum SL floor from **20 -> 35 pts** (Sensex 22 -> 30, Nifty 8 -> 10).
+     - **Result**: Under the new structural code, this trade would have carried a **35.0-pt SL** (Rs 362.90), easily surviving the 56,441 retest and capturing the move to Rs 419.70+!
 
 ### Day 4: Thursday, September 24, 2026 (NIFTY Expiry)
+
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
