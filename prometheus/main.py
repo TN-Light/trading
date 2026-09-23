@@ -235,12 +235,35 @@ class Prometheus:
 
         # Capital
         cap_cfg = get_capital_config()
-        self.initial_capital = cap_cfg.get("initial", 200000)
+        self.initial_capital = cap_cfg.get("initial", 100000)
         if "initial" not in cap_cfg:
             logger.warning(
-                "capital.initial not found in settings.yaml — using default Rs 2,00,000. "
+                "capital.initial not found in settings.yaml — using default Rs 1,00,000. "
                 "Set capital.initial in config/settings.yaml to your actual capital."
             )
+
+        # Continuous Paper Ledger Balance Persistence (10-Day Crucible)
+        # Guarantees that paper trading capital accumulates/compounds across daily service restarts
+        # by anchoring starting capital to Baseline (Rs 1,00,000) + all historical realized Net PnL.
+        if mode in ("paper", "dry_run"):
+            try:
+                import sqlite3
+                ledger_db = PROJECT_ROOT.parent / "reports" / "papertrade" / "live_ledger.sqlite"
+                if ledger_db.exists():
+                    with sqlite3.connect(str(ledger_db)) as conn:
+                        cur = conn.cursor()
+                        cur.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades")
+                        cum_pnl = float(cur.fetchone()[0] or 0.0)
+                        baseline_cap = float(self.initial_capital)
+                        self.initial_capital = max(1000.0, baseline_cap + cum_pnl)
+                        logger.info(
+                            f"[CONTINUOUS CAPITAL] Persistent Paper Capital loaded from live_ledger.sqlite: "
+                            f"Baseline Rs {baseline_cap:,.2f} + Cumulative Net PnL Rs {cum_pnl:+,.2f} = "
+                            f"Rs {self.initial_capital:,.2f}"
+                        )
+            except Exception as e:
+                logger.warning(f"[CONTINUOUS CAPITAL] Could not load cumulative PnL from ledger: {e}")
+
         self.capital = self.initial_capital
 
         # Data Engine

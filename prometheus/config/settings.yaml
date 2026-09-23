@@ -94,7 +94,7 @@ capital:
       min_rr: 1.5
       name: 2L+ Institutional
       sl_atr_mult: 1.5
-  initial: 15000
+  initial: 100000
   max_correlated_exposure: 0.9
   max_deployment: 0.45
   max_single_trade: 0.45
@@ -409,16 +409,6 @@ market:
     pre_open_start: 09:00
     start: 09:15
 paper:
-  capital_overrides:
-    brackets:
-      tier1:
-        base_target: 5.0
-        max_capital: 29999
-        max_loss_per_trade: 300
-        min_margin: 0
-        min_rr: 2.5
-        name: 15K Paper Capture
-        sl_atr_mult: 1.0
   risk_overrides:
     consecutive_losses_pause: 10
     drawdown_halt_pct: 100.0
@@ -450,6 +440,7 @@ risk:
   max_daily_loss: 15000
   max_daily_loss_pct: 30.0
   max_daily_trades: 50
+  max_lots_per_trade: 1
   max_open_positions: 6
   max_single_position_pct: 30.0
   max_stop_loss_pct: 50.0

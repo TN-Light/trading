@@ -204,7 +204,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                     f"Confluence Edge Score: {score:.1f}/10"
                 ],
                 badge="🏆 <b>[TIER S: PERFECT STORM — FULL CONVICTION]</b>",
-                instruction="🔥 <b>ACTION:</b> Live Trade — Scaled Size (Max 2 Lots / 10% Capital Risk Cap)"
+                instruction="🔥 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution"
             )
 
         # Check if 0-DTE expiry session for this option buying signal
