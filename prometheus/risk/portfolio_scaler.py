@@ -5,14 +5,33 @@ class RiskPortfolioScaler:
     """
     Workstream E: Risk Management and Post-Tax Sizing Framework
     """
-    def __init__(self, initial_equity):
+    def __init__(self, initial_equity, db_path=None):
         self.peak_equity = initial_equity
         self.current_equity = initial_equity
+        from prometheus.risk.strategy_drift_supervisor import StrategyDriftSupervisor
+        self.drift_supervisor = StrategyDriftSupervisor(db_path=db_path)
 
     def update_equity(self, active_equity):
         self.current_equity = active_equity
         if self.current_equity > self.peak_equity:
             self.peak_equity = self.current_equity
+
+    def record_trade_result(self, pnl: float, strategy: str = "", trade_id: str = ""):
+        """Record trade in the drift supervisor for continuous learning."""
+        self.drift_supervisor.record_trade(pnl=pnl, strategy=strategy, trade_id=trade_id)
+
+    def get_strategy_drift_multiplier(self, strategy: str = "") -> float:
+        """
+        Component E4: BIS/SEC Algorithmic Drift & Non-Stationarity Supervisor.
+        Derates or quarantines strategies when rolling Profit Factor or Expectancy degrades.
+        """
+        return self.drift_supervisor.get_drift_multiplier(strategy)
+
+    def get_combined_multiplier(self, strategy: str = "") -> float:
+        """Combine drawdown defense with strategy drift defense."""
+        dd_mult = self.get_drawdown_multiplier()
+        drift_mult = self.get_strategy_drift_multiplier(strategy)
+        return min(dd_mult, drift_mult)
 
     def get_drawdown_multiplier(self):
         """

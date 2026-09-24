@@ -15,6 +15,7 @@ Date,Total_Trades,Wins,Losses,Win_Rate_Pct,Gross_Profit,Gross_Loss,Net_PnL,Capit
 2026-09-11,1,0,1,0.0,0.0,-6729.58,-6881.12,15000.0,-45.87,-24428.27,Deep gap-down (-0.8%) & massive V-reversal (+1351pt Bank Nifty). Morning MIDCAP PE trade caught on stale SQLite candle; system hardened to strictly reject stale cache during market hours.
 2026-09-15,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-24428.27,Intraday paper trading session
 2026-09-16,0,1,0,0.0,0.0,0.0,0.0,15000.0,0.0,-24428.27,Intraday paper trading session
-2026-09-21,3,1,2,33.3,211.25,-1417.85,-1347.06,100000.0,-1.35,-1347.06,"Day 1: 3 Bear Call Spreads (Tier C); 1 BE win (+Rs 87.47 net), 2 SL (-Rs 1434.53). 100% paper."
-2026-09-22,0,0,0,0.0,0.0,0.0,0.0,100000.0,0.0,-1347.06,"Day 2: 0 trades executed. Angle One missing 23800CE hedge contract identified and resolved."
-2026-09-23,4,1,3,25.0,216.62,-811.42,-933.54,100000.0,-0.93,-2280.60,"Day 3: BN 56500CE SL (-Rs902.84); BN 56600CE trailed win (+Rs8.64); NIFTY BE (-Rs26.37); SENSEX BE (-Rs12.97). Trailing stop saved ~Rs4500 from afternoon 600pt flush."
+2026-09-21,3,1,2,33.3,211.25,-1417.85,-1347.06,100000.0,-1.35,-25775.33,"Day 1: 3 Bear Call Spreads (Tier C); 1 BE win (+Rs 87.47 net), 2 SL (-Rs 1434.53). 100% paper."
+2026-09-22,0,0,0,0.0,0.0,0.0,0.0,100000.0,0.0,-25775.33,Day 2: 0 trades executed. Angle One missing 23800CE hedge contract identified and resolved.
+2026-09-23,4,1,3,25.0,216.62,-811.42,-933.54,100000.0,-0.93,-26708.87,Day 3: BN 56500CE SL (-Rs902.84); BN 56600CE trailed win (+Rs8.64); NIFTY BE (-Rs26.37); SENSEX BE (-Rs12.97). Trailing stop saved ~Rs4500 from afternoon 600pt flush.
+2026-09-24,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-26708.87,Intraday paper trading session

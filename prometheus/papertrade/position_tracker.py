@@ -605,18 +605,20 @@ class PositionTracker:
         if current_price > pos.high_water_mark:
             pos.high_water_mark = current_price
 
-        # Calculate exact cost buffer (brokerage + STT + GST + exchange turnover)
+        # Calculate exact cost buffer and symbol noise floor
         sym_root = (pos.underlying or pos.symbol or "").upper()
         if "SENSEX" in sym_root:
             cost_buffer_pts = 3.0   # ~Rs 60 costs / 20 lot size
+            min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
         elif "BANK" in sym_root:
             cost_buffer_pts = 1.9   # ~Rs 57 costs / 30 lot size
+            min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
         else:
             cost_buffer_pts = 0.9   # NIFTY default: ~Rs 56.30 costs / 65 lot size
+            min_be_gain = 2.0       # NIFTY default: tight noise floor, standard 0.4R is safe
 
         gain_pts = current_price - pos.entry_price
 
-        # Stage 1 — breakeven (at 50% target progress or +10 pts + brokerage or 0.4R progress)
         tgt_distance = (
             getattr(pos, "target_gain_pts", 0.0)
             or ((pos.target - pos.entry_price) if pos.target > pos.entry_price else 0.0)
@@ -624,14 +626,19 @@ class PositionTracker:
         be_gain_threshold = min(10.0, tgt_distance * 0.50) if tgt_distance > 0 else 10.0
         be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
 
-        # Sets SL to Entry + brokerage so the trade is guaranteed 100% zero-risk.
-        if not pos.breakeven_set and (gain_pts >= be_trigger_pts or progress >= 0.4):
+        # Progressive Ratchet Stage 2: Breakeven (100% Risk-Free Guarantee)
+        # For high-noise symbols (SENSEX/BANKNIFTY), moving SL to Entry + costs requires
+        # gaining at least min_be_gain points so the cushion to peak is outside noise.
+        # For NIFTY, 0.4R or be_trigger_pts is already sufficient.
+        can_breakeven = (gain_pts >= min_be_gain) and (progress >= 0.4 or gain_pts >= be_trigger_pts)
+        if not pos.breakeven_set and can_breakeven:
             new_sl = pos.entry_price + cost_buffer_pts
             # Only advance (never retreat)
             if new_sl > pos.stop_loss:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
                 pos.breakeven_set = True
+                pos.half_risk_set = True
                 logger.info(
                     f"[{pos.trade_id}] BREAKEVEN_SET: SL {old_sl:.2f} -> {new_sl:.2f} "
                     f"(Covering entry + Rs {cost_buffer_pts:.2f} brokerage/taxes at gain=+{gain_pts:.2f} pts)"
@@ -646,7 +653,32 @@ class PositionTracker:
                         self.on_sl_update(pos, old_sl, new_sl, "breakeven", current_price, gain_pts, cost_buffer_pts)
                     except Exception as e:
                         logger.error(f"on_sl_update breakeven callback failed: {e}")
-        # Stage 2 — lock 20% at 1.0R
+
+        # Progressive Ratchet Stage 1: Half-Risk Cut (Defense & Noise Tolerance)
+        # For SENSEX/BANKNIFTY when gain is between 0.4R and min_be_gain:
+        # Cuts downside risk by 50% while preserving a wide cushion outside noise floor.
+        elif not getattr(pos, "half_risk_set", False) and not pos.breakeven_set and (gain_pts >= be_trigger_pts or progress >= 0.4):
+            half_risk_sl = pos.entry_price - 0.50 * risk_distance
+            if half_risk_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = half_risk_sl
+                pos.half_risk_set = True
+                logger.info(
+                    f"[{pos.trade_id}] HALF_RISK_SET: SL {old_sl:.2f} -> {half_risk_sl:.2f} "
+                    f"(Risk cut 50% at gain=+{gain_pts:.2f} pts; cushion to peak is {current_price - half_risk_sl:.2f} pts)"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, half_risk_sl, "half_risk", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update half_risk callback failed: {e}")
+
+        # Stage 3 — lock 20% at 1.0R
         elif pos.breakeven_set and progress >= 1.0 and pos.trailing_floor < 0.20:
             lock = 0.20
             new_sl = pos.entry_price + lock * risk_distance

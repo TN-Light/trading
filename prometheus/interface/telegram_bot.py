@@ -1323,6 +1323,12 @@ class TelegramBot:
                 f"(Covers Entry + all brokerage & taxes). "
                 f"<i>This trade is now 100% risk-free and cannot lose money!</i>"
             )
+        elif "half_risk" in stage.lower():
+            headline = "🛡️ <b>TRAILING STOP: RISK CUT 50% (DEFENSIVE CUSHION)</b>"
+            action_desc = (
+                f"Move Stop Loss order on Kite/Zerodha to <b>Rs {new_sl:.2f}</b> "
+                f"(Cuts maximum risk by 50% while preserving breathing room outside market noise)."
+            )
         else:
             headline = f"📈 <b>TRAILING STOP ADVANCED ({stage.upper()})</b>"
             action_desc = f"Ratcheting profit lock: Move Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b>."

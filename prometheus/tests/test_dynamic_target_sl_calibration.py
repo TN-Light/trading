@@ -175,13 +175,20 @@ def test_position_tracker_breakeven_at_50pct_target_and_disk_persistence():
     assert not pos.breakeven_set
     assert pos.stop_loss == 390.0
 
-    # Price moves to 428.0 (+13.0 pts): Breakeven triggers!
+    # Price moves to 428.0 (+13.0 pts, 0.52R): Progressive Stage 1 (Half-Risk Cut) triggers!
+    # Cuts risk by 50%: 415.0 - 0.5 * 25.0 = 402.50 (cushion is 25.5 pts, outside noise floor)
     tracker._maybe_advance_trailing_stop(pos, 428.0)
-    assert pos.breakeven_set
+    assert pos.half_risk_set is True
+    assert not pos.breakeven_set
+    assert abs(pos.stop_loss - 402.50) < 1e-4
+
+    # Price moves to 437.0 (+22.0 pts, 0.88R >= 0.85R): Progressive Stage 2 (Breakeven) triggers!
+    tracker._maybe_advance_trailing_stop(pos, 437.0)
+    assert pos.breakeven_set is True
     expected_be_sl = 415.0 + 1.9  # Entry + brokerage
     assert abs(pos.stop_loss - expected_be_sl) < 1e-4
 
     # Critical: Check that recorder persisted the updated SL to disk!
-    assert len(mock_rec.recorded_open) >= 2
+    assert len(mock_rec.recorded_open) >= 3
     assert abs(mock_rec.recorded_open[-1]["stop_loss"] - expected_be_sl) < 1e-4
     assert mock_rec.recorded_open[-1]["breakeven_set"] == 1

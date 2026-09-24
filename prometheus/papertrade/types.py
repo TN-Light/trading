@@ -126,6 +126,7 @@ class Position:
 
     # Trailing/structural state (optional — the engine may not enable it)
     breakeven_set: bool = False
+    half_risk_set: bool = False
     trailing_floor: float = 0.0       # SL never goes below this after breakeven
     high_water_mark: float = 0.0      # for trailing stop logic if enabled
 

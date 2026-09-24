@@ -46,6 +46,7 @@ class TrailingState:
 
     # 5-stage flags (exactly match backtest engine.py:939-989)
     breakeven_set: bool = False
+    half_risk_set: bool = False
     trailing_activated: bool = False    # Stage 1
     trailing_stage2: bool = False       # Stage 2
     trailing_stage3: bool = False       # Stage 3
@@ -462,22 +463,40 @@ class PositionMonitor:
         price_for_trail = current_price
 
         if not state.breakeven_set:
-            # Stage 0: BREAKEVEN TRAP — triggers at 50% target progress or +10% gain (+8% in Low-VIX mode)
+            # Stage 0: Progressive Ratchet (Stage 0B Breakeven / Stage 0A Half-Risk Cut)
             be_pct = 1.08 if state.low_vix_mode else 1.10
             pct_trigger = entry * be_pct
             rd_trigger = entry + rd * state.breakeven_ratio if rd > 0 else pct_trigger
             tgt_distance = getattr(state, "target_gain_pts", 0.0) or ((state.target - entry) if state.target > entry else 0.0)
             tgt_trigger = (entry + tgt_distance * 0.50) if tgt_distance > 0 else pct_trigger
             be_trigger = min(pct_trigger, rd_trigger, tgt_trigger)
-            if price_for_trail >= be_trigger:
+
+            sym_root = (getattr(state, "symbol", "") or "").upper()
+            is_high_noise = ("SENSEX" in sym_root or "BANK" in sym_root)
+
+            # Stage 0B: Breakeven (At 0.85R for SENSEX/BANKNIFTY, or standard trigger for NIFTY)
+            can_be = (price_for_trail >= entry + rd * 0.85) if is_high_noise else (price_for_trail >= be_trigger)
+            if can_be:
                 new_sl = round(max(entry * 1.015, entry + max(rd * 0.10, entry * 0.015)), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
                     state.breakeven_set = True
+                    state.half_risk_set = True
                     stage_changed = True
                     logger.info(
-                        f"[TRAIL] {state.position_id} Stage 0 BREAKEVEN: "
+                        f"[TRAIL] {state.position_id} Stage 0B BREAKEVEN: "
                         f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f}, Entry={entry:.2f})"
+                    )
+            # Stage 0A: Half-Risk Cut (for high-noise symbols between be_trigger and 0.85R)
+            elif is_high_noise and not getattr(state, "half_risk_set", False) and price_for_trail >= be_trigger:
+                half_risk_sl = round(entry - 0.50 * rd, 2)
+                if half_risk_sl > state.current_sl:
+                    state.current_sl = half_risk_sl
+                    state.half_risk_set = True
+                    stage_changed = True
+                    logger.info(
+                        f"[TRAIL] {state.position_id} Stage 0A HALF-RISK: "
+                        f"SL {old_sl:.2f} -> {half_risk_sl:.2f} (LTP={price_for_trail:.2f}, Entry={entry:.2f})"
                     )
 
         elif not state.trailing_activated:

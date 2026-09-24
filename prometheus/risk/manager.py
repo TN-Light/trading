@@ -40,6 +40,7 @@ class RiskViolation(Enum):
     TRADING_HOURS = "outside_trading_hours"
     COOL_OFF = "cool_off_period"
     MAX_DAILY_TRADES = "max_daily_trades"
+    STRATEGY_DRIFT_DECAY = "strategy_drift_decay"
 
 
 @dataclass
@@ -149,7 +150,8 @@ class RiskManager:
 
         # Wire up Drawdown & Portfolio Scaler
         from prometheus.risk.portfolio_scaler import RiskPortfolioScaler
-        self.portfolio_scaler = RiskPortfolioScaler(initial_equity=initial_capital)
+        drift_db = config.get("drift_db_path", None)
+        self.portfolio_scaler = RiskPortfolioScaler(initial_equity=initial_capital, db_path=drift_db)
 
         # State tracking
         self._daily_pnl = 0.0
@@ -341,8 +343,10 @@ class RiskManager:
         if risk_per_unit <= 0:
             return {"lots": 0, "quantity": 0, "risk_amount": 0, "error": "Invalid SL"}
 
-        # Apply graduated drawdown multiplier from portfolio scaler
+        # Apply graduated drawdown and strategy drift multiplier from portfolio scaler
         dd_mult = self.portfolio_scaler.get_drawdown_multiplier() if hasattr(self, "portfolio_scaler") else 1.0
+        drift_mult = self.portfolio_scaler.get_strategy_drift_multiplier() if hasattr(self, "portfolio_scaler") else 1.0
+
         if dd_mult <= 0.0:
             return {
                 "lots": 0,
@@ -350,8 +354,16 @@ class RiskManager:
                 "risk_amount": 0,
                 "error": "Drawdown throttle active (>10% DD); trading halted"
             }
+        if drift_mult <= 0.0:
+            return {
+                "lots": 0,
+                "quantity": 0,
+                "risk_amount": 0,
+                "error": "Strategy quarantined: rolling Profit Factor < 1.0 in current market regime (BIS/SEC Drift Rule)"
+            }
 
-        max_units = (risk_amount * dd_mult) / risk_per_unit
+        combined_mult = min(dd_mult, drift_mult)
+        max_units = (risk_amount * combined_mult) / risk_per_unit
         lots = int(max_units / lot_size)  # ALWAYS round down
 
         # Small-account adaptation (BUG-4 fix):
@@ -457,6 +469,9 @@ class RiskManager:
 
         if hasattr(self, "portfolio_scaler"):
             self.portfolio_scaler.update_equity(self.current_capital)
+            strat = trade.get("strategy", "") if trade else ""
+            tid = trade.get("trade_id", "") if trade else ""
+            self.portfolio_scaler.record_trade_result(pnl=pnl, strategy=strat, trade_id=tid)
 
         # Track consecutive losses
         if pnl < 0:
