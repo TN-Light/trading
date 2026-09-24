@@ -532,7 +532,7 @@ Friday's session opened with an aggressive gap-down across all Indian benchmarks
 ## 📅 Entry 8: Thursday, September 24, 2026 — Day 4 Crucible Audit, The 950% Runner Anatomy, BIS/SEC Algorithmic Drift & Continuous Adaptation Architecture
 
 ### 1. Market Regime & Macro Environment
-* **Session Type:** Monthly Expiry Session (September 2026 Contracts Expiry) & Clean Institutional Trend Day.
+* **Session Type:** BSE SENSEX Weekly & Monthly Expiry Session (0-DTE) & Clean Institutional Trend Day.
 * **India VIX:** 11.30 – 11.39 (expanded from yesterday's 10.40 crush).
 * **Underlying Indices Action:**
   * **BSE SENSEX:** Spot opened at 74,400. At 10:15 AM, SENSEX broke below its 15M Opening Range Low and VWAP at 74,100. It subsequently cascaded down to 73,840.30 (-260 spot points drop) before finding support at 73,789.
@@ -614,7 +614,7 @@ Friday's session opened with an aggressive gap-down across all Indian benchmarks
 * **Cumulative Net P&L:** **-₹2,288.55**
 * **Continuous Preserved Account Balance:** **₹97,711.45 (97.71% Preserved)**
 * **Live Capital Lost:** **₹0.00 (Zero live broker capital at risk)**
-* **Next Session:** Day 5 (Friday, September 25, 2026 — SENSEX Weekly Expiry Session).
+* **Next Session:** Day 5 (Friday, September 25, 2026 — Regular Non-Expiry Session).
 
 ---
 

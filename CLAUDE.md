@@ -6,6 +6,21 @@
 - Broker: Zerodha Kite Connect
 - AI: 100% free multi-provider stack (Groq 70B → Gemini 2.0 Flash → Ollama + FinBERT + Sentence-Transformers)
 
+## ⚠️ MANDATORY RULE: Real Indian Index Derivatives Expiry Calendar (SEBI Rationalization)
+- **Only ONE weekly index derivative per exchange is permitted**:
+  - **NSE Benchmark**: **NIFTY 50** weekly options expire every **TUESDAY** (0-DTE on Tuesday, 1-DTE on Monday).
+  - **BSE Benchmark**: **SENSEX** weekly options expire every **THURSDAY** (0-DTE on Thursday, 1-DTE on Wednesday).
+- **All other indices (BANK NIFTY, FINNIFTY, MIDCAP, BANKEX) trade MONTHLY ONLY** (no weekly options):
+  - NSE monthly contracts expire on the last Tuesday of the month.
+  - BSE monthly contracts expire on the last Thursday of the month.
+- **Weekly Schedule**:
+  - **Monday**: Normal trading session (NIFTY 1-DTE).
+  - **Tuesday**: **NIFTY 50 Weekly Expiry Session (0-DTE)**.
+  - **Wednesday**: Normal trading session (SENSEX 1-DTE).
+  - **Thursday**: **BSE SENSEX Weekly Expiry Session (0-DTE)** (and monthly expiry on the last Thursday).
+  - **Friday**: **Regular Non-Expiry Trading Session** (NO indices expire on Friday!).
+- **NEVER state or hallucinate that Friday or Monday is SENSEX expiry.**
+
 ## Project Structure
 ```
 prometheus/

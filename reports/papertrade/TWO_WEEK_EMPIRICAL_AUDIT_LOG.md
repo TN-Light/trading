@@ -35,9 +35,19 @@ eports/papertrade/live_ledger.sqlite.
 
 ---
 
+4. **Real Indian Index Derivatives Expiry Calendar (SEBI Rationalization Truth)**:
+   - **Only ONE weekly index contract per exchange**:
+     - **NSE Benchmark**: **NIFTY 50** weekly options expire every **TUESDAY** (0-DTE Tuesday, 1-DTE Monday).
+     - **BSE Benchmark**: **SENSEX** weekly options expire every **THURSDAY** (0-DTE Thursday, 1-DTE Wednesday).
+   - **All other indices (BANK NIFTY, FINNIFTY, MIDCAP, BANKEX) trade MONTHLY ONLY** (no weekly options).
+   - **FRIDAY HAS NO EXPIRIES** (Regular non-expiry trading session).
+   - **Operational Rule**: Never state or hallucinate that Friday or Monday is SENSEX expiry.
+
+---
+
 ## 2. Daily Trading Audit Logs (Days 1 to 10)
 
-### Day 1: Monday, September 21, 2026 (SENSEX Expiry / NIFTY 1-DTE Spreads)
+### Day 1: Monday, September 21, 2026 (NIFTY 1-DTE Spreads Session)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `4EBDCC` | 10:03 | NIFTY 50 | `23450CE/23600CE` | Bear Call Spread | C | 8.5 | 32.10 | 9.60 | 48.00 | 28.85 | 10:30 | inactivity_kill_switch | 30m | +87.47 | +3.25 |
@@ -52,7 +62,7 @@ eports/papertrade/live_ledger.sqlite.
   3. *Telegram Alert Side Label*: Corrected `(BUY PE 65x)` label to `BEAR CALL SPREAD`.
   4. *Churn Guard*: Added same-instrument re-entry protection to paper capture.
 
-### Day 2: Tuesday, September 22, 2026 (NIFTY 0-DTE & FINNIFTY Expiry)
+### Day 2: Tuesday, September 22, 2026 (NIFTY 50 Weekly Expiry Session - 0-DTE)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | *NO TRADES* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | **Rs 0.00** | -- |
@@ -76,7 +86,7 @@ eports/papertrade/live_ledger.sqlite.
   3. *FINNIFTY Expiry Coverage*:
      - Added `NIFTY FIN SERVICE` to `intraday.instruments` in `settings.yaml` for active Tuesday expiry coverage.
 
-### Day 3: Wednesday, September 23, 2026 (BANKNIFTY Monthly Expiry Setup & Triple-Index Session)
+### Day 3: Wednesday, September 23, 2026 (SENSEX 1-DTE & Triple-Index Session)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `D379FD` | 10:03 | NIFTY BANK | `BANKNIFTY29SEP2656500CE` | BUY CE (Golden Setup) | B | 8.0 | 397.90 | 443.75 | 370.85 | 370.85 | 10:12 | stop_loss | 9m | -902.84 | -27.05 |
@@ -110,7 +120,7 @@ eports/papertrade/live_ledger.sqlite.
   4. *Continuous Capital & 1-Lot Lock Deployed (`ca5da7b`)*:
      - Deployed persistent Rs 100K continuous account ledger loading directly from `live_ledger.sqlite` across service restarts, with strict `max_lots_per_trade: 1`.
 
-### Day 4: Thursday, September 24, 2026 (Monthly Expiry & Trend Session)
+### Day 4: Thursday, September 24, 2026 (BSE SENSEX Weekly & Monthly Expiry Session - 0-DTE)
 
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -136,7 +146,7 @@ eports/papertrade/live_ledger.sqlite.
   5. *Permanent Mathematical Upgrade Deployed*: Implemented the **Progressive Half-Risk Ratchet** in `position_tracker.py` and `position_monitor.py`. At 0.4R progress, cuts risk by 50% (`Entry - 0.5 * Risk`) while preserving a 30+ point cushion outside the empirical noise floor (`min_be_gain`: 20.0 pts SENSEX, 18.0 pts Bank Nifty, 2.0 pts Nifty) before moving to full Breakeven. Unit tests passing (154 total).
   6. *Operational Incident (AI Operator Hallucination)*: During midday audit review, the AI assistant hallucinated by fabricating phantom Tier A and B trades for Day 4 that never took place. The user intervened and corrected the error. Deterministic query of `live_ledger.sqlite` confirms exactly ONE trade occurred today: `PAPER-20260924044849-2BDB15` (`SENSEX26SEP74100PE`). Strict protocol enforced: Zero Hallucination Policy mandates querying SQLite before stating any trade records.
 
-### Day 5: Friday, September 25, 2026 (SENSEX Expiry)
+### Day 5: Friday, September 25, 2026 (Regular Non-Expiry Session)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |

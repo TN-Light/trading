@@ -1,6 +1,6 @@
 # 🏛️ Day 4 Forensic Market Audit & Performance Report
 **Date:** Thursday, September 24, 2026  
-**Market Session:** Monthly Expiry Session (September 2026 Expiry) & Clean Trend Day  
+**Market Session:** BSE SENSEX Weekly & Monthly Expiry Session (0-DTE) & Clean Trend Day  
 **Operating Mode:** Paper Trading (100% Gated; Rs 0.00 Live Capital at Risk)  
 **Report Generation Time:** 2026-09-24 13:45:00 IST  
 
@@ -196,7 +196,7 @@ flowchart LR
 - **Cumulative Net P&L:** **-Rs 2,288.55**
 - **Continuous Preserved Account Balance:** **Rs 97,711.45 (97.71% Preserved)**
 - **Total Live Capital Lost:** **Rs 0.00 (Zero live broker exposure maintained)**
-- **System Ready for Day 5:** Friday, September 25, 2026 (SENSEX Weekly Expiry Session).
+- **System Ready for Day 5:** Friday, September 25, 2026 (Regular Non-Expiry Session).
 
 ---
 
