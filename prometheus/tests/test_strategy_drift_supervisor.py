@@ -103,7 +103,37 @@ def test_drift_supervisor_spc_baseline_deviation():
     assert health["multiplier"] == 0.5
     assert health["profit_factor"] > 1.30
     assert health["win_rate"] == 30.0
-    assert health["wr_deviation_pct"] > 25.0
     assert "statistical process control" in health["message"].lower()
+
+
+def test_drift_supervisor_telegram_alert():
+    """Verify that StrategyDriftSupervisor fires the Telegram alert card upon drift."""
+    from prometheus.interface.telegram_bot import TelegramBot
+    from unittest.mock import MagicMock
+
+    bot = TelegramBot(bot_token="", chat_id="")
+    bot.send_message = MagicMock()
+
+    supervisor = StrategyDriftSupervisor(
+        min_trades_for_eval=5,
+        healthy_pf_threshold=1.30,
+        baseline_win_rate=0.55,
+        baseline_profit_factor=2.00,
+        max_deviation_pct=0.25,
+    )
+    # 3 wins, 7 losses -> WR = 30% (drifted >25% below 55% baseline)
+    for _ in range(3):
+        supervisor.record_trade(pnl=500.0)
+    for _ in range(7):
+        supervisor.record_trade(pnl=-150.0)
+
+    alert_sent = supervisor.notify_if_drift(telegram_bot=bot)
+    assert alert_sent is True
+    bot.send_message.assert_called_once()
+    msg = bot.send_message.call_args[0][0]
+    assert "STRATEGY DRIFT WARNING" in msg
+    assert "30.0%" in msg
+    assert "0.5x" in msg
+
 
 

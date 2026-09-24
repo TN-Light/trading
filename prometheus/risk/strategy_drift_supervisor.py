@@ -177,3 +177,19 @@ class StrategyDriftSupervisor:
         """Return the dynamic risk multiplier (1.0, 0.5, or 0.0) based on regime health."""
         health = self.evaluate_regime_health(strategy)
         return float(health.get("multiplier", 1.0))
+
+    def notify_if_drift(self, telegram_bot: Any = None, strategy: str = "") -> bool:
+        """
+        Check if strategy has drifted and fire Telegram alert if degraded or decaying.
+        """
+        health = self.evaluate_regime_health(strategy)
+        status = health.get("status")
+        if status in ("DEGRADED", "DECAYING") and telegram_bot:
+            try:
+                if hasattr(telegram_bot, "alert_strategy_drift_warning"):
+                    telegram_bot.alert_strategy_drift_warning(health)
+                    return True
+            except Exception as e:
+                logger.warning(f"Failed to dispatch drift alert to Telegram: {e}")
+        return False
+

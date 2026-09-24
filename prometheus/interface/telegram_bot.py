@@ -1496,6 +1496,39 @@ class TelegramBot:
         )
         self.send_message(text)
 
+    def alert_strategy_drift_warning(self, drift_info: Dict):
+        """
+        Alert when Statistical Process Control (SPC) detects strategy drift or edge decay.
+        """
+        status = drift_info.get("status", "DEGRADED")
+        status_badge = "⚠️ <b>[STRATEGY DRIFT WARNING]</b>" if status == "DEGRADED" else "🚨 <b>[STRATEGY QUARANTINE]</b>"
+        mult = drift_info.get("multiplier", 1.0)
+        trades_count = drift_info.get("trades_count", 0)
+        wr = drift_info.get("win_rate", 0.0)
+        pf = drift_info.get("profit_factor", 0.0)
+        exp = drift_info.get("expectancy", 0.0)
+        base_wr = drift_info.get("baseline_win_rate", 0.55) * 100
+        base_pf = drift_info.get("baseline_profit_factor", 2.0)
+        wr_dev = drift_info.get("wr_deviation_pct", 0.0)
+        pf_dev = drift_info.get("pf_deviation_pct", 0.0)
+        reason = drift_info.get("message", "")
+
+        lines = [
+            f"{status_badge}",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"<b>Rolling Trades Evaluated:</b> <code>{trades_count} trades</code>",
+            f"<b>Realized Win Rate:</b> <code>{wr:.1f}%</code> (Baseline: <code>{base_wr:.1f}%</code> | Drift: <code>{wr_dev:+.1f}%</code>)",
+            f"<b>Realized Profit Factor:</b> <code>{pf:.2f}</code> (Baseline: <code>{base_pf:.2f}</code> | Drift: <code>{pf_dev:+.1f}%</code>)",
+            f"<b>Mathematical Expectancy:</b> <code>Rs {exp:+.2f}/trade</code>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"ℹ️ <b>Regime Diagnosis:</b>\n<i>{reason}</i>\n",
+            "🛡️ <b>AUTOMATED RISK ADAPTATION:</b>",
+            f"👉 <b>Exposure Sizing Multiplier:</b> <code>{mult}x</code> ({'Halved to 0.5x lot size' if mult == 0.5 else 'Quarantined to Paper Capture (0 lots)'})",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+        self.send_message("\n".join(lines))
+
+
     def alert_daily_summary(self, summary: Dict):
         """Send end-of-day summary."""
         pnl = summary.get("daily_pnl", 0)
