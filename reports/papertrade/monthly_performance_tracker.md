@@ -2,8 +2,8 @@
 
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 26,708.87 (-178.06%)**  
-**Last Updated:** 2026-09-24 16:00:06 IST  
+**Current Realized Net P&L:** **🔴 -Rs 26,716.82 (-178.11%)**  
+**Last Updated:** 2026-09-25 15:45:00 IST  
 
 ---
 
@@ -11,11 +11,11 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 26,708.87** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-178.06%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **20** | 20–22 days | In Progress |
+| **Net Realized P&L** | **-Rs 26,716.82** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-178.11%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **21** | 20–22 days | In Progress |
 | **Green / Red Days** | **5 Green / 9 Red / 6 BE** | > 65% Green | 25.0% |
-| **Total Trades** | **64** | ~3–5 / day | Tracked |
+| **Total Trades** | **65** | ~3–5 / day | Tracked |
 | **Win Rate** | **42.2%** (27W / 41L) | > 55.0% | ⚠️ Under Review |
 | **Profit Factor** | **0.51** | > 1.50 | ⚠️ Under Review |
 | **Gross Profit** | +Rs 26,571.99 | — | Winning Trades |
@@ -46,7 +46,8 @@
 | **2026-09-21** | 3 | 1W / 2L | 33% | +Rs 211 | -Rs 1,418 | **🔴 -Rs 1,347.1** | -1.4% | **-Rs 25,775.3** | Day 1: 3 Bear Call Spreads (Tier C); 1 BE win (+Rs 87.47 net), 2 SL (-Rs 1434.53). 100% paper. |
 | **2026-09-22** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 25,775.3** | Day 2: 0 trades executed. Angle One missing 23800CE hedge contract identified and resolved. |
 | **2026-09-23** | 4 | 1W / 3L | 25% | +Rs 217 | -Rs 811 | **🔴 -Rs 933.5** | -0.9% | **-Rs 26,708.9** | Day 3: BN 56500CE SL (-Rs902.84); BN 56600CE trailed win (+Rs8.64); NIFTY BE (-Rs26.37); SENSEX BE (-Rs12.97). Trailing stop saved ~Rs4500 from afternoon 600pt flush. |
-| **2026-09-24** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,708.9** | Intraday paper trading session |
+| **2026-09-24** | 1 | 0W / 1L | 0% | +Rs 60 | -Rs 68 | **🔴 -Rs 8.0** | -0.01% | **-Rs 26,716.8** | Day 4: SENSEX 74100PE trailed BE scratch (-Rs 7.95 net). MFE reached +138% (Rs 368.15). Progressive Half-Risk Ratchet deployed. |
+| **2026-09-25** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,716.8** | Day 5: 0 trades executed. 80-92% bars compressed inside 15M ORB across NIFTY, BANK NIFTY, SENSEX. Capital preserved (Rs 97,711.45). |
 
 ---
 

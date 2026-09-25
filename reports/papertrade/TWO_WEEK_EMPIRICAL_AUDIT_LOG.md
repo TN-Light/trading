@@ -149,12 +149,35 @@ eports/papertrade/live_ledger.sqlite.
 ### Day 5: Friday, September 25, 2026 (Regular Non-Expiry Session)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| *NO TRADES* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | **Rs 0.00** | -- |
 
-#### Week 1 Review (Days 1 to 5):
-- Total Trades: 0 | Option Buying Win Rate: 0% | Option Buying Net PnL: Rs 0.00
-- Credit Spread Win Rate: 0% | Credit Spread Net PnL: Rs 0.00
-- 45-Min Kill Switch Efficacy: 0 activations
+- **Day 5 Final Result**: 0 Trades | Net Realized PnL: **Rs 0.00** (Live & Paper).
+- **Persistent Continuous Account Balance (Option C Crucible)**:
+  - Starting Capital: **Rs 1,00,000.00**
+  - Day 1 Realized PnL: -Rs 1,347.06
+  - Day 2 Realized PnL: Rs 0.00
+  - Day 3 Realized PnL: -Rs 933.54
+  - Day 4 Realized PnL: -Rs 7.95
+  - Day 5 Realized PnL: Rs 0.00
+  - **Week 1 Ending Balance Carried into Week 2 (Day 6)**: **Rs 97,711.45 (97.71% Capital Preserved)**.
+- **Market Dynamics (Range-Bound Consolidation Trap)**:
+  - India VIX compressed to **12.16**.
+  - **NIFTY 50**: 20 of 25 bars (80%) closed strictly inside the 15M opening range (23,030.00–23,116.65). Breakout above ORB High only occurred at 14:15–15:15 PM, after the 14:15 PM hard cutoff.
+  - **NIFTY BANK**: 23 of 25 bars (92%) closed strictly inside the 15M ORB (55,373.75–55,645.20).
+  - **BSE SENSEX**: 19 of 25 bars closed inside the 15M ORB.
+- **Forensic Diagnosis & Empirical Learnings**:
+  1. *ORB Filter Capital Protection*: In low-VIX inside-day consolidation, false breakout entries suffer an 80%+ failure rate. The 15M ORB clearance filter successfully prevented taking 4 to 8 false breakout whipsaws.
+  2. *Credit Spread Expiry Distance Gate*: Today was Friday (no weekly expiries). Nearest weekly expiries were Tuesday (4 DTE for Nifty) and Thursday (6 DTE for Sensex). The rule strictly requiring <= 1 DTE for intraday credit spreads cleanly skipped trades, avoiding multi-day overnight delta exposure on minimal intraday theta.
+
+#### Week 1 Comprehensive Review (Days 1 to 5):
+- **Total Trades Recorded**: 8 trades (5 Option Buying, 3 Credit Spreads)
+- **Option Buying Record**: 5 Trades | 1 Win / 3 Breakeven Trailed / 1 Loss | Net Realized PnL: **-Rs 941.49** (Gross -Rs 534.80, Charges Rs 406.69) | **80.0% Non-Losing Trades**
+- **Credit Spread Record**: 3 Trades | 1 Win / 0 BE / 2 Losses | Net Realized PnL: **-Rs 1,347.06** (Win Rate: 33.3%)
+- **Cumulative Week 1 Net PnL**: **-Rs 2,288.55** (-2.29% account drawdown on continuous Rs 100K balance)
+- **Continuous Preserved Capital**: **Rs 97,711.45 (97.71% Preserved)** heading into Week 2
+- **Live Capital Lost**: **Rs 0.00 (Zero live broker capital at risk)**
+- **Trailing Stop Loss Efficacy**: Saved ~Rs 4,500 on Day 3 from a 600-point afternoon collapse
+- **45-Min Kill Switch Efficacy**: 1 activation (Day 1 Trade #1, preserved Rs 211 gross before permanent spread exemption deployed)
 
 ### Day 6: Monday, September 28, 2026
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |

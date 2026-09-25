@@ -48,20 +48,20 @@ def test_credit_spread_uses_live_option_chain_pricing():
         })
     df = pd.DataFrame(rows)
     
-    # Mock AngelOne option chain
+    # Mock AngelOne option chain (reflects 150-pt minimum index buffer for NIFTY 50)
     class MockAngelOneOptions:
         def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
-            if strike == 24400:
-                return {'ltp': 138.0, 'bid': 137.5, 'ask': 138.5, 'tradingsymbol': 'NIFTY26AUG24400CE'}
-            elif strike == 24550:
-                return {'ltp': 67.5, 'bid': 67.0, 'ask': 68.0, 'tradingsymbol': 'NIFTY26AUG24550CE'}
+            if strike == 24500:
+                return {'ltp': 138.0, 'bid': 137.5, 'ask': 138.5, 'tradingsymbol': 'NIFTY26AUG24500CE'}
+            elif strike == 24650:
+                return {'ltp': 67.5, 'bid': 67.0, 'ask': 68.0, 'tradingsymbol': 'NIFTY26AUG24650CE'}
             return None
             
     mock_chain = MockAngelOneOptions()
     sig = strategy.evaluate_spread(df, symbol='NIFTY 50', capital=15000, option_chain=mock_chain)
     
     assert sig is not None
-    # Verify live prices are used (Hedge BUY 24550 @ 67.5, Short SELL 24400 @ 138.0)
+    # Verify live prices are used (Hedge BUY 24650 @ 67.5, Short SELL 24500 @ 138.0)
     assert sig['legs'][0]['premium'] == 67.5
     assert sig['legs'][1]['premium'] == 138.0
     assert sig['net_credit'] == 70.5
