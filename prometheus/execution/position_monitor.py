@@ -411,20 +411,25 @@ class PositionMonitor:
                 self._on_exit(state.position_id, current_price, "time_stop")
             return
 
-        # ── 45-Minute (3-Bar) ATR-Adaptive Inactivity Kill-Switch ──
+        # ── 45-Minute (3-Bar) Trend-Aware Inactivity Kill-Switch ──
         # Liquidates stagnant option buying positions where underlying momentum has stalled (< 0.5*ATR)
-        # within 3 bars (45 min) to prevent prolonged theta decay.
+        # after 3 bars (45 min).
+        # Intelligent Trend-Aware Guard: If the underlying trend remains intact (consolidation flag),
+        # position hold is extended up to 6 bars (90 min) to let runners develop, while adverse reversals
+        # are killed immediately at 3 bars to eliminate theta decay.
         if state.trade_mode == "intraday" and state.entry_bar_count >= 3 and not state.breakeven_set:
             is_stagnant = False
             stagnation_detail = ""
+            spot_checked = False
 
-            # 1. Evaluate underlying spot progress against ATR if data engine and entry_spot are available
+            # 1. Evaluate underlying spot progress against ATR and Trend Health
             if self._data_engine and getattr(state, "entry_spot", 0.0) > 0:
                 try:
                     data = self._data_engine.fetch_historical(
                         state.symbol, days=3, interval=getattr(state, "bar_interval", "15minute")
                     )
                     if data is not None and len(data) >= 14:
+                        spot_checked = True
                         curr_spot = float(data.iloc[-1]["close"])
                         from prometheus.signals.technical import calculate_atr
                         atr_s = calculate_atr(data, period=14)
@@ -435,16 +440,49 @@ class PositionMonitor:
                             spot_disp = (curr_spot - state.entry_spot) if trade_is_bullish else (state.entry_spot - curr_spot)
                             min_progress = 0.5 * current_atr
                             if spot_disp < min_progress and current_price < entry * 1.05:
-                                is_stagnant = True
-                                stagnation_detail = (
-                                    f"underlying moved {spot_disp:+.1f} pts < 0.5*ATR ({min_progress:.1f} pts) "
-                                    f"and premium LTP={current_price:.2f} < 1.05x entry={entry*1.05:.2f}"
-                                )
+                                # Check trend health
+                                trend_intact = False
+                                try:
+                                    from prometheus.signals.technical import calculate_ema, calculate_supertrend
+                                    ema9 = float(calculate_ema(data["close"], period=9).iloc[-1])
+                                    ema21 = float(calculate_ema(data["close"], period=21).iloc[-1])
+                                    st_df = calculate_supertrend(data, period=10, multiplier=3.0)
+                                    st_dir = int(st_df["supertrend_direction"].iloc[-1]) if len(st_df) > 0 else 0
+
+                                    if trade_is_bullish:
+                                        trend_intact = (curr_spot >= state.entry_spot) and (ema9 >= ema21) and (st_dir == 1)
+                                    else:
+                                        trend_intact = (curr_spot <= state.entry_spot) and (ema9 <= ema21) and (st_dir == -1)
+                                except Exception as te:
+                                    logger.debug(f"Trend health check error: {te}")
+                                    trend_intact = False
+
+                                max_stagnation_bars = 6  # 90m max hold for intact trends
+                                if trend_intact and state.entry_bar_count < max_stagnation_bars:
+                                    is_stagnant = False
+                                    logger.info(
+                                        f"[MONITOR] Inactivity Kill-Switch deferred for {state.position_id}: "
+                                        f"underlying trend is INTACT (dir={state.direction}, spot={curr_spot:.2f}, "
+                                        f"entry_spot={state.entry_spot:.2f}). Holding in trend consolidation flag "
+                                        f"(bar {state.entry_bar_count}/{max_stagnation_bars})."
+                                    )
+                                else:
+                                    is_stagnant = True
+                                    if trend_intact and state.entry_bar_count >= max_stagnation_bars:
+                                        stagnation_detail = (
+                                            f"reached max trend extension ({state.entry_bar_count} bars / 90m) without 0.5*ATR advance; "
+                                            f"liquidating to stop theta decay"
+                                        )
+                                    else:
+                                        stagnation_detail = (
+                                            f"underlying moved {spot_disp:+.1f} pts < 0.5*ATR ({min_progress:.1f} pts) "
+                                            f"and trend is not intact (premium LTP={current_price:.2f})"
+                                        )
                 except Exception as e:
                     logger.debug(f"Error checking ATR progress in inactivity kill-switch for {state.position_id}: {e}")
 
-            # 2. Fallback: option premium stagnation (< +3% gain after 3 bars / 45 min)
-            if not is_stagnant and current_price < entry * 1.03:
+            # 2. Fallback: option premium stagnation (< +3% gain after 3 bars / 45 min) when spot check wasn't performed
+            if not is_stagnant and not spot_checked and current_price < entry * 1.03:
                 is_stagnant = True
                 stagnation_detail = f"premium LTP={current_price:.2f} <= Entry*1.03={entry*1.03:.2f}"
 

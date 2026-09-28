@@ -205,6 +205,10 @@ intraday:
     stagnation_bars_5min: 9   # 45 minutes
     atr_displacement_threshold: 0.5  # Spot must advance >= 0.5 * ATR_15m
     premium_gain_threshold_pct: 0.05  # Premium must gain >= +5% to avoid cut
+    trend_aware:
+      enabled: true
+      max_stagnation_bars_15min: 6  # 90 minutes max hold for intact trends
+      require_directional_alignment: true  # Spot must hold favorable relative to entry spot
   trailing_poll_seconds: 10
   v2:
     ab_test:

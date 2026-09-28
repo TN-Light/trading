@@ -116,6 +116,9 @@ class PositionTracker:
         session_close_time: time = DEFAULT_SESSION_CLOSE_TIME,
         recorder: Any = None,
         on_sl_update: Optional[Callable] = None,
+        data_engine: Any = None,
+        trend_aware: bool = True,
+        max_stagnation_bars: int = 6,
     ):
         self.fill_sim = fill_sim
         self.cost_model = cost_model or CostModel()
@@ -124,6 +127,9 @@ class PositionTracker:
         self.session_close_time = session_close_time
         self.recorder = recorder
         self.on_sl_update = on_sl_update
+        self.data_engine = data_engine or getattr(getattr(self.fill_sim, "feed", None), "_data_engine", None)
+        self.trend_aware = bool(trend_aware)
+        self.max_stagnation_bars = int(max_stagnation_bars)
 
         self.open_positions: Dict[str, Position] = {}
         self.closed_trades: List[PaperTrade] = []
@@ -391,6 +397,54 @@ class PositionTracker:
                         self._maybe_advance_trailing_stop(p, ltp)
         return closed
 
+    def _is_underlying_trend_intact(
+        self,
+        symbol: str,
+        direction: Direction,
+        current_spot: float,
+        entry_spot: float,
+        bar_interval: str = "15minute",
+    ) -> bool:
+        """Evaluate if the underlying trend is intact during a consolidation pause.
+        Checks:
+        1. Directional spot drift (spot has not drifted adversely against trade).
+        2. EMA9 vs EMA21 and SuperTrend direction if data_engine is available.
+        """
+        if current_spot <= 0 and hasattr(self, "fill_sim") and getattr(self.fill_sim, "feed", None):
+            try:
+                current_spot = float(self.fill_sim.feed.get_ltp(symbol) or 0.0)
+            except Exception:
+                current_spot = 0.0
+
+        if entry_spot <= 0 or current_spot <= 0:
+            return False
+
+        trade_is_bullish = (direction == Direction.LONG)
+        favorable_drift = (current_spot >= entry_spot) if trade_is_bullish else (current_spot <= entry_spot)
+        if not favorable_drift:
+            return False
+
+        # If data engine is available, verify EMA9/EMA21 and SuperTrend confirmation
+        data_eng = getattr(self, "data_engine", None)
+        if data_eng and hasattr(data_eng, "fetch_historical"):
+            try:
+                df = data_eng.fetch_historical(symbol, days=3, interval=bar_interval)
+                if df is not None and len(df) >= 14:
+                    from prometheus.signals.technical import calculate_ema, calculate_supertrend
+                    ema9 = float(calculate_ema(df["close"], period=9).iloc[-1])
+                    ema21 = float(calculate_ema(df["close"], period=21).iloc[-1])
+                    st_df = calculate_supertrend(df, period=10, multiplier=3.0)
+                    st_dir = int(st_df["supertrend_direction"].iloc[-1]) if len(st_df) > 0 else 0
+
+                    if trade_is_bullish:
+                        return (ema9 >= ema21) and (st_dir == 1)
+                    else:
+                        return (ema9 <= ema21) and (st_dir == -1)
+            except Exception as e:
+                logger.debug(f"Trend health check error for {symbol}: {e}")
+
+        return False
+
     def _evaluate_exit(
         self,
         pos: Position,
@@ -428,10 +482,13 @@ class PositionTracker:
         if snap.high >= tgt:
             return tgt, ExitReason.TARGET
 
-        # -- 2. 45-minute (3-bar) Inactivity Kill-Switch --------------------
+        # -- 2. 45-minute (3-bar) Trend-Aware Inactivity Kill-Switch --------
         # Liquidates stagnant option buying positions after 3 bars (45 min)
         # to prevent theta decay when underlying momentum fails to advance >= 0.5*ATR.
         # Strictly EXEMPT credit spreads (option selling), where stagnation benefits theta decay.
+        # Intelligent Trend-Aware Guard: If the underlying trend remains intact (consolidation flag),
+        # position hold is extended up to max_stagnation_bars (default 6 bars / 90 min) to let runners develop,
+        # while adverse reversals or broken trends are killed immediately at 3 bars.
         if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
@@ -444,7 +501,26 @@ class PositionTracker:
                 is_stagnant = True
 
             if is_stagnant:
-                return snap.close, ExitReason.INACTIVITY_KILL_SWITCH
+                trend_intact = False
+                if self.trend_aware:
+                    curr_spot = 0.0
+                    if entry_spot > 0:
+                        if snap.close > 0 and abs(snap.close - entry_spot) / entry_spot < 0.2:
+                            curr_spot = snap.close
+                    trend_intact = self._is_underlying_trend_intact(
+                        symbol=pos.symbol,
+                        direction=pos.direction,
+                        current_spot=curr_spot,
+                        entry_spot=entry_spot,
+                    )
+                if trend_intact and pos.bars_held < self.max_stagnation_bars:
+                    logger.info(
+                        f"[TRACKER] Inactivity Kill-Switch deferred for {pos.trade_id}: "
+                        f"underlying trend intact for {pos.symbol}. Holding in consolidation flag "
+                        f"(bar {pos.bars_held}/{self.max_stagnation_bars})."
+                    )
+                else:
+                    return snap.close, ExitReason.INACTIVITY_KILL_SWITCH
 
         # -- 3. Time stop — order matters: SL/target already checked above -
         # don't exit on time if SL/target was hit; but we exited earlier in
@@ -526,7 +602,10 @@ class PositionTracker:
         # Otherwise no LTP — skip SL/target evaluation this bar (don't
         # fabricate an exit price from the underlying snapshot).
 
-        # 45-minute (3-bar) Inactivity Kill-Switch via feed (strictly option buying only)
+        # 45-minute (3-bar) Trend-Aware Inactivity Kill-Switch via feed (strictly option buying only)
+        # Intelligent Trend-Aware Guard: If the underlying trend remains intact (consolidation flag),
+        # position hold is extended up to max_stagnation_bars (default 6 bars / 90 min) to let runners develop,
+        # while adverse reversals or broken trends are killed immediately at 3 bars.
         if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
@@ -541,8 +620,23 @@ class PositionTracker:
                 is_stagnant = True
 
             if is_stagnant:
-                exit_price = ltp if ltp > 0 else (pos.entry_price if pos.entry_price > 0 else snap.close)
-                return exit_price, ExitReason.INACTIVITY_KILL_SWITCH
+                trend_intact = False
+                if self.trend_aware:
+                    trend_intact = self._is_underlying_trend_intact(
+                        symbol=pos.symbol,
+                        direction=pos.direction,
+                        current_spot=current_spot,
+                        entry_spot=entry_spot,
+                    )
+                if trend_intact and pos.bars_held < self.max_stagnation_bars:
+                    logger.info(
+                        f"[TRACKER-FEED] Inactivity Kill-Switch deferred for {pos.trade_id}: "
+                        f"underlying trend intact for {pos.symbol} (spot={current_spot:.2f}, entry={entry_spot:.2f}). "
+                        f"Holding in consolidation flag (bar {pos.bars_held}/{self.max_stagnation_bars})."
+                    )
+                else:
+                    exit_price = ltp if ltp > 0 else (pos.entry_price if pos.entry_price > 0 else snap.close)
+                    return exit_price, ExitReason.INACTIVITY_KILL_SWITCH
 
         # Time stop: check max_bars (order matters: SL/target already checked above)
         max_bars = pos.max_bars_allowed or pos.max_bars

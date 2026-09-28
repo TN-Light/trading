@@ -258,6 +258,9 @@ class LivePaperCapture:
             enable_trailing=config.enable_trailing,
             recorder=self._recorder,
             on_sl_update=self._on_trailing_stop_updated,
+            data_engine=self._data_engine,
+            trend_aware=True,
+            max_stagnation_bars=6,
         )
         # PaperTradeEngine with high cap + allow_duplicate_instrument=True
         # so EVERY valid signal becomes a paper position (the user's stated
