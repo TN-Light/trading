@@ -179,10 +179,31 @@ eports/papertrade/live_ledger.sqlite.
 - **Trailing Stop Loss Efficacy**: Saved ~Rs 4,500 on Day 3 from a 600-point afternoon collapse
 - **45-Min Kill Switch Efficacy**: 1 activation (Day 1 Trade #1, preserved Rs 211 gross before permanent spread exemption deployed)
 
-### Day 6: Monday, September 28, 2026
+### Day 6: Monday, September 28, 2026 (NIFTY 1-DTE & Bearish Breakdown Session)
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| *TBD* | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |
+| `129738` | 09:45 | SENSEX | `SENSEX26O0173000PE` | BUY PE | C | 4.0 | 368.17 | 408.20 | 371.17 | 410.90 | 10:15 | target | 30m | +772.89 | +42.73 |
+| `B19931` | 10:30 | NIFTY 50 | `NIFTY29SEP2622850PE` | BUY PE | B | 8.0 | 75.33 | 104.35 | 76.23 | 77.32 | 10:45 | stop_loss (trailed) | 15m | +56.44 | +1.99 |
+| `9C390F` | 10:30 | SENSEX | `SENSEX26O0172900PE` | BUY PE | B | 8.0 | 368.62 | 446.50 | 347.31 | 378.20 | 11:00 | inactivity_kill_switch | 30m | +111.21 | +9.58 |
+| `51BEB7` | 11:00 | NIFTY FIN SERVICE | `FINNIFTY29SEP2624700PE` | BUY PE | B | 8.0 | 117.62 | 155.90 | 100.70 | 111.50 | 11:30 | inactivity_kill_switch | 30m | -445.44 | -6.12 |
+| `0810B6` | 11:00 | NIFTY 50 | `NIFTY29SEP2622800PE` | BUY PE | B | 8.0 | 59.06 | 87.60 | 42.30 | 56.25 | 11:30 | inactivity_kill_switch | 30m | -252.16 | -2.81 |
+| `23E66B` | 10:15 | NIFTY BANK | `BANKNIFTY29SEP2654600PE` | BUY PE | B | 8.0 | 223.67 | 303.65 | 225.57 | 225.57 | 11:30 | stop_loss (trailed BE) | 75m | -21.27 | +1.90 |
+
+- **Day 6 Final Result**: 6 Trades | 3 Wins / 1 Breakeven Trailed / 2 Losses | Net Realized PnL: **🟢 +Rs 221.67** (Gross +Rs 683.33, Costs Rs 461.66).
+- **Persistent Continuous Account Balance (Option C Crucible)**:
+  - Starting Capital: **Rs 1,00,000.00**
+  - Week 1 Realized Net PnL (Days 1–5): -Rs 2,288.55
+  - Day 6 Realized Net PnL: **+Rs 221.67**
+  - **Ending Balance Carried into Day 7**: **Rs 97,933.12 (97.93% Capital Preserved)**.
+- **Market Dynamics (Institutional Bear Trend & ORB Shatter)**:
+  - **NIFTY 50**: Open 23,064.90 | Low 22,671.85 | Close 22,780.25 (-284.65 pts / -1.23%). 15M ORB Low (22,905.25) shattered on candle 2.
+  - **NIFTY BANK**: Open 55,347.80 | Low 54,276.25 | Close 54,471.65 (-876.15 pts / -1.58%). Cascaded -1,071 points from the morning high.
+  - **BSE SENSEX**: Open 73,734.83 | Low 72,716.23 | Close 72,771.72 (-963.11 pts / -1.31%). Broke ORB Low at 09:30 AM.
+- **Forensic Diagnosis & Empirical Learnings**:
+  1. *Zero Hard Stop Loss Hits (-1.0R Disasters Eliminated)*: Not a single trade hit its initial hard stop loss. Every exit was actively managed by Prometheus algorithms: 1 clean Target Hit (+Rs 772.89), 2 Trailed Profit/BE Locks (+Rs 56.44, -Rs 21.27), and 3 Inactivity Kill-Switch early cuts.
+  2. *Live Validation of Progressive Half-Risk Ratchet*: Trade #3 (`SENSEX26O0172900PE`) tightened SL from 326.00 to 347.31 (cutting risk 50%) while keeping a 39-point cushion outside empirical noise, surviving pullback and exiting at +Rs 111.21 profit.
+  3. *Inactivity Kill Switch Saved Rs 1,400+*: Stagnant trades entering midday chop were closed after 30 min rather than holding into initial hard SLs.
+  4. *Lunch Dead Zone Discipline*: Zero trades taken between 11:30 and 15:15 IST, protecting morning gains.
 
 ### Day 7: Tuesday, September 29, 2026
 | Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry (Rs) | Target (Rs) | SL (Rs) | Exit (Rs) | Exit Time | Exit Reason | Dur (m) | Net PnL (Rs) | Pts |
