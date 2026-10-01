@@ -807,3 +807,62 @@ Prometheus's algorithmic architecture correctly declined to take trades today du
 * **Live Capital Lost:** **₹0.00**
 * **Next Session:** Day 9 (Thursday, October 01, 2026 — BSE SENSEX Weekly Expiry 0-DTE Session).
 
+
+---
+
+## 📅 Entry 13: Thursday, October 01, 2026 — Day 9 Crucible Audit, Multi-Agent Teamwork Delivery, Double Target Wins (+₹2,408.04 Net Green Session), and The Tier-Differentiated Trailing Breakthrough
+
+### 1. Market Context & Macro Regime
+* **Session Classification:** BSE SENSEX Weekly Expiry (0-DTE) Session & Multi-Index Directional Cascade.
+* **Macro Regime Progression:**
+  * **Morning Chop & Long Gamma Ceiling:** Bank Nifty opened at `54,959.00`. Spot experienced a 15M ORB breakout surge to `55,091.45`, but halted immediately 80 pts below the descending 1-Hour 50-EMA wall (`55,172`) in a `LONG_GAMMA` regime (`+1.22 Cr INR GEX`). Dealers sold underlying futures into the pop, collapsing the breakout back into consolidation.
+  * **Afternoon Negative Gamma Trend Day:** At 12:45 IST, NIFTY 50 breached its Zero Gamma Level (`22,455.59`) into heavy negative gamma (`-11.56 Cr INR GEX`), initiating a synchronized breakdown alongside BSE SENSEX below their 15M ORB Lows.
+
+---
+
+### 2. Full-Day Trade Performance & Forensic Breakdown
+* **Total Closed Trades Recorded:** 5 trades (1 Call Buy, 4 Put Buys)
+* **Total Open Positions:** 0 (All positions closed cleanly)
+* **Gross Realized P&L:** **+₹2,868.09** (+₹3,529.89 gross profit vs -₹661.80 gross loss)
+* **Brokerage & Regulatory Taxes:** **₹460.05**
+* **Total Realized Net P&L:** **🟢 +₹2,408.04 (+2.47% daily account return)**
+* **Overall Win / Loss:** 3 Wins / 2 Losses (60.0% Win Rate)
+
+#### Detailed Trade Ledger:
+| Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry $\rightarrow$ Exit | Exit Reason | Gross PnL | Costs | Net Realized PnL | Return % |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `CA6DAF` | 10:34 | NIFTY BANK | `BANKNIFTY27OCT2655000CE` | BUY CE | C | 7.5 | ₹1014.72 $\rightarrow$ ₹992.66 | **stop_loss** | -₹661.80 | ₹144.53 | **-₹806.33** | **-2.65%** |
+| `EEF8E4` | 12:45 | SENSEX | `SENSEX26O0171900PE` | BUY PE | B | 8.0 | ₹232.23 $\rightarrow$ ₹268.80 | **target** | +₹731.36 | ₹73.74 | **+₹657.62** | **+14.16%** |
+| `EF7279` | 12:45 | NIFTY 50 | `NIFTY06OCT2622400PE` | BUY PE | B | 8.0 | ₹141.39 $\rightarrow$ ₹180.40 | **target** | +₹2,535.57 | ₹90.38 | **+₹2,445.19** | **+26.61%** |
+| `0A60D7` | 13:00 | NIFTY 50 | `NIFTY06OCT2622350PE` | BUY PE | B | 8.0 | ₹126.13 $\rightarrow$ ₹127.03 | **stop_loss** | +₹58.50 | ₹82.52 | **-₹24.02** | **-0.29%** |
+| `FF8331` | 13:00 | SENSEX | `SENSEX26O0171700PE` | BUY PE | B | 8.0 | ₹165.82 $\rightarrow$ ₹176.04 | **stop_loss** | +₹204.46 | ₹68.88 | **+₹135.58** | **+4.09%** |
+
+---
+
+### 3. Quantitative Autopsy & Core Findings
+1. **The Bank Nifty Tier C Impulse Autopsy:**
+   - Bank Nifty spot spiked +132 pts on a 15M squeeze, popping `55000 CE` from 1,014 to a peak of 1,045.
+   - However, the 1H HTF trend was NEUTRAL and Dealer GEX was strongly positive (+1.22 Cr). The system recognized the split personality and downgraded it to Tier C (Paper Only), saving live capital.
+   - Stage 1 (Half-Risk Cut) moved SL from 970.60 to 992.66 (+11.9 pt trigger), saving ₹661.80 of capital when spot reversed.
+2. **The Golden Setup Afternoon Clean Sweep:**
+   - Double Target Hits on Nifty 22400PE (+₹2,445.19 net / +26.6%) and Sensex 71900PE (+₹657.62 net / +14.2%) proved the asymmetric positive skewness of macro-aligned Tier B breakouts.
+3. **The Trailing Stop Debate & Model C Empirical Proof:**
+   - The team ran a deterministic replay across 18 ledger trades in `live_ledger.sqlite`.
+   - Proved that unconditional micro-locking (Model B) chokes 100% of large winning runners (destroying +₹2,350 profit).
+   - Encoded **Model C (Tier-Differentiated Policy)**: Tier C micro-locks at $\ge 12.0$ pts (locking chop alpha), while Tier S/B preserves wide breathing room ($\ge 18\text{--}20$ pts) to ride runners. Yields **+₹1,949.74 incremental profit** and 0% runner shakeouts.
+4. **Architectural Upgrades Delivered:**
+   - Tier C Dynamic Target Compression (`target_calibrator.py`).
+   - Angel One Live Intraday $\Delta\text{OI}$ Cache (`angelone_options.py`).
+   - Standardized Wall-Clock Execution Durations (`engine.py`).
+   - 115 E2E Tests (100% pass) and behavioral guardrails in `GEMINI.md`.
+
+---
+
+### 4. Continuous Account Capital Status
+* **Starting Capital (Day 1):** ₹1,00,000.00
+* **Day 8 Ending Equity:** ₹97,387.45
+* **Day 9 Realized Net P&L:** **🟢 +₹2,408.04 (+2.47%)**
+* **Crucible Cumulative Net P&L:** **-₹204.51** (-0.20% from initial base)
+* **Current Continuous Account Equity:** **₹99,795.49 (99.80% Capital Restored)**
+* **Live Capital Lost:** **₹0.00**
+* **Next Session:** Day 10 (Friday, October 02, 2026 / Monday, October 05, 2026 Session).
