@@ -1,0 +1,2 @@
+trade_id,symbol,instrument,underlying,direction,quantity,entry_price,exit_price,entry_time,exit_time,exit_reason,gross_pnl,costs,net_pnl,return_pct,holding_duration_seconds,strategy,signal_score,signal_confidence,stop_loss,target
+PAPER-20260718070222-F2691B,NIFTY 50,NIFTY26JUN23850CE,NIFTY,LONG,65,463.944875,23917.75,2026-06-24T10:00:00,2026-06-24T10:15:00,target,1524497.33,158.48,1524338.85,5054.77,900,pro_LiqSweep+RSI_Div,0.0,0.3908971225550196,460.9423076923077,522.6059049999996

@@ -3,6 +3,11 @@ from datetime import datetime, timezone, timedelta
 from prometheus.papertrade.position_tracker import PositionTracker, CostModel
 from prometheus.papertrade.types import Position, Direction, TradeSnapshot
 from prometheus.papertrade.fill_simulator import FillSimulator
+from prometheus.signals.target_calibrator import (
+    calibrate_target_and_sl,
+    calculate_structural_sl,
+    TargetCalibrationResult,
+)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -192,3 +197,179 @@ def test_position_tracker_breakeven_at_50pct_target_and_disk_persistence():
     assert len(mock_rec.recorded_open) >= 3
     assert abs(mock_rec.recorded_open[-1]["stop_loss"] - expected_be_sl) < 1e-4
     assert mock_rec.recorded_open[-1]["breakeven_set"] == 1
+
+
+# =====================================================================
+# R1 Tests: Tier C Adaptive Target Compression & Retest Expansion Bypass
+# =====================================================================
+
+def test_tier_c_banknifty_positive_gamma_compression():
+    """Verify that Tier C Bank Nifty in positive gamma (LONG_GAMMA) compresses to [20.0, 30.0] pts."""
+    res = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=56100.0,
+        spot_atr=88.0,
+        opt_ltp=415.0,
+        edge_score=5.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=12211530.95,
+    )
+    assert res.is_compressed is True
+    assert 20.0 <= res.target_gain_pts <= 30.0
+    # Expected: round(44.0 * 0.55, 1) = 24.2 pts
+    assert res.target_gain_pts == pytest.approx(24.2, rel=1e-2)
+    assert res.tgt_price == round(415.0 + 24.2, 2)
+    assert res.breakeven_trigger_pts == round(24.2 * 0.50, 1)
+
+
+def test_tier_c_banknifty_counter_trend_compression():
+    """Verify that Tier C Bank Nifty counter-trend (not is_htf_aligned) compresses to [20.0, 30.0] pts even in neutral gamma."""
+    res = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=56100.0,
+        spot_atr=88.0,
+        opt_ltp=415.0,
+        edge_score=5.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="NEUTRAL",
+        net_gex=0.0,
+    )
+    assert res.is_compressed is True
+    assert 20.0 <= res.target_gain_pts <= 30.0
+    assert res.target_gain_pts == pytest.approx(24.2, rel=1e-2)
+
+
+def test_tier_c_wide_structural_sl_bypasses_retest_expansion():
+    """
+    Verify that Tier C signals with wide structural SL strictly BYPASS dynamic retest expansion.
+    Under standard logic, sl_pts * 1.2 = 89.8 * 1.2 = 107.8 pts would inflate the target.
+    Under Tier C compression, retest expansion is bypassed and target remains at scalp boundary (24.2 pts).
+    """
+    res = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=54778.90,
+        spot_atr=88.0,
+        opt_ltp=1055.05,
+        edge_score=5.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=12211530.95,
+        structural_sl_pts=89.8,
+    )
+    # Target MUST remain compressed and strictly bypass expansion
+    assert res.is_compressed is True
+    assert 20.0 <= res.target_gain_pts <= 30.0
+    assert res.target_gain_pts == pytest.approx(24.2, rel=1e-2)
+    assert res.target_gain_pts < 35.0  # Must NOT inflate to 107.8 pts!
+    # SL preserves structural protection
+    assert res.sl_pts == pytest.approx(89.8, rel=1e-2)
+
+
+def test_tier_b_retains_uncompressed_target_and_retest_expansion():
+    """
+    Verify that Tier B (e.g. Institutional Trend Day / Golden Setup) retains full uncompressed
+    multi-ATR target calculation and dynamic retest expansion up to 107.8 pts.
+    """
+    res = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=54778.90,
+        spot_atr=88.0,
+        opt_ltp=1055.05,
+        edge_score=6.5,
+        tier="B",
+        is_htf_aligned=True,
+        gamma_regime="LONG_GAMMA",
+        net_gex=12211530.95,
+        structural_sl_pts=89.8,
+    )
+    assert res.is_compressed is False
+    # Retest expansion MUST trigger: max(target, round(89.8 * 1.2, 1)) = 107.8 pts
+    assert res.target_gain_pts == pytest.approx(107.8, rel=1e-2)
+    assert res.sl_pts == pytest.approx(89.8, rel=1e-2)
+
+
+def test_tier_s_perfect_storm_uncompressed_target():
+    """Verify that Tier S Perfect Storm retains uncompressed multi-ATR runner targets."""
+    res = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=56100.0,
+        spot_atr=88.0,
+        opt_ltp=415.0,
+        edge_score=8.5,
+        tier="S",
+        is_htf_aligned=True,
+        gamma_regime="SHORT_GAMMA",
+        net_gex=-15000000.0,
+        structural_sl_pts=35.0,
+    )
+    assert res.is_compressed is False
+    # eom = 44.0, quality_mult = 1.15 => 50.6 pts
+    assert res.target_gain_pts == pytest.approx(50.6, rel=1e-2)
+    assert res.target_gain_pts > 45.0
+
+
+def test_tier_c_sensex_compression():
+    """Verify that Tier C SENSEX signals in positive gamma compress to [22.0, 32.0] pts."""
+    res = calibrate_target_and_sl(
+        symbol="SENSEX",
+        spot_price=82000.0,
+        spot_atr=98.0,
+        opt_ltp=350.0,
+        edge_score=5.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=53660506.23,
+    )
+    assert res.is_compressed is True
+    assert 22.0 <= res.target_gain_pts <= 32.0
+    # Expected: round(49.0 * 0.55, 1) = 27.0 pts
+    assert res.target_gain_pts == pytest.approx(27.0, rel=1e-2)
+
+
+def test_tier_c_nifty_compression():
+    """Verify that Tier C NIFTY 50 signals in positive gamma compress to [8.0, 14.0] pts."""
+    res = calibrate_target_and_sl(
+        symbol="NIFTY 50",
+        spot_price=25000.0,
+        spot_atr=25.0,
+        opt_ltp=120.0,
+        edge_score=5.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=94883049.03,
+    )
+    assert res.is_compressed is True
+    assert 8.0 <= res.target_gain_pts <= 14.0
+    # Expected: round(12.5 * 0.75, 1) = 9.4 pts
+    assert res.target_gain_pts == pytest.approx(9.4, rel=1e-2)
+
+
+def test_interface_contract_5tuple_unpacking():
+    """Verify that calibrate_target_and_sl return value unpacks into a 5-tuple matching the PROJECT.md interface contract."""
+    res = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=56100.0,
+        spot_atr=88.0,
+        opt_ltp=415.0,
+        edge_score=5.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=12211530.95,
+        structural_sl_pts=35.0,
+    )
+    target_gain_pts, sl_pts, tgt_price, sl_price, is_compressed = res
+    assert target_gain_pts == pytest.approx(24.2, rel=1e-2)
+    assert sl_pts == pytest.approx(35.0, rel=1e-2)
+    assert tgt_price == pytest.approx(439.2, rel=1e-2)
+    assert sl_price == pytest.approx(380.0, rel=1e-2)
+    assert is_compressed is True
+    assert res["target_gain_pts"] == target_gain_pts
+    assert res.to_dict()["is_compressed"] is True
+

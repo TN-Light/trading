@@ -193,6 +193,11 @@ intraday:
     lunch_dead_zone_end: '13:15'
     afternoon_start: '13:15'
     afternoon_end: '14:15'
+  trend_day_bypass:
+    enabled: true
+    min_adx: 25.0
+    min_volume_mult: 1.5
+    allow_lunch_continuation: true
   risk_per_trade_pct: 2.0
   scan_interval_seconds: 180
   skip_first_minutes: 15
@@ -303,6 +308,8 @@ intraday:
       strike_otm_steps: 1
       hedge_otm_steps: 3
       min_credit_pct: 0.15
+      max_days_to_expiry: 3
+      strategy_preference: credit_spread
     premium_targeting_enabled: true
     profiles:
       tier1:

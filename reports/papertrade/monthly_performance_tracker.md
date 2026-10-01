@@ -2,8 +2,8 @@
 
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 26,716.82 (-178.11%)**  
-**Last Updated:** 2026-09-28 16:00:30 IST  
+**Current Realized Net P&L:** **🔴 -Rs 27,040.82 (-180.27%)**  
+**Last Updated:** 2026-10-01 16:00:07 IST  
 
 ---
 
@@ -11,15 +11,15 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 26,495.15** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-176.63%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **22** | 20–22 days | In Progress |
-| **Green / Red Days** | **5 Green / 10 Red / 7 BE** | > 65% Green | 22.7% |
-| **Total Trades** | **71** | ~3–5 / day | Tracked |
-| **Win Rate** | **46.2%** (30W / 42L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.51** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 26,631.99 | — | Winning Trades |
-| **Gross Loss** | -Rs 51,785.41 | — | Losing Trades |
+| **Net Realized P&L** | **-Rs 27,040.82** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-180.27%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **25** | 20–22 days | In Progress |
+| **Green / Red Days** | **6 Green / 11 Red / 8 BE** | > 65% Green | 24.0% |
+| **Total Trades** | **74** | ~3–5 / day | Tracked |
+| **Win Rate** | **47.3%** (35W / 46L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.54** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 29,466.66 | — | Winning Trades |
+| **Gross Loss** | -Rs 54,525.69 | — | Losing Trades |
 
 ---
 
@@ -48,7 +48,10 @@
 | **2026-09-23** | 4 | 1W / 3L | 25% | +Rs 217 | -Rs 811 | **🔴 -Rs 933.5** | -0.9% | **-Rs 26,708.9** | Day 3: BN 56500CE SL (-Rs902.84); BN 56600CE trailed win (+Rs8.64); NIFTY BE (-Rs26.37); SENSEX BE (-Rs12.97). Trailing stop saved ~Rs4500 from afternoon 600pt flush. |
 | **2026-09-24** | 1 | 0W / 1L | 0% | +Rs 60 | -Rs 68 | **🔴 -Rs 8.0** | -0.0% | **-Rs 26,716.8** | Day 4: SENSEX 74100PE trailed BE scratch (-Rs 7.95 net after charges). MFE reached +138% (Rs 368.15). Progressive Half-Risk Ratchet deployed. |
 | **2026-09-25** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,716.8** | Day 5: 0 trades executed. 80-92% bars compressed inside 15M ORB across NIFTY, BANK NIFTY, SENSEX. Capital preserved (Rs 97,711.45). |
-| **2026-09-28** | 6 | 3W / 3L | 50% | +Rs 683 | -Rs 462 | **🟢 +Rs 221.7** | +0.2% | **-Rs 26,495.2** | Day 6: 6 Put buys in massive bear trend. 1 Target hit (+Rs 773), 2 Trailed/Kill profit locks (+Rs 168), 1 BE scratch (-Rs 21), 2 kill cuts (-Rs 698). Net green +Rs 221.67. |
+| **2026-09-28** | 6 | 3W / 3L | 50% | +Rs 683 | -Rs 462 | **🟢 +Rs 221.7** | +0.2% | **-Rs 26,495.2** | Day 6: 6 Put buys in massive bear trend. 1 Target hit (+Rs 772.89), 2 Trailed/Kill profit locks (+Rs 167.65), 1 BE scratch (-Rs 21.27), 2 early kill cuts (-Rs 697.60). Net green +Rs 221.67. |
+| **2026-09-29** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,495.2** | Day 7: 0 trades executed. Capital preserved (Rs 97,933.12). |
+| **2026-09-30** | 3 | 2W / 1L | 67% | +Rs 2,151 | -Rs 2,279 | **🔴 -Rs 545.7** | -0.6% | **-Rs 27,040.8** | Day 8 (Bank Nifty Expiry): 2 Target Wins (BN 54700CE +Rs 1166.54, SENSEX 73500/73900CE spread +Rs 711.11), 1 SL (-Rs 2423.32, BN 54800CE -165pt retest shakeout). Net P&L: -Rs 545.67. 66.7% win rate. |
+| **2026-10-01** | 0 | 3W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 27,040.8** | Intraday paper trading session |
 
 ---
 

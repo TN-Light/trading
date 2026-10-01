@@ -1,0 +1,2 @@
+trade_id,symbol,instrument,underlying,direction,quantity,entry_price,exit_price,entry_time,exit_time,exit_reason,gross_pnl,costs,net_pnl,return_pct,holding_duration_seconds,strategy,signal_score,signal_confidence,stop_loss,target
+PAPER-20260718105150-AEE582,NIFTY 50,NIFTY2520623700CE,NIFTY,LONG,65,610.8649250000001,102.9044184785107,2025-02-01T14:15:00,2025-02-01T14:30:00,stop_loss,-33017.43,4.64,-33022.07,-83.17,900,pro_LiqSweep+VP,0.0,0.35892013175044324,607.6423076923078,692.8592628571428

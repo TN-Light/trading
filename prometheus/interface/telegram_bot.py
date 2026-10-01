@@ -835,7 +835,7 @@ class TelegramBot:
             copy_boxes = ""
             for leg in legs:
                 leg_act = leg.get("action", "BUY")
-                leg_sym = leg.get("tradingsymbol", "")
+                leg_sym = leg.get("tradingsymbol") or leg.get("symbol") or leg.get("instrument") or ""
                 leg_prem = float(leg.get("premium", 0.0) or 0)
                 leg_stk = leg.get("strike", 0)
                 leg_opt = leg.get("option_type", "")
@@ -1021,12 +1021,25 @@ class TelegramBot:
                 else:
                     kite_search = f"{und} {int(float(strike))} {option_type}"
 
-        copy_box = (
-            f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
-            f"<code>{kite_search}</code>\n"
-            f"<i>Contract: <code>{tradingsymbol}</code></i>\n"
-            if kite_search else ""
-        )
+        if "/" in tradingsymbol:
+            parts = tradingsymbol.split("/")
+            leg1_clean = human_search_name_from_api_symbol(parts[0].strip())
+            leg2_clean = human_search_name_from_api_symbol(parts[1].strip())
+            copy_box = (
+                f"\n📋 <b>Zerodha Kite Basket Orders (Tap to Copy):</b>\n"
+                f"1️⃣ <b>BUY Hedge First (Margin Relief):</b>\n"
+                f"<code>{leg2_clean}</code>\n"
+                f"2️⃣ <b>SELL Main Leg:</b>\n"
+                f"<code>{leg1_clean}</code>\n"
+                f"<i>Contracts: <code>{tradingsymbol}</code></i>\n"
+            )
+        else:
+            copy_box = (
+                f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
+                f"<code>{kite_search}</code>\n"
+                f"<i>Contract: <code>{tradingsymbol}</code></i>\n"
+                if kite_search else ""
+            )
 
         contract_name = friendly_contract or instrument or f"{symbol} {int(float(strike))}{option_type}"
 
@@ -1454,12 +1467,32 @@ class TelegramBot:
         dur_str = f"{duration_sec // 60}m {duration_sec % 60}s" if duration_sec else ""
         dur_line = f"⏱️ <b>Hold Time:</b> <code>{dur_str}</code>\n" if dur_str else ""
 
-        contract_box = (
-            f"📋 <b>Zerodha Kite Contract (Tap to Copy):</b>\n"
-            f"<code>{kite_search}</code>\n"
-            f"<i>API: <code>{instrument}</code></i>\n"
-            if kite_search else (f"<code>{instrument}</code>\n" if instrument else "")
-        )
+        is_spread = "/" in instrument or "SPREAD" in str(trade_info.get("strategy", "")).upper() or "SPREAD" in str(side).upper()
+        if is_spread and "/" in instrument:
+            parts = instrument.split("/")
+            leg1_raw = parts[0].strip()
+            leg2_raw = parts[1].strip()
+            from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+            leg1_clean = human_search_name_from_api_symbol(leg1_raw)
+            leg2_clean = human_search_name_from_api_symbol(leg2_raw)
+            contract_box = (
+                f"📋 <b>Zerodha Kite Contracts (Tap to Copy):</b>\n"
+                f"• <b>Leg 1 (Short):</b> <code>{leg1_clean}</code> (BUY to close)\n"
+                f"• <b>Leg 2 (Hedge):</b> <code>{leg2_clean}</code> (SELL to close)\n"
+                f"<i>API: <code>{instrument}</code></i>\n"
+            )
+            action_directive = (
+                "<b>Exit Spread on Kite:</b>\n"
+                "1. Select both legs in Kite <i>Portfolio ➔ Positions</i> and tap <b>Exit</b>, OR\n"
+                "2. <b>BUY back Leg 1 (Short) first</b>, then <b>SELL Leg 2 (Hedge)</b> to avoid naked margin penalties."
+            )
+        else:
+            contract_box = (
+                f"📋 <b>Zerodha Kite Contract (Tap to Copy):</b>\n"
+                f"<code>{kite_search}</code>\n"
+                f"<i>API: <code>{instrument}</code></i>\n"
+                if kite_search else (f"<code>{instrument}</code>\n" if instrument else "")
+            )
 
         cost_line = ""
         if costs:

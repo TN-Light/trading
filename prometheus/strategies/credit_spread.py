@@ -161,13 +161,29 @@ class CreditSpreadStrategy:
                 is_bullish = True  # Below range midpoint -> sell Bull Put Spread below support
 
         # ── Dynamic 2.0σ Strike Buffer (Pillar 2) ──
-        min_index_buffer = {
+        _base_index_buffer = {
             "NIFTY 50": 150.0,
             "NIFTY BANK": 400.0,
             "SENSEX": 600.0,
             "NIFTY MIDCAP SELECT": 100.0,
             "NIFTY FIN SERVICE": 150.0,
         }.get(symbol, 3.0 * interval)
+
+        # DTE-aware buffer: multi-day options have more extrinsic value at closer strikes
+        if current_date and expiry_date:
+            dte_for_buffer = (expiry_date - current_date).days
+        else:
+            dte_for_buffer = 0
+
+        if dte_for_buffer >= 2:
+            # 2-3 DTE: tighter buffer (70% of base) — options still have meaningful premium at closer strikes
+            min_index_buffer = round(_base_index_buffer * 0.70 / interval) * interval
+        elif dte_for_buffer == 1:
+            # 1-DTE: moderate buffer (85% of base)
+            min_index_buffer = round(_base_index_buffer * 0.85 / interval) * interval
+        else:
+            # 0-DTE: full buffer — need maximum distance for terminal gamma safety
+            min_index_buffer = _base_index_buffer
 
         daily_proxy_buffer = round((3.5 * atr) / interval) * interval
         sigma_buffer = max(min_index_buffer, daily_proxy_buffer)
@@ -306,8 +322,19 @@ class CreditSpreadStrategy:
             return None
 
         net_credit = round(short_premium - long_premium, 2)
-        # On 0-DTE expiry days, options naturally trade lower as theta decays; require >= 8% width vs 15% on multi-day
-        effective_min_pct = 0.08 if (current_date and expiry_date and (expiry_date - current_date).days == 0) else self.min_credit_pct
+        # DTE-scaled minimum credit: closer expiries have lower premium floors (theta has already decayed)
+        if current_date and expiry_date:
+            dte = (expiry_date - current_date).days
+        else:
+            dte = 99
+        if dte == 0:
+            effective_min_pct = 0.08   # 0-DTE: terminal theta, accept thin credit
+        elif dte == 1:
+            effective_min_pct = 0.10   # 1-DTE: near-expiry, substantial theta still available
+        elif dte <= 3:
+            effective_min_pct = 0.12   # 2-3 DTE: meaningful premium, justify overnight risk
+        else:
+            effective_min_pct = self.min_credit_pct  # 4+: full requirement
         min_required_credit = round(strike_width * effective_min_pct, 2)
         if net_credit < min_required_credit or net_credit <= 0:
             logger.info(
@@ -475,5 +502,7 @@ class CreditSpreadStrategy:
             "oi_shielded": is_wall_shielded,
             "oi_wall_strike": oi_wall_strike,
             "oi_wall_shares": oi_wall_shares,
+            "is_0dte": is_0dte,
+            "days_to_expiry": (expiry_date - current_date).days if current_date and expiry_date else None,
             "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
         }

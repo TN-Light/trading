@@ -1,0 +1,55 @@
+trade_id,short_id,symbol,tier,model,sim_exit_price,sim_exit_reason,gross_pnl,costs,net_pnl,is_win,premature_shakeout,alpha_captured,notes
+PAPER-20260921043359-4EBDCC,4EBDCC,NIFTY 50,C,Model A (Baseline),28.85,inactivity_kill_switch,211.25,123.78,87.47,True,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260921050439-E47090,E47090,NIFTY 50,C,Model A (Baseline),42.7,stop_loss,-1021.15,123.84,-1144.99,False,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260921080748-A80685,A80685,NIFTY 50,C,Model A (Baseline),29.55,square_off,-166.4,123.14,-289.54,False,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260923043334-D379FD,D379FD,NIFTY BANK,B,Model A (Baseline),370.85,stop_loss,-811.42,91.42,-902.84,False,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260923051901-49B0CB,49B0CB,NIFTY 50,B,Model A (Baseline),139.68865,stop_loss,58.5,84.87,-26.37,False,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260923051855-FCA5F1,FCA5F1,NIFTY BANK,B,Model A (Baseline),356.9239599999999,stop_loss,98.12,89.48,8.64,True,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260923051858-E02193,E02193,SENSEX,B,Model A (Baseline),245.64239999999998,stop_loss,60.0,72.97,-12.97,False,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260924044849-2BDB15,2BDB15,SENSEX,C,Model A (Baseline),157.70454999999998,stop_loss,60.0,67.95,-7.95,False,True,0.0,Baseline ledger execution: stop_loss
+PAPER-20260928042044-129738,129738,SENSEX,C,Model A (Baseline),410.9,target,854.64,81.75,772.89,True,False,0.0,Baseline ledger execution: target
+PAPER-20260928050539-B19931,B19931,NIFTY 50,B,Model A (Baseline),77.3203,stop_loss,129.68,73.24,56.44,True,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260928050544-9C390F,9C390F,SENSEX,B,Model A (Baseline),378.2,inactivity_kill_switch,191.64,80.43,111.21,True,False,0.0,Baseline ledger execution: inactivity_kill_switch
+PAPER-20260928053724-51BEB7,51BEB7,NIFTY FIN SERVICE,B,Model A (Baseline),111.5,inactivity_kill_switch,-367.05,78.39,-445.44,False,False,0.0,Baseline ledger execution: inactivity_kill_switch
+PAPER-20260928053718-0810B6,0810B6,NIFTY 50,B,Model A (Baseline),56.25,inactivity_kill_switch,-182.58,69.58,-252.16,False,False,0.0,Baseline ledger execution: inactivity_kill_switch
+PAPER-20260928044708-23E66B,23E66B,NIFTY BANK,B,Model A (Baseline),225.57344999999998,stop_loss,57.0,78.27,-21.27,False,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260930044810-409161,409161,NIFTY BANK,C,Model A (Baseline),979.1,stop_loss,-2278.62,144.7,-2423.32,False,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260930055229-672290,672290,NIFTY BANK,C,Model A (Baseline),1110.5,target,1319.54,153.0,1166.54,True,False,0.0,Baseline ledger execution: target
+PAPER-20260930070606-369262,369262,SENSEX,C,Model A (Baseline),17.45,target,831.8,120.69,711.11,True,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20261001050423-CA6DAF,CA6DAF,NIFTY BANK,C,Model A (Baseline),992.6599000000001,stop_loss,-661.8,144.53,-806.33,False,False,0.0,Baseline ledger execution: stop_loss
+PAPER-20260921043359-4EBDCC,4EBDCC,NIFTY 50,C,Model B (Offensive Micro-Lock),28.85,inactivity_kill_switch,211.25,123.78,87.47,True,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260921050439-E47090,E47090,NIFTY 50,C,Model B (Offensive Micro-Lock),42.7,stop_loss,-1021.15,123.84,-1144.99,False,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260921080748-A80685,A80685,NIFTY 50,C,Model B (Offensive Micro-Lock),29.55,square_off,-166.4,123.14,-289.54,False,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260923043334-D379FD,D379FD,NIFTY BANK,B,Model B (Offensive Micro-Lock),370.85,stop_loss,-811.42,91.42,-902.84,False,False,0.0,Unchanged from baseline
+PAPER-20260923051901-49B0CB,49B0CB,NIFTY 50,B,Model B (Offensive Micro-Lock),139.68865,stop_loss,58.5,84.87,-26.37,False,False,0.0,Unchanged from baseline
+PAPER-20260923051855-FCA5F1,FCA5F1,NIFTY BANK,B,Model B (Offensive Micro-Lock),356.9239599999999,stop_loss,98.12,89.48,8.64,True,False,0.0,Unchanged from baseline
+PAPER-20260923051858-E02193,E02193,SENSEX,B,Model B (Offensive Micro-Lock),245.64239999999998,stop_loss,60.0,72.97,-12.97,False,False,0.0,Unchanged from baseline
+PAPER-20260924044849-2BDB15,2BDB15,SENSEX,C,Model B (Offensive Micro-Lock),157.7,micro_lock_shakeout,59.91,67.95,-8.04,False,True,0.0,"Premature Shakeout: Shaken out at 157.70 by 15pt noise; forfeited +63pt runner (+Rs 1,188)"
+PAPER-20260928042044-129738,129738,SENSEX,C,Model B (Offensive Micro-Lock),410.9,target,854.64,81.75,772.89,True,False,0.0,Unchanged from baseline
+PAPER-20260928050539-B19931,B19931,NIFTY 50,B,Model B (Offensive Micro-Lock),77.3203,stop_loss,129.68,73.24,56.44,True,False,0.0,Unchanged from baseline
+PAPER-20260928050544-9C390F,9C390F,SENSEX,B,Model B (Offensive Micro-Lock),378.2,inactivity_kill_switch,191.64,80.43,111.21,True,False,0.0,Unchanged from baseline
+PAPER-20260928053724-51BEB7,51BEB7,NIFTY FIN SERVICE,B,Model B (Offensive Micro-Lock),111.5,inactivity_kill_switch,-367.05,78.39,-445.44,False,False,0.0,Unchanged from baseline
+PAPER-20260928053718-0810B6,0810B6,NIFTY 50,B,Model B (Offensive Micro-Lock),56.25,inactivity_kill_switch,-182.58,69.58,-252.16,False,False,0.0,Unchanged from baseline
+PAPER-20260928044708-23E66B,23E66B,NIFTY BANK,B,Model B (Offensive Micro-Lock),226.67,micro_lock_stop_loss,89.9,78.33,11.57,True,False,32.84,Micro-lock saved +32.84 pts vs baseline
+PAPER-20260930044810-409161,409161,NIFTY BANK,C,Model B (Offensive Micro-Lock),979.1,stop_loss,-2278.62,144.7,-2423.32,False,False,0.0,Unchanged from baseline
+PAPER-20260930055229-672290,672290,NIFTY BANK,C,Model B (Offensive Micro-Lock),1069.52,micro_lock_shakeout,90.14,150.5,-60.36,False,True,-1226.9,"Premature Shakeout: Shaken out at 1069.52 by 12pt noise; forfeited +Rs 1,166.54 Target"
+PAPER-20260930070606-369262,369262,SENSEX,C,Model B (Offensive Micro-Lock),17.45,target,831.8,120.69,711.11,True,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20261001050423-CA6DAF,CA6DAF,NIFTY BANK,C,Model B (Offensive Micro-Lock),1017.72,micro_lock_stop_loss,90.01,146.06,-56.05,False,False,750.28,Chop Alpha Lock: Saved Rs 750.27 vs Baseline Half-Risk SL (-806.33)
+PAPER-20260921043359-4EBDCC,4EBDCC,NIFTY 50,C,Model C (Tier-Differentiated Policy),28.85,inactivity_kill_switch,211.25,123.78,87.47,True,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260921050439-E47090,E47090,NIFTY 50,C,Model C (Tier-Differentiated Policy),42.7,stop_loss,-1021.15,123.84,-1144.99,False,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260921080748-A80685,A80685,NIFTY 50,C,Model C (Tier-Differentiated Policy),29.55,square_off,-166.4,123.14,-289.54,False,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20260923043334-D379FD,D379FD,NIFTY BANK,B,Model C (Tier-Differentiated Policy),370.85,stop_loss,-811.42,91.42,-902.84,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260923051901-49B0CB,49B0CB,NIFTY 50,B,Model C (Tier-Differentiated Policy),139.68865,stop_loss,58.5,84.87,-26.37,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260923051855-FCA5F1,FCA5F1,NIFTY BANK,B,Model C (Tier-Differentiated Policy),356.9239599999999,stop_loss,98.12,89.48,8.64,True,False,0.0,Defensive Runner Policy preserved
+PAPER-20260923051858-E02193,E02193,SENSEX,B,Model C (Tier-Differentiated Policy),245.64239999999998,stop_loss,60.0,72.97,-12.97,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260924044849-2BDB15,2BDB15,SENSEX,C,Model C (Tier-Differentiated Policy),217.8,target,1261.91,70.4,1191.51,True,False,1199.46,"Tier B/S Runner Room: Preserved 30pt cushion outside noise; hit Target 217.80 (+Rs 1,188)"
+PAPER-20260928042044-129738,129738,SENSEX,C,Model C (Tier-Differentiated Policy),410.9,target,854.64,81.75,772.89,True,False,0.0,Defensive Runner Policy preserved
+PAPER-20260928050539-B19931,B19931,NIFTY 50,B,Model C (Tier-Differentiated Policy),77.3203,stop_loss,129.68,73.24,56.44,True,False,0.0,Defensive Runner Policy preserved
+PAPER-20260928050544-9C390F,9C390F,SENSEX,B,Model C (Tier-Differentiated Policy),378.2,inactivity_kill_switch,191.64,80.43,111.21,True,False,0.0,Defensive Runner Policy preserved
+PAPER-20260928053724-51BEB7,51BEB7,NIFTY FIN SERVICE,B,Model C (Tier-Differentiated Policy),111.5,inactivity_kill_switch,-367.05,78.39,-445.44,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260928053718-0810B6,0810B6,NIFTY 50,B,Model C (Tier-Differentiated Policy),56.25,inactivity_kill_switch,-182.58,69.58,-252.16,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260928044708-23E66B,23E66B,NIFTY BANK,B,Model C (Tier-Differentiated Policy),225.57344999999998,stop_loss,57.0,78.27,-21.27,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260930044810-409161,409161,NIFTY BANK,C,Model C (Tier-Differentiated Policy),979.1,stop_loss,-2278.62,144.7,-2423.32,False,False,0.0,Defensive Runner Policy preserved
+PAPER-20260930055229-672290,672290,NIFTY BANK,C,Model C (Tier-Differentiated Policy),1110.5,target,1319.54,153.0,1166.54,True,False,0.0,"Tier C Scalp Target: Reached full target (+Rs 1,166.54); not shaken out"
+PAPER-20260930070606-369262,369262,SENSEX,C,Model C (Tier-Differentiated Policy),17.45,target,831.8,120.69,711.11,True,False,0.0,Credit Spread: Exempt from trailing ratchets
+PAPER-20261001050423-CA6DAF,CA6DAF,NIFTY BANK,C,Model C (Tier-Differentiated Policy),1017.72,micro_lock_stop_loss,90.01,146.06,-56.05,False,False,750.28,Tier C Scalp Micro-Lock: Captured +Rs 750.27 alpha by cutting chop reversal at entry+3pt

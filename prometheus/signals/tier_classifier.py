@@ -109,6 +109,28 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 instruction=f"🛡️ <b>ACTION:</b> Live Trade — High Conviction{score_label} Defined Risk Spread (~Rs 35k–45k Margin)"
             )
 
+        # TIER B (High-Conviction Multi-Day Spread):
+        # Requirements: 1-3 DTE + Score >= 8.0 + OTM >= 1.5σ + Trend Aligned
+        # 1-2 DTE spreads with strong conviction deserve live execution
+        days_to_exp = signal.get("days_to_expiry")
+        if days_to_exp is not None and 1 <= days_to_exp <= 3 and otm_sigma >= 1.5 and score >= 8.0 and trend_aligned:
+            cls_reasons = [
+                f"{days_to_exp}-DTE Spread (Multi-day theta decay)",
+                f"{otm_sigma:.1f}σ OTM Statistical Clearance (>= 1.5σ)",
+                "Session VWAP Trend Aligned",
+            ]
+            if oi_shielded:
+                cls_reasons.append("Institutional OI Wall Protected")
+            score_label = f" ({score:.1f}/10)" if score > 0 else ""
+            return _build_tier_result(
+                tier="B",
+                tier_name="HIGH_CONVICTION_SPREAD",
+                is_live_eligible=True,
+                reasons=cls_reasons,
+                badge=f"🌟 <b>[TIER B: HIGH CONVICTION {days_to_exp}-DTE SPREAD]</b>",
+                instruction=f"🛡️ <b>ACTION:</b> Live Trade — High Conviction{score_label} Defined Risk Spread (~Rs 35k–45k Margin)"
+            )
+
         # TIER C (Standard Credit Spread):
         # Multi-day spread (1-DTE / 2-DTE / Monthly) or standard conviction (< 9.0)
         cls_reasons = []
@@ -167,7 +189,24 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
 
         # LUNCH DEAD ZONE HARD GATE:
         # Strictly prevent option buying between 11:30 and 13:15 to eliminate theta decay cremation
+        # EXCEPTION: Institutional Trend Day (ADX >= 25, Volume >= 1.5x 20-SMA, ORB Breakout)
+        is_trend_day = bool(signal.get("is_institutional_trend_day"))
         if is_lunch_dead_zone:
+            if is_trend_day:
+                adx_disp = signal.get("adx", 25.0)
+                return _build_tier_result(
+                    tier="B",
+                    tier_name="INSTITUTIONAL_TREND_DAY",
+                    is_live_eligible=True,
+                    reasons=[
+                        "Trend-Day Lunch Bypass Gate Active",
+                        f"Institutional Trend Confirmed (ADX={adx_disp} >= 25, Volume >= 1.5x 20-SMA)",
+                        "ORB Breakout expansion overriding midday theta dead zone",
+                        f"Confluence Edge Score: {score:.1f}/10"
+                    ],
+                    badge="🚀 <b>[TIER B: INSTITUTIONAL TREND DAY CONTINUATION]</b>",
+                    instruction="⚡ <b>ACTION:</b> Execute Trend Continuation (ORB Trend Day Active Through Lunch)"
+                )
             return _build_tier_result(
                 tier="C",
                 tier_name="STANDARD_MOMENTUM",

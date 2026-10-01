@@ -2115,9 +2115,50 @@ class Prometheus:
                         )
                         opt_ltp = 0.0
 
-                    # 1. Dynamic Option Target & Noise-Protected Stop Loss Calibration (Delta * Spot ATR Model)
-                    # Solves the false fantasy target bug (e.g. 100+ pt targets from opt_ltp * 0.22)
-                    # Calibrates targets and risk to actual 15-minute expected option move (EOM)
+                    # 1. Institutional Commitment Ratio & Net Gamma Exposure (GEX / ZGL)
+                    comm_ratio = None
+                    net_gex = 0.0
+                    zgl_val = None
+                    gamma_regime = "NEUTRAL"
+                    try:
+                        chain_data = self.data.fetch_options_chain(symbol)
+                        if chain_data is not None and not chain_data.empty:
+                            if hasattr(self, "oi_analyzer"):
+                                res_oi = self.oi_analyzer.analyze(chain_data, spot_price)
+                                comm_ratio = res_oi.get("metrics", {}).get("commitment_ratio")
+                            if hasattr(self, "gamma_engine"):
+                                gex_res = self.gamma_engine.calculate_gex(chain_data, spot_price, symbol)
+                                net_gex = float(gex_res.get("net_gex", 0.0) or 0.0)
+                                zgl_val = gex_res.get("zgl")
+                                gamma_regime = gex_res.get("regime", "LONG_GAMMA" if net_gex >= 0 else "SHORT_GAMMA")
+                    except Exception as e:
+                        logger.debug(f"Option chain / GEX analysis error for {symbol}: {e}")
+
+                    pa_sig["commitment_ratio"] = comm_ratio
+                    pa_sig["net_gex"] = net_gex
+                    pa_sig["zgl"] = zgl_val
+                    pa_sig["gamma_regime"] = gamma_regime
+
+                    # 2. Classify Institutional Signal Tier (S, A, B, C, D) BEFORE Target Calibration
+                    from prometheus.signals.tier_classifier import classify_signal_tier
+                    tier_info = classify_signal_tier(pa_sig)
+                    tier = tier_info.get("tier", "C")
+                    pa_sig["tier"] = tier
+                    pa_sig["tier_name"] = tier_info.get("tier_name", "")
+                    pa_sig["tier_badge"] = tier_info.get("tier_badge", "")
+                    pa_sig["action_instruction"] = tier_info.get("action_instruction", "")
+                    pa_sig["is_live_eligible"] = tier_info.get("is_live_eligible", False)
+                    pa_sig["classification_reasons"] = tier_info.get("classification_reasons", [])
+
+                    # Determine HTF trend alignment
+                    reasons = pa_sig.get("reasons", []) or []
+                    action_str = str(pa_sig.get("action", "")).upper()
+                    is_htf_bull = any("1H_Trend_Bullish" in r for r in reasons)
+                    is_htf_bear = any("1H_Trend_Bearish" in r for r in reasons)
+                    is_htf_aligned = (("CE" in action_str and is_htf_bull) or ("PE" in action_str and is_htf_bear)) or bool(pa_sig.get("is_golden_setup", False)) or bool(pa_sig.get("is_htf_aligned", False))
+                    pa_sig["is_htf_aligned"] = is_htf_aligned
+
+                    # 3. Dynamic Option Target & Noise-Protected Stop Loss Calibration (Regime & Tier Aware)
                     spot_atr = float(pa_sig.get("atr", 0.0) or 0.0)
                     sym_u = symbol.upper()
                     if spot_atr <= 0:
@@ -2130,76 +2171,53 @@ class Prometheus:
                         else:
                             spot_atr = max(10.0, spot_price * 0.0035)
 
-                    atm_delta = 0.50
-                    eom = atm_delta * spot_atr  # Expected Option Move per 15M bar
-
-                    # Dynamic Quality Multiplier based on Signal Conviction Score
-                    if edge_score >= 8.0:
-                        quality_mult = 1.15
-                    elif edge_score >= 6.5:
-                        quality_mult = 0.85
-                    else:
-                        quality_mult = 0.65
-
-                    if is_low_vix:
-                        quality_mult *= 0.80
-
-                    # Instrument Noise Floors — empirical tick audit + ORB retest analysis:
-                    # Bank Nifty routinely retests ORB by 60-100 spot pts (~27-45 option pts).
-                    # Old 20-pt floor was inside the retest range, causing premature stop-outs
-                    # on trades whose direction was ultimately correct (e.g. Day 3 trade D379FD).
-                    if "BANK" in sym_u:
-                        noise_floor = 35.0
-                        min_target = 25.0
-                    elif "SENSEX" in sym_u or "BSX" in sym_u:
-                        noise_floor = 30.0
-                        min_target = 22.0
-                    else:
-                        noise_floor = 10.0
-                        min_target = 8.0
-
-                    target_gain_pts = round(max(min_target, eom * quality_mult), 1)
-                    if opt_ltp > 0:
-                        # Cap target gain at 45% of option premium to prevent unrealistic moonshots
-                        target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.45, 1))
-
-                    # ── Structural Stop Loss (Anchored to ORB Breakout Level) ──
-                    # Instead of a fixed 0.55 × EOM multiplier, compute the SL from
-                    # the distance between entry spot and the ORB breakout level,
-                    # then convert to option points via delta.  This gives Bank Nifty
-                    # the ~100-120 spot points of breathing room it needs to survive
-                    # routine ORB retests rather than choking on 60-pt noise.
                     orb_high = pa_sig.get("orb_high")
                     orb_low = pa_sig.get("orb_low")
                     direction = pa_sig.get("direction", "bullish")
 
-                    structural_sl_pts = noise_floor
-                    if direction == "bullish" and orb_high and orb_high > 0:
-                        spot_to_orb = max(0, spot_price - orb_high)
-                        structural_spot_sl = spot_to_orb + (0.3 * spot_atr)
-                        structural_sl_pts = max(noise_floor, round(atm_delta * structural_spot_sl, 1))
-                    elif direction == "bearish" and orb_low and orb_low > 0:
-                        spot_to_orb = max(0, orb_low - spot_price)
-                        structural_spot_sl = spot_to_orb + (0.3 * spot_atr)
-                        structural_sl_pts = max(noise_floor, round(atm_delta * structural_spot_sl, 1))
+                    from prometheus.signals.target_calibrator import calibrate_target_and_sl, calculate_structural_sl
 
-                    # SL: use structural distance or EOM-based, whichever is larger
-                    sl_pts = max(structural_sl_pts, noise_floor, round(0.55 * eom, 1))
-                    # Cap at 1.5x target to maintain minimum 1:1.5 R:R expectation
-                    max_sl_cap = max(noise_floor, round(target_gain_pts * 1.5, 1))
-                    sl_pts = min(sl_pts, max_sl_cap)
-                    if opt_ltp > 0:
-                        sl_pts = min(sl_pts, round(opt_ltp * 0.30, 1))  # Never risk > 30% total option premium
+                    structural_sl_pts, spot_sl_level = calculate_structural_sl(
+                        symbol=symbol,
+                        spot_price=spot_price,
+                        spot_atr=spot_atr,
+                        orb_high=orb_high,
+                        orb_low=orb_low,
+                        direction=direction,
+                        noise_floor=None,
+                        atm_delta=0.50,
+                    )
 
-                    tgt_price = round(opt_ltp + target_gain_pts, 2)
-                    sl_price = round(max(1.0, opt_ltp - sl_pts), 2)
+                    calib_res = calibrate_target_and_sl(
+                        symbol=symbol,
+                        spot_price=spot_price,
+                        spot_atr=spot_atr,
+                        opt_ltp=opt_ltp,
+                        edge_score=edge_score,
+                        tier=tier,
+                        is_htf_aligned=is_htf_aligned,
+                        gamma_regime=gamma_regime,
+                        net_gex=net_gex,
+                        structural_sl_pts=structural_sl_pts,
+                        is_low_vix=is_low_vix,
+                        orb_high=orb_high,
+                        orb_low=orb_low,
+                        direction=direction,
+                    )
+                    target_gain_pts = calib_res.target_gain_pts
+                    sl_pts = calib_res.sl_pts
+                    tgt_price = calib_res.tgt_price
+                    sl_price = calib_res.sl_price
+
                     pa_sig["low_vix_mode"] = is_low_vix
                     pa_sig["target_gain_pts"] = target_gain_pts
                     pa_sig["sl_pts"] = sl_pts
                     pa_sig["atr"] = spot_atr
-                    pa_sig["breakeven_trigger_pts"] = round(target_gain_pts * 0.50, 1)
+                    pa_sig["spot_sl_level"] = spot_sl_level
+                    pa_sig["breakeven_trigger_pts"] = calib_res.breakeven_trigger_pts
+                    pa_sig["is_compressed"] = calib_res.is_compressed
 
-                    # 2. Max Nominal Premium Exposure Cap (Applies only to live broker execution; paper trading bypasses capital filter)
+                    # 4. Max Nominal Premium Exposure Cap (Applies only to live broker execution; paper trading bypasses capital filter)
                     enforce_cap = (self.mode == "live") or bool(get("risk.enforce_capital_filter", False))
                     if enforce_cap and opt_ltp > 0 and lot_cost > 15000.0:
                         logger.info(
@@ -2226,26 +2244,6 @@ class Prometheus:
                         pa_sig["lots"] = 1
                         pa_sig["quantity"] = lot_sz
                         pa_sig["lot_cost"] = lot_cost
-
-                        # Shadow Telemetry: Institutional Commitment Ratio & Net Gamma Exposure (GEX / ZGL)
-                        comm_ratio = None
-                        net_gex = None
-                        zgl_val = None
-                        try:
-                            chain_data = self.data.fetch_options_chain(symbol)
-                            if chain_data is not None and not chain_data.empty:
-                                if hasattr(self, "oi_analyzer"):
-                                    res_oi = self.oi_analyzer.analyze(chain_data, spot_price)
-                                    comm_ratio = res_oi.get("metrics", {}).get("commitment_ratio")
-                                if hasattr(self, "gamma_engine"):
-                                    gex_res = self.gamma_engine.calculate_gex(chain_data, spot_price, symbol)
-                                    net_gex = gex_res.get("net_gex")
-                                    zgl_val = gex_res.get("zgl")
-                        except Exception:
-                            pass
-                        pa_sig["commitment_ratio"] = comm_ratio
-                        pa_sig["net_gex"] = net_gex
-                        pa_sig["zgl"] = zgl_val
 
                         # 3. ── Strict Same-Instrument Lockout & Profit-Locked Pyramiding Gate ──
                         repeat_entry_blocked = False
@@ -2289,7 +2287,16 @@ class Prometheus:
                                 execution_signal["target_gain_pts"] = target_gain_pts
                                 execution_signal["sl_pts"] = sl_pts
                                 execution_signal["atr"] = spot_atr
+                                execution_signal["spot_sl_level"] = pa_sig.get("spot_sl_level")
+                                execution_signal["is_institutional_trend_day"] = bool(pa_sig.get("is_institutional_trend_day"))
+                                execution_signal["adx"] = float(pa_sig.get("adx", 0.0) or 0.0)
                                 execution_signal["breakeven_trigger_pts"] = pa_sig.get("breakeven_trigger_pts", round(target_gain_pts * 0.5, 1))
+                                execution_signal["tier"] = pa_sig.get("tier", "C")
+                                execution_signal["is_compressed"] = pa_sig.get("is_compressed", False)
+                                execution_signal["net_gex"] = pa_sig.get("net_gex", 0.0)
+                                execution_signal["zgl"] = pa_sig.get("zgl")
+                                execution_signal["gamma_regime"] = pa_sig.get("gamma_regime", "NEUTRAL")
+                                execution_signal["commitment_ratio"] = pa_sig.get("commitment_ratio")
                                 if tradingsymbol:
                                     execution_signal["tradingsymbol"] = tradingsymbol
                                     execution_signal["instrument"] = tradingsymbol
@@ -2310,7 +2317,7 @@ class Prometheus:
 
             if get("intraday.credit_spread.enabled", True):
                 if not hasattr(self, "_credit_spread_strategy"):
-                    max_dte = int(get("intraday.credit_spread.max_days_to_expiry", 1))
+                    max_dte = int(get("intraday.credit_spread.max_days_to_expiry", 3))
                     self._credit_spread_strategy = CreditSpreadStrategy(max_days_to_expiry=max_dte)
 
                 intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
@@ -2358,6 +2365,9 @@ class Prometheus:
                 except Exception:
                     pass
 
+            # Strategy preference: "credit_spread" = seller-first, "option_buying" = buyer-first (legacy)
+            pref = get("intraday.credit_spread.strategy_preference", "credit_spread")
+
             # EXPIRY REGIME (0-DTE):
             # Defined-risk credit spreads have an 85%+ theoretical win rate from terminal theta collapse.
             # Naked option buying on 0-DTE is strictly restricted to elite breakouts (Tier S, score >= 7.5).
@@ -2376,21 +2386,36 @@ class Prometheus:
                     )
                     return cs_sig
 
-            # NON-EXPIRY REGIME:
-            # Directional Breakout with high score (>= 6.5) takes priority due to higher R:R.
-            # Moderate/partial signals defer to Credit Spread.
-            if buy_score >= 6.5:
-                logger.info(
-                    f"Signal Priority on {symbol}: Choosing Strong Directional Option Buying "
-                    f"({execution_signal.get('action')}, score={buy_score:.1f}) over Credit Spread (score={spread_score:.1f})"
-                )
-                return execution_signal
+            # NON-EXPIRY REGIME with Seller-First Preference:
+            if pref == "credit_spread":
+                # Credit Spread wins UNLESS option buying is Tier S elite (score >= 7.5 + golden)
+                if buy_score >= 7.5 and execution_signal.get("is_golden_setup", False):
+                    logger.info(
+                        f"Signal Priority on {symbol} (Seller-First): Tier S Breakout ({buy_score:.1f}) "
+                        f"overrides Credit Spread ({spread_score:.1f})"
+                    )
+                    return execution_signal
+                else:
+                    logger.info(
+                        f"Signal Priority on {symbol} (Seller-First): Prioritizing Credit Spread "
+                        f"({cs_sig.get('spread_type')}, score={spread_score:.1f}, POP={cs_sig.get('pop_pct', 0)}%) "
+                        f"over Option Buying (score={buy_score:.1f})"
+                    )
+                    return cs_sig
             else:
-                logger.info(
-                    f"Signal Priority on {symbol}: Choosing Credit Spread "
-                    f"({cs_sig.get('spread_type')}, score={spread_score:.1f}) over Moderate Option Buying (score={buy_score:.1f})"
-                )
-                return cs_sig
+                # Legacy buyer-first: Option Buying wins at score >= 6.5
+                if buy_score >= 6.5:
+                    logger.info(
+                        f"Signal Priority on {symbol}: Choosing Strong Directional Option Buying "
+                        f"({execution_signal.get('action')}, score={buy_score:.1f}) over Credit Spread (score={spread_score:.1f})"
+                    )
+                    return execution_signal
+                else:
+                    logger.info(
+                        f"Signal Priority on {symbol}: Choosing Credit Spread "
+                        f"({cs_sig.get('spread_type')}, score={spread_score:.1f}) over Moderate Option Buying (score={buy_score:.1f})"
+                    )
+                    return cs_sig
         elif execution_signal:
             return execution_signal
         elif cs_sig:
@@ -5081,13 +5106,21 @@ class Prometheus:
                         strat_type = str(refined.get("strategy_type", "")).lower()
                         is_buying = "option_buying" in strat_type or "BUY" in str(refined.get("action", ""))
 
-                        # Lunch Dead Zone Gate: strictly block Option Buying between 11:30 and 13:15 to eliminate theta decay
+                        # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Trend Day
                         if is_lunch_dead_zone and is_buying:
-                            logger.info(
-                                f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {symbol} "
-                                f"({lunch_start_str}-{lunch_end_str} IST theta decay chop zone). Credit spreads remain active."
-                            )
-                            continue
+                            is_trend_day = bool(refined.get("is_institutional_trend_day"))
+                            if is_trend_day:
+                                adx_val = refined.get("adx", 25.0)
+                                logger.info(
+                                    f"{mode_label}: [Trend-Day Lunch Bypass] Allowing Option Buying on {symbol} "
+                                    f"(Institutional Trend Day confirmed: ADX={adx_val} >= 25, Vol Surge). Bypassing lunch gate."
+                                )
+                            else:
+                                logger.info(
+                                    f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {symbol} "
+                                    f"({lunch_start_str}-{lunch_end_str} IST theta decay chop zone). Credit spreads remain active."
+                                )
+                                continue
 
                         traded_inst = refined.get("tradingsymbol", "") or refined.get("instrument", "")
                         if traded_inst and traded_inst in _today_traded_instruments:
@@ -5647,13 +5680,21 @@ class Prometheus:
                                     strat_type = str(refined.get("strategy_type", "")).lower()
                                     is_buying = "option_buying" in strat_type or "BUY" in str(refined.get("action", ""))
 
-                                    # Lunch Dead Zone Gate: strictly block Option Buying between 11:30 and 13:15 to eliminate theta decay
+                                    # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Trend Day
                                     if (lunch_start_time <= current_time < lunch_end_time) and is_buying:
-                                        logger.info(
-                                            f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {isym} "
-                                            f"({lunch_start_str}-{lunch_end_str} IST theta decay chop zone). Credit spreads remain active."
-                                        )
-                                        continue
+                                        is_trend_day = bool(refined.get("is_institutional_trend_day"))
+                                        if is_trend_day:
+                                            adx_val = refined.get("adx", 25.0)
+                                            logger.info(
+                                                f"{mode_label}: [Trend-Day Lunch Bypass] Allowing Option Buying on {isym} "
+                                                f"(Institutional Trend Day confirmed: ADX={adx_val} >= 25, Vol Surge). Bypassing lunch gate."
+                                            )
+                                        else:
+                                            logger.info(
+                                                f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {isym} "
+                                                f"({lunch_start_str}-{lunch_end_str} IST theta decay chop zone). Credit spreads remain active."
+                                            )
+                                            continue
 
                                     # Block same-instrument re-entry
                                     tsym = refined.get("tradingsymbol", "")

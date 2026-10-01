@@ -1,0 +1,2 @@
+trade_id,symbol,instrument,underlying,direction,quantity,entry_price,exit_price,entry_time,exit_time,exit_reason,gross_pnl,costs,net_pnl,return_pct,holding_duration_seconds,strategy,signal_score,signal_confidence,stop_loss,target
+PAPER-20260718092831-E9E5FC,NIFTY 50,NIFTY2640722650PE,NIFTY,SHORT,65,1.5976000000000001,104.69946162956421,2026-04-01T11:15:00,2026-04-01T11:30:00,stop_loss,-6701.62,0.69,-6702.31,-6454.21,900,pro_FVG+OTE+VWAP,0.0,0.31599329747396226,1.2800000000000002,85.36574928571444

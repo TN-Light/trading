@@ -523,3 +523,50 @@ def calculate_supertrend(
     df["supertrend_direction"] = direction  # 1 = bullish, -1 = bearish
 
     return df
+
+
+def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Calculate Wilder's Average Directional Index (ADX).
+    
+    Identifies trend strength regardless of trend direction.
+    ADX >= 25 indicates a strong directional trending regime.
+    """
+    if df is None or len(df) < period + 1:
+        return pd.Series(0.0, index=df.index if df is not None else [0])
+
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    prev_high = high.shift(1)
+    prev_low = low.shift(1)
+
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    up_move = high - prev_high
+    down_move = prev_low - low
+
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+    plus_dm = pd.Series(plus_dm, index=df.index)
+    minus_dm = pd.Series(minus_dm, index=df.index)
+
+    # Wilder's smoothing: alpha = 1 / period
+    tr_smooth = tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    plus_dm_smooth = plus_dm.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    minus_dm_smooth = minus_dm.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+    plus_di = 100.0 * (plus_dm_smooth / tr_smooth.replace(0, np.nan))
+    minus_di = 100.0 * (minus_dm_smooth / tr_smooth.replace(0, np.nan))
+
+    di_sum = plus_di + minus_di
+    di_diff = (plus_di - minus_di).abs()
+    dx = 100.0 * (di_diff / di_sum.replace(0, np.nan)).fillna(0.0)
+
+    adx = dx.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean().fillna(0.0)
+    return adx
+

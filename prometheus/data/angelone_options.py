@@ -14,11 +14,49 @@ SmartAPI endpoints used:
 
 import time
 import re
+import threading
+from dataclasses import dataclass
 import pandas as pd
 from datetime import datetime, date
 from typing import Dict, List, Optional
 
 from prometheus.utils.logger import logger
+
+
+@dataclass
+class ContractOISnapshot:
+    """
+    In-memory tracking snapshot of a single option contract's open interest.
+
+    Because Angel One SmartAPI getMarketData("FULL") does not provide
+    opnInterestChange, Prometheus calculates:
+    - delta_oi_session: cumulative change since the contract was first polled today
+    - delta_oi_poll: incremental change since the immediately preceding poll
+    """
+    token: str
+    tradingsymbol: str
+    session_baseline_oi: int
+    prev_poll_oi: int
+    current_oi: int
+    last_poll_time: float
+    poll_count: int = 1
+
+    @property
+    def delta_oi_session(self) -> int:
+        """Net open interest change since session open (cumulative baseline delta)."""
+        return self.current_oi - self.session_baseline_oi
+
+    @property
+    def delta_oi_poll(self) -> int:
+        """Net open interest change since immediately preceding poll."""
+        return self.current_oi - self.prev_poll_oi
+
+    def update(self, new_oi: int, timestamp: Optional[float] = None) -> None:
+        """Update snapshot with next poll open interest."""
+        self.prev_poll_oi = self.current_oi
+        self.current_oi = int(new_oi)
+        self.last_poll_time = float(timestamp if timestamp is not None else time.time())
+        self.poll_count += 1
 
 
 class AngelOneOptionChain:
@@ -92,6 +130,89 @@ class AngelOneOptionChain:
         self._min_interval: float = 0.35  # ~3 req/sec
         self._disabled_until: float = 0.0
         self._auth_cooldown_sec: int = 300
+        self._oi_snapshots: Dict[str, ContractOISnapshot] = {}
+        self._oi_lock = threading.Lock()
+
+    def _ensure_oi_cache_initialized(self) -> None:
+        """Defensive initialization for instances created via __new__."""
+        if not hasattr(self, "_oi_snapshots"):
+            self._oi_snapshots = {}
+        if not hasattr(self, "_oi_lock"):
+            self._oi_lock = threading.Lock()
+
+    def _check_oi_date_roll(self, current_date: Optional[str] = None) -> bool:
+        """
+        Check current trading date against self._cache_date and flush cache on a new day.
+        Must be called with self._oi_lock held.
+        """
+        today_str = current_date or date.today().isoformat()
+        if self._cache_date != today_str:
+            if self._oi_snapshots:
+                logger.info(
+                    f"Angel One OI cache: date roll detected ({self._cache_date} -> {today_str}). "
+                    f"Flushing {len(self._oi_snapshots)} snapshots."
+                )
+            self._oi_snapshots.clear()
+            self._token_cache.clear()
+            self._cache_date = today_str
+            return True
+        return False
+
+    def reset_oi_cache(self) -> None:
+        """Explicitly reset the in-memory OI snapshot cache."""
+        self._ensure_oi_cache_initialized()
+        with self._oi_lock:
+            self._oi_snapshots.clear()
+            self._cache_date = ""
+
+    def get_oi_snapshot(self, token: str) -> Optional[ContractOISnapshot]:
+        """Thread-safe retrieval of an OI snapshot by token."""
+        self._ensure_oi_cache_initialized()
+        with self._oi_lock:
+            return self._oi_snapshots.get(str(token))
+
+    def get_all_oi_snapshots(self) -> Dict[str, ContractOISnapshot]:
+        """Thread-safe copy of all active OI snapshots."""
+        self._ensure_oi_cache_initialized()
+        with self._oi_lock:
+            return dict(self._oi_snapshots)
+
+    def _update_oi_snapshot(
+        self,
+        token: str,
+        tradingsymbol: str,
+        current_oi: int,
+        timestamp: Optional[float] = None,
+        trading_date: Optional[str] = None,
+    ) -> ContractOISnapshot:
+        """
+        Thread-safe update of contract OI snapshot.
+        Maintains session baseline and previous-poll OI to compute deltas.
+        """
+        self._ensure_oi_cache_initialized()
+        token_str = str(token)
+        now_ts = float(timestamp if timestamp is not None else time.time())
+        cur_oi_int = int(current_oi or 0)
+        with self._oi_lock:
+            self._check_oi_date_roll(trading_date)
+            if token_str not in self._oi_snapshots:
+                snap = ContractOISnapshot(
+                    token=token_str,
+                    tradingsymbol=tradingsymbol,
+                    session_baseline_oi=cur_oi_int,
+                    prev_poll_oi=cur_oi_int,
+                    current_oi=cur_oi_int,
+                    last_poll_time=now_ts,
+                    poll_count=1,
+                )
+                self._oi_snapshots[token_str] = snap
+            else:
+                snap = self._oi_snapshots[token_str]
+                snap.update(cur_oi_int, timestamp=now_ts)
+                if tradingsymbol:
+                    snap.tradingsymbol = tradingsymbol
+            return snap
+
 
     def _is_temporarily_disabled(self) -> bool:
         return time.time() < self._disabled_until
@@ -221,6 +342,10 @@ class AngelOneOptionChain:
         today_str = date.today().isoformat()
 
         # Check daily cache
+        self._ensure_oi_cache_initialized()
+        with self._oi_lock:
+            self._check_oi_date_roll(today_str)
+
         cache_key = underlying
         if self._cache_date == today_str and cache_key in self._token_cache:
             contracts = self._token_cache[cache_key]
@@ -526,12 +651,17 @@ class AngelOneOptionChain:
     # Market data (LTP, OI, bid/ask)
     # ------------------------------------------------------------------
 
-    def fetch_market_data(self, contracts: List[Dict], underlying: str = None) -> pd.DataFrame:
+    def fetch_market_data(
+        self,
+        contracts: List[Dict],
+        underlying: str = None,
+        trading_date: Optional[str] = None,
+    ) -> pd.DataFrame:
         """
         Batch-fetch market data for a list of contracts.
 
         Uses getMarketData("FULL", ...) in batches of 50.
-        Returns DataFrame with: tradingsymbol, ltp, bid, ask, volume, oi, oi_change
+        Returns DataFrame with: tradingsymbol, ltp, bid, ask, volume, oi, oi_change, delta_oi
 
         Bug (2026-07-28 audit): ``underlying`` resolves the exchange segment
         (NFO vs BFO). When omitted, falls back to "NFO" (legacy behavior) —
@@ -570,8 +700,16 @@ class AngelOneOptionChain:
                     for item in fetched:
                         token = str(item.get("symbolToken", ""))
                         contract = token_map.get(token, {})
+                        tsym = contract.get("tradingsymbol", "") or str(item.get("tradingSymbol", ""))
+                        cur_oi = int(item.get("opnInterest", 0) or 0)
+                        snap = self._update_oi_snapshot(
+                            token=token,
+                            tradingsymbol=tsym,
+                            current_oi=cur_oi,
+                            trading_date=trading_date,
+                        )
                         results.append({
-                            "tradingsymbol": contract.get("tradingsymbol", ""),
+                            "tradingsymbol": tsym,
                             "symboltoken": token,
                             "strike": contract.get("strike", 0),
                             "option_type": contract.get("option_type", ""),
@@ -582,8 +720,9 @@ class AngelOneOptionChain:
                             "low": float(item.get("low", 0)),
                             "close": float(item.get("close", 0)),
                             "volume": int(item.get("tradeVolume", 0) or 0),
-                            "oi": int(item.get("opnInterest", 0) or 0),
-                            "oi_change": int(item.get("opnInterestChange", 0) or 0),
+                            "oi": cur_oi,
+                            "oi_change": snap.delta_oi_session,
+                            "delta_oi": snap.delta_oi_poll,
                             "bid": float(item.get("bestBidPrice", 0) or 0),
                             "ask": float(item.get("bestAskPrice", 0) or 0),
                             "underlying": float(item.get("ltp", 0)),
@@ -804,6 +943,10 @@ class AngelOneOptionChain:
                     "spread": 0.0,
                     "tradingsymbol": target["tradingsymbol"],
                     "symboltoken": target["symboltoken"],
+                    "oi": 0,
+                    "oi_change": 0,
+                    "delta_oi": 0,
+                    "volume": 0,
                 }
 
                 # Try to get bid/ask via full market data
@@ -818,8 +961,18 @@ class AngelOneOptionChain:
                             premium["bid"] = float(f.get("bestBidPrice", 0) or 0)
                             premium["ask"] = float(f.get("bestAskPrice", 0) or 0)
                             premium["spread"] = premium["ask"] - premium["bid"]
-                            premium["oi"] = int(f.get("opnInterest", 0) or 0)
+                            raw_oi = int(f.get("opnInterest", 0) or 0)
+                            premium["oi"] = raw_oi
                             premium["volume"] = int(f.get("tradeVolume", 0) or 0)
+                            token = str(target.get("symboltoken", ""))
+                            tsym = str(target.get("tradingsymbol", ""))
+                            snap = self._update_oi_snapshot(
+                                token=token,
+                                tradingsymbol=tsym,
+                                current_oi=raw_oi,
+                            )
+                            premium["oi_change"] = snap.delta_oi_session
+                            premium["delta_oi"] = snap.delta_oi_poll
                 except Exception:
                     pass
 

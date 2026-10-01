@@ -18,7 +18,7 @@ from datetime import datetime, time as dtime
 from typing import Dict, Optional, Tuple, List
 
 from prometheus.signals.technical import (
-    calculate_vwap, calculate_session_vwap, calculate_supertrend, calculate_atr, calculate_ema
+    calculate_vwap, calculate_session_vwap, calculate_supertrend, calculate_atr, calculate_ema, calculate_adx
 )
 from prometheus.utils.logger import logger
 
@@ -71,16 +71,8 @@ class PriceActionMomentumScanner:
         current_time = current_ts.time() if hasattr(current_ts, "time") else dtime(10, 0)
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
-        # Session Time Gate:
-        # Golden Setup: Active 09:35 to 11:45; hard cutoff at 12:00 (strictly 0 option buying after 12:00 PM).
-        # On expiry days, option buying after 12:00 PM is lethal due to extreme theta decay and strike pinning.
-        cutoff_time = dtime(11, 45) if golden_mode else dtime(12, 0)
         min_start_time = dtime(9, 35) if golden_mode else dtime(9, 50)
-        if current_time < min_start_time or current_time > cutoff_time:
-            return None
-
-        # Dead zone check: 11:45 - 13:00 (lunchtime chop) for legacy non-expiry mode
-        if not golden_mode and not is_expiry_day and (dtime(11, 45) <= current_time <= dtime(13, 0)):
+        if current_time < min_start_time or current_time > dtime(14, 15):
             return None
 
         # Extract today's bars
@@ -101,6 +93,10 @@ class PriceActionMomentumScanner:
         # ATR for volatility sizing
         atr_s = calculate_atr(df, period=14)
         atr = float(atr_s.iloc[-1]) if len(atr_s) > 0 and not np.isnan(atr_s.iloc[-1]) else close * 0.005
+
+        # ADX for trend strength quantification
+        adx_s = calculate_adx(df, period=14)
+        adx_val = float(adx_s.iloc[-1]) if len(adx_s) > 0 and not np.isnan(adx_s.iloc[-1]) else 0.0
 
         # VWAP (session anchored with typical price fallback on 0 volume)
         try:
@@ -136,6 +132,39 @@ class PriceActionMomentumScanner:
         if len(orb_bars) >= 1:
             orb_high = float(orb_bars["high"].max())
             orb_low = float(orb_bars["low"].min())
+
+        # ── 3. Institutional Trend Day Detection & Session Time Gate ──
+        has_inst_volume = False
+        if "volume" in df.columns and len(df) >= 15:
+            vol_hist = df["volume"].iloc[-21:-1]
+            vol_sma20 = float(vol_hist.mean()) if len(vol_hist) > 0 else 0.0
+            curr_vol = float(current_row["volume"]) if "volume" in current_row else 0.0
+            if vol_sma20 > 0 and curr_vol >= (vol_sma20 * 1.5):
+                has_inst_volume = True
+            elif vol_sma20 == 0 and curr_vol == 0:
+                if orb_high and (close > orb_high + 1.5 * atr):
+                    has_inst_volume = True
+                elif orb_low and (close < orb_low - 1.5 * atr):
+                    has_inst_volume = True
+
+        is_orb_breakout = (orb_high is not None and close > orb_high) or (orb_low is not None and close < orb_low)
+        is_institutional_trend_day = bool(is_orb_breakout and (adx_val >= 25.0) and has_inst_volume)
+
+        # Session Time Gate:
+        # Golden Setup: Active 09:35 to 11:45; hard cutoff at 12:00 for normal days.
+        # Bypass: If Institutional Trend Day is confirmed (ORB + ADX >= 25 + Vol >= 1.5x SMA20),
+        # allow continuation setups through the lunch window (11:30 - 13:15 IST).
+        cutoff_time = dtime(11, 45) if golden_mode else dtime(12, 0)
+        is_lunch_window = (dtime(11, 30) <= current_time <= dtime(13, 15))
+
+        if current_time > cutoff_time:
+            if not (is_lunch_window and is_institutional_trend_day):
+                return None
+
+        # Dead zone check: 11:45 - 13:00 (lunchtime chop) for legacy non-expiry mode
+        if not golden_mode and not is_expiry_day and (dtime(11, 45) <= current_time <= dtime(13, 0)):
+            if not is_institutional_trend_day:
+                return None
 
         # ── 3. Higher Timeframe (1-Hour) Trend Alignment ──
         htf_trend = "NEUTRAL"
@@ -288,6 +317,9 @@ class PriceActionMomentumScanner:
             target = close + (target_mult * atr)
             rr = (target - close) / max(close - sl, 1.0)
 
+            if is_institutional_trend_day:
+                reasons.append(f"Institutional_Trend_Day(ADX={adx_val:.1f}>=25)")
+
             return {
                 "symbol": symbol,
                 "action": action,
@@ -305,6 +337,8 @@ class PriceActionMomentumScanner:
                 "orb_high": round(orb_high, 2) if orb_high else None,
                 "orb_low": round(orb_low, 2) if orb_low else None,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
+                "is_institutional_trend_day": is_institutional_trend_day,
+                "adx": round(adx_val, 1),
             }
 
         elif bear_score >= min_threshold and net_edge <= -1.5:
@@ -328,6 +362,9 @@ class PriceActionMomentumScanner:
             target = close - (target_mult * atr)
             rr = (close - target) / max(sl - close, 1.0)
 
+            if is_institutional_trend_day:
+                reasons.append(f"Institutional_Trend_Day(ADX={adx_val:.1f}>=25)")
+
             return {
                 "symbol": symbol,
                 "action": action,
@@ -345,6 +382,8 @@ class PriceActionMomentumScanner:
                 "orb_high": round(orb_high, 2) if orb_high else None,
                 "orb_low": round(orb_low, 2) if orb_low else None,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
+                "is_institutional_trend_day": is_institutional_trend_day,
+                "adx": round(adx_val, 1),
             }
 
         return None

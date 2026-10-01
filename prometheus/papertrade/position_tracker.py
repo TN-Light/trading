@@ -233,17 +233,16 @@ class PositionTracker:
         net = gross - costs
         notional_in = pos.entry_price * pos.quantity
         ret_pct = (net / notional_in * 100.0) if notional_in > 0 else 0.0
-        # Normalize tz-aware / tz-naive mismatch between entry and exit timestamps.
-        # Live signals emit IST aware datetimes; historical/replay paths and some
-        # test fixtures emit tz-naive datetimes. Subtraction only works if both
-        # match. Strip tzinfo on the exit-side if entry is naive; vice versa.
+        # Standardize paper trading execution timestamps:
+        # entry_time was recorded at live/paper entry; exit_time is recorded now (IST)
+        # on position close so holding_duration_seconds reflects true positive wall-clock duration.
         entry_ts = pos.entry_time
-        exit_ts = timestamp
+        exit_ts = datetime.now(IST)
         if entry_ts.tzinfo is None and exit_ts.tzinfo is not None:
             exit_ts = exit_ts.replace(tzinfo=None)
         elif entry_ts.tzinfo is not None and exit_ts.tzinfo is None:
             exit_ts = exit_ts.replace(tzinfo=entry_ts.tzinfo)
-        duration = int((exit_ts - entry_ts).total_seconds())
+        duration = max(1, int((exit_ts - entry_ts).total_seconds()))
 
         trade = PaperTrade(
             trade_id=pos.trade_id,
@@ -274,6 +273,7 @@ class PositionTracker:
             entry_spot=getattr(pos, "entry_spot", 0.0),
             target_gain_pts=getattr(pos, "target_gain_pts", 0.0),
         )
+        trade.bar_timestamp = getattr(pos, "bar_timestamp", None)
         self.closed_trades.append(trade)
         # Bug C.2 (2026-07-25 audit): the position has been popped from
         # ``self.open_positions`` above, the closed trade has been booked;
@@ -473,14 +473,27 @@ class PositionTracker:
         # (Conservative: a gap beyond target means the market gapped favorably
         # past target on open — fill at open. A gap below SL means we missed
         # the SL line — fill at the open, accepting the worse price.)
-        if snap.open <= sl:
-            return snap.open, ExitReason.STOP_LOSS
-        if snap.open >= tgt:
-            return snap.open, ExitReason.TARGET
-        if snap.low <= sl:
-            return sl, ExitReason.STOP_LOSS
-        if snap.high >= tgt:
-            return tgt, ExitReason.TARGET
+        if is_spread:
+            # For credit spreads (option selling):
+            # Target is DECAY (e.g. tgt <= entry), SL is SPIKE (e.g. sl >= entry)
+            # Conservative convention: check stop-loss before target when both touched
+            if sl > 0 and snap.open >= sl:
+                return snap.open, ExitReason.STOP_LOSS
+            if tgt > 0 and snap.open <= tgt:
+                return snap.open, ExitReason.TARGET
+            if sl > 0 and snap.high >= sl:
+                return sl, ExitReason.STOP_LOSS
+            if tgt > 0 and snap.low <= tgt:
+                return tgt, ExitReason.TARGET
+        else:
+            if snap.open <= sl:
+                return snap.open, ExitReason.STOP_LOSS
+            if snap.open >= tgt:
+                return snap.open, ExitReason.TARGET
+            if snap.low <= sl:
+                return sl, ExitReason.STOP_LOSS
+            if snap.high >= tgt:
+                return tgt, ExitReason.TARGET
 
         # -- 2. 45-minute (3-bar) Trend-Aware Inactivity Kill-Switch --------
         # Liquidates stagnant option buying positions after 3 bars (45 min)
@@ -688,6 +701,13 @@ class PositionTracker:
         survived SL/target/time-stop evaluation. Added the ``def`` signature
         line back to restore the trailing-stop code path.
         """
+        # Trailing stops are strictly excluded for credit spreads (option selling).
+        # Spreads profit from theta decay over time and require wide breathing room;
+        # intraday micro-trailing causes premature whipsaws.
+        is_spread = "/" in (pos.instrument or "") or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in (pos.instrument or "").upper()
+        if is_spread:
+            return
+
         # Determine constant initial risk distance (never changes as stop_loss is ratcheted up)
         risk_distance = getattr(pos, "initial_risk_distance", 0.0)
         if risk_distance <= 0.0:
@@ -721,11 +741,41 @@ class PositionTracker:
         be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
 
         # Progressive Ratchet Stage 2: Breakeven (100% Risk-Free Guarantee)
+        # Tier C: Offensive Micro-Lock (Capped Scalp Targets)
+        # If gain_pts >= 12.0 (Bank Nifty/Sensex) or >= 5.0 (Nifty) and not already locked:
+        # Set pos.breakeven_set = True and ratchet new_sl = pos.entry_price + cost_buffer_pts.
+        is_tier_c = (getattr(pos, "tier", "") or "").upper() == "C"
+        micro_lock_pts = 12.0 if ("BANK" in sym_root or "SENSEX" in sym_root) else 5.0
+
+        if is_tier_c and not pos.breakeven_set and gain_pts >= micro_lock_pts:
+            new_sl = pos.entry_price + cost_buffer_pts
+            # Only advance (never retreat)
+            if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_sl
+                pos.breakeven_set = True
+                pos.half_risk_set = True
+                logger.info(
+                    f"[{pos.trade_id}] TIER_C_MICRO_LOCK: SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(Tier C offensive lock at gain=+{gain_pts:.2f} pts >= {micro_lock_pts:.1f} pts, "
+                    f"covering entry + Rs {cost_buffer_pts:.2f} costs)"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "breakeven", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update breakeven callback failed: {e}")
+
+        # Tier S / Tier B (and default): Defensive Runner Ladder
         # For high-noise symbols (SENSEX/BANKNIFTY), moving SL to Entry + costs requires
         # gaining at least min_be_gain points so the cushion to peak is outside noise.
         # For NIFTY, 0.4R or be_trigger_pts is already sufficient.
-        can_breakeven = (gain_pts >= min_be_gain) and (progress >= 0.4 or gain_pts >= be_trigger_pts)
-        if not pos.breakeven_set and can_breakeven:
+        elif not is_tier_c and not pos.breakeven_set and (gain_pts >= min_be_gain) and (progress >= 0.4 or gain_pts >= be_trigger_pts):
             new_sl = pos.entry_price + cost_buffer_pts
             # Only advance (never retreat)
             if new_sl > pos.stop_loss:
@@ -749,9 +799,9 @@ class PositionTracker:
                         logger.error(f"on_sl_update breakeven callback failed: {e}")
 
         # Progressive Ratchet Stage 1: Half-Risk Cut (Defense & Noise Tolerance)
-        # For SENSEX/BANKNIFTY when gain is between 0.4R and min_be_gain:
+        # For Tier S/B (defensive runners) when gain is between 0.4R and min_be_gain:
         # Cuts downside risk by 50% while preserving a wide cushion outside noise floor.
-        elif not getattr(pos, "half_risk_set", False) and not pos.breakeven_set and (gain_pts >= be_trigger_pts or progress >= 0.4):
+        elif not is_tier_c and not getattr(pos, "half_risk_set", False) and not pos.breakeven_set and (gain_pts >= be_trigger_pts or progress >= 0.4):
             half_risk_sl = pos.entry_price - 0.50 * risk_distance
             if half_risk_sl > pos.stop_loss:
                 old_sl = pos.stop_loss

@@ -91,3 +91,145 @@ def test_paper_capture_side_labeling_and_dedup(tmp_path):
     # Re-entry attempt with SAME instrument should be blocked
     tid2 = capture.on_signal(notif_dict)
     assert tid2 is None, 'Repeat entry on same instrument closed today should be blocked'
+
+
+def test_credit_spread_offline_evaluate_exit():
+    feed = DummyFeed()
+    fill_sim = FillSimulator(feed=feed)
+    tracker = PositionTracker(fill_sim=fill_sim)
+    
+    pos = Position(
+        trade_id='SPREAD-TGT-01',
+        symbol='SENSEX',
+        instrument='SENSEX26O0173500CE/SENSEX26O0173900CE',
+        underlying='SENSEX',
+        direction=Direction.SHORT,
+        quantity=20,
+        entry_price=59.04,
+        entry_time=datetime(2026, 9, 30, 12, 30, tzinfo=IST),
+        stop_loss=92.25,
+        target=18.45,
+        max_bars=16,
+        bars_held=2,
+        strategy='Hedged_Credit_Spread',
+    )
+    
+    # 1. Bar does not breach SL or Target (spread at 35.0) -> No exit
+    snap_normal = TradeSnapshot(
+        timestamp=datetime(2026, 9, 30, 13, 0, tzinfo=IST),
+        symbol='SENSEX',
+        instrument=pos.instrument,
+        open=45.0, high=48.0, low=35.0, close=40.0,
+        bar_interval='15minute'
+    )
+    px, reason = tracker._evaluate_exit(pos, snap_normal, is_session_end=False, is_square_off=False)
+    assert reason is None, f"Expected no exit, got {reason}"
+    
+    # 2. Bar breaches target (low touched 17.45 <= 18.45) -> TARGET exit
+    snap_target = TradeSnapshot(
+        timestamp=datetime(2026, 9, 30, 14, 30, tzinfo=IST),
+        symbol='SENSEX',
+        instrument=pos.instrument,
+        open=25.0, high=26.0, low=17.45, close=18.0,
+        bar_interval='15minute'
+    )
+    px, reason = tracker._evaluate_exit(pos, snap_target, is_session_end=False, is_square_off=False)
+    assert reason == ExitReason.TARGET, f"Expected TARGET exit, got {reason}"
+    assert px == 18.45
+
+    # 3. Bar breaches SL (high touched 95.0 >= 92.25) -> STOP_LOSS exit
+    snap_sl = TradeSnapshot(
+        timestamp=datetime(2026, 9, 30, 14, 30, tzinfo=IST),
+        symbol='SENSEX',
+        instrument=pos.instrument,
+        open=70.0, high=95.0, low=68.0, close=94.0,
+        bar_interval='15minute'
+    )
+    px, reason = tracker._evaluate_exit(pos, snap_sl, is_session_end=False, is_square_off=False)
+    assert reason == ExitReason.STOP_LOSS, f"Expected STOP_LOSS exit, got {reason}"
+    assert px == 92.25
+
+
+def test_credit_spread_trailing_stop_strictly_excluded():
+    feed = DummyFeed()
+    fill_sim = FillSimulator(feed=feed)
+    tracker = PositionTracker(fill_sim=fill_sim)
+    
+    pos = Position(
+        trade_id='SPREAD-TRAIL-01',
+        symbol='SENSEX',
+        instrument='SENSEX26O0173500CE/SENSEX26O0173900CE',
+        underlying='SENSEX',
+        direction=Direction.SHORT,
+        quantity=20,
+        entry_price=59.04,
+        entry_time=datetime(2026, 9, 30, 12, 30, tzinfo=IST),
+        stop_loss=92.25,
+        target=18.45,
+        max_bars=16,
+        bars_held=4,
+        strategy='Hedged_Credit_Spread',
+    )
+    
+    # Simulate favorable spread price decay from 59.04 to 25.0
+    original_sl = pos.stop_loss
+    tracker._maybe_advance_trailing_stop(pos, current_price=25.0)
+    assert pos.stop_loss == original_sl, "Trailing stop should NOT be modified for credit spreads"
+    assert not pos.breakeven_set, "Breakeven flag should not be set by trailing stop on credit spreads"
+
+
+def test_telegram_2leg_spread_alerts(monkeypatch):
+    from prometheus.interface.telegram_bot import TelegramBot
+    
+    sent_messages = []
+    bot = TelegramBot(bot_token="", chat_id="")
+    monkeypatch.setattr(bot, 'send_message', lambda msg: sent_messages.append(msg))
+    
+    # 1. Test alert_trade_closed for 2-leg spread
+    bot.alert_trade_closed({
+        'symbol': 'SENSEX',
+        'instrument': 'SENSEX26O0173500CE/SENSEX26O0173900CE',
+        'side': 'SHORT',
+        'quantity': 20,
+        'entry_price': 59.04,
+        'exit_price': 17.45,
+        'gross_pnl': 831.80,
+        'net_pnl': 711.11,
+        'return_pct': 60.22,
+        'exit_reason': 'target',
+        'holding_duration_seconds': 7200,
+        'costs': 120.69,
+    })
+    
+    assert len(sent_messages) == 1
+    msg = sent_messages[0]
+    assert "SENSEX 1 OCT 73500 CE" in msg
+    assert "SENSEX 1 OCT 73900 CE" in msg
+    assert "BUY back Leg 1 (Short) first" in msg
+    assert "Exit Spread on Kite" in msg
+    
+    # 2. Test alert_new_signal for 2-leg spread
+    sent_messages.clear()
+    bot.alert_new_signal({
+        'symbol': 'SENSEX',
+        'tradingsymbol': 'SENSEX26O0173500CE/SENSEX26O0173900CE',
+        'action': 'BEAR_CALL_SPREAD',
+        'entry': 59.04,
+        'sl': 92.25,
+        'target': 18.45,
+        'lots': 1,
+        'quantity': 20,
+        'strategy': 'Hedged_Credit_Spread',
+        'signal_score': 8.1,
+        'legs': [
+            {'symbol': 'SENSEX26O0173500CE', 'action': 'SELL', 'premium': 96.5, 'is_hedge': False},
+            {'symbol': 'SENSEX26O0173900CE', 'action': 'BUY', 'premium': 37.46, 'is_hedge': True},
+        ]
+    })
+    
+    assert len(sent_messages) == 1
+    new_sig_msg = sent_messages[0]
+    assert "SENSEX 1 OCT 73500 CE" in new_sig_msg
+    assert "SENSEX 1 OCT 73900 CE" in new_sig_msg
+    assert "Add BUY Hedge leg FIRST" in new_sig_msg
+

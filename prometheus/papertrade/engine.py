@@ -241,12 +241,7 @@ class PaperTradeEngine:
             # signal. Fix: localize the naive bar_timestamp to IST
             # before the arithmetic (treats naive as local IST, which
             # is correct for this system — engine always stores IST).
-            entry_time=(
-                _bar_ts
-                if _bar_ts is not None
-                and (datetime.now(IST) - _bar_ts).total_seconds() < 86_400
-                else datetime.now(IST)
-            ),
+            entry_time=datetime.now(IST),
             stop_loss=signal.stop_loss,
             target=signal.target,
             max_bars=max_bars,
@@ -263,6 +258,7 @@ class PaperTradeEngine:
             target_gain_pts=float(getattr(signal, "target_gain_pts", 0.0) or 0.0),
             tier=getattr(signal, "tier", "") or "",
         )
+        position.bar_timestamp = _bar_ts
         self.tracker.open_position(position)
         return trade_id
 
