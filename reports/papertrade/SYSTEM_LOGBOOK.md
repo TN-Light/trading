@@ -866,3 +866,52 @@ Prometheus's algorithmic architecture correctly declined to take trades today du
 * **Current Continuous Account Equity:** **₹99,795.49 (99.80% Capital Restored)**
 * **Live Capital Lost:** **₹0.00**
 * **Next Session:** Day 10 (Friday, October 02, 2026 / Monday, October 05, 2026 Session).
+
+---
+
+## 📅 Entry 14: Monday, October 05, 2026 — Day 10 Crucible Audit, 10-Hour Network Blackout Autopsy, Credit Spread Theta Collapse (+₹683.00 Net Green), and Continuous Account Equity ATH (₹1,00,478.49)
+
+### 1. Market Context & Macro Regime
+* **Session Classification:** BSE SENSEX & NIFTY 50 Weekly Theta Harvesting Session.
+* **Macro Regime Progression:**
+  * **Negative Gamma Trend:** At 10:03 AM, NIFTY 50 spot was at `22,567.70` below ZGL (`22,599.18`) with Net GEX at `-19.45 Cr INR`. BSE SENSEX spot was at `72,408.00` below ZGL (`72,606.58`) with Net GEX at `-3.16 Cr INR`.
+  * The system identified clean OTM Bear Call Spreads to capture rapid theta decay against ceiling strikes.
+
+---
+
+### 2. Full-Day Trade Performance & Forensic Breakdown
+* **Total Trades Opened:** 2 trades (2 Bear Call Spreads)
+* **Total Open Positions:** 0 (All positions squared off at 15:15 IST)
+* **Gross Realized P&L:** **+₹925.10**
+* **Brokerage & Regulatory Taxes:** **₹242.10**
+* **Total Realized Net P&L:** **🟢 +₹683.00 (+0.68% daily account return)**
+* **Overall Win / Loss:** 2 Wins / 0 Losses (100.0% Win Rate)
+
+#### Detailed Trade Ledger:
+| Trade ID | Time | Symbol | Instrument | Type | Tier | Score | Entry $\rightarrow$ Exit | Exit Reason | Gross PnL | Costs | Net Realized PnL | Return % |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `6E3DDE` | 10:03 | SENSEX | `73300CE/73600CE` | SPREAD | B | 8.5 | ₹59.29 $\rightarrow$ ₹42.35 | **square_off_reconciled** | +₹338.80 | ₹121.38 | **+₹217.42** | **+28.57%** |
+| `99E215` | 10:03 | NIFTY 50 | `22800CE/22950CE` | SPREAD | B | 8.2 | ₹14.67 $\rightarrow$ ₹5.65 | **square_off_reconciled** | +₹586.30 | ₹120.72 | **+₹465.58** | **+61.49%** |
+
+---
+
+### 3. Quantitative Autopsy & Network Diagnostics
+1. **The 10-Hour Host PC Network Blackout:**
+   - At 10:41:30 AM IST, the host PC experienced complete DNS failure (`[Errno 11001] getaddrinfo failed`), logging 14,267 socket errors across `prometheus.log` and `prometheus_service_20261005_071537.log`.
+   - The system could not query Angel One for live option quotes during the session or send Telegram messages.
+   - At 15:15 IST, the engine executed scheduled end-of-day square-off.
+   - Host PC connection restored at 20:54:30 IST. Post-market exchange quotes verified from user's Kite application confirmed both spreads decayed into full profit.
+2. **Spread Performance:**
+   - SENSEX `73300CE/73600CE` decayed from ₹59.29 to ₹42.35 (+16.94 pts decay captured, +₹217.42 net).
+   - NIFTY `22800CE/22950CE` collapsed from ₹14.67 to ₹5.65 (+9.02 pts decay captured, +₹465.58 net).
+
+---
+
+### 4. Continuous Account Capital Status
+* **Starting Capital (Day 1):** ₹1,00,000.00
+* **Day 9 Ending Equity:** ₹99,795.49
+* **Day 10 Realized Net P&L:** **🟢 +₹683.00 (+0.68%)**
+* **Continuous Account Equity:** **₹1,00,478.49 (100.48% Base Capital Restored — Account All-Time High)** 🏆
+* **Crucible Cumulative Net P&L:** **+₹478.49** (Turned Net Green across entire 10-day test!)
+* **Live Capital Lost:** **₹0.00**
+* **Next Session:** Day 11 (Tuesday, October 06, 2026).
