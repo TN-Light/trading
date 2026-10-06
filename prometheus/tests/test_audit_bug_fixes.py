@@ -776,6 +776,29 @@ def test_backtest_temporal_partition_stability():
     assert pbo_metrics["verdict"] in ["ROBUST", "BORDERLINE", "UNSTABLE"]
 
 
+def test_order_manager_execute_strangle_delegates_to_straddle():
+    """Verify OrderManager._execute_strangle delegates to _execute_straddle without recursion."""
+    from unittest.mock import MagicMock
+    from prometheus.execution.order_manager import OrderManager
+
+    mock_broker = MagicMock()
+    mock_risk = MagicMock()
+    om = OrderManager(broker=mock_broker, risk_manager=mock_risk)
+
+    signal = {
+        "symbol": "NIFTY24DEC24000CE",
+        "action": "BUY_STRANGLE",
+        "legs": [],
+    }
+    sentinel = MagicMock()
+    om._execute_straddle = MagicMock(return_value=sentinel)
+
+    res = om._execute_strangle(signal, quantity=50)
+    assert res == sentinel
+    om._execute_straddle.assert_called_once_with(signal, 50)
+
+
+
 
 
 

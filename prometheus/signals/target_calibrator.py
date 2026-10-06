@@ -234,7 +234,12 @@ def calibrate_target_and_sl(
             target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.45, 1))
 
     # Base Stop Loss: use structural distance, noise floor, or EOM-based, whichever is larger
-    sl_pts = max(structural_sl_pts, actual_noise_floor, round(0.55 * eom, 1))
+    import math
+    clean_structural_sl = 0.0
+    if structural_sl_pts is not None and not math.isnan(structural_sl_pts):
+        clean_structural_sl = float(structural_sl_pts)
+
+    sl_pts = max(clean_structural_sl, actual_noise_floor, round(0.55 * eom, 1))
 
     # Retest Breathing Room Protection:
     # If structural retest SL requires more room than target_gain_pts * 1.2,
@@ -248,7 +253,11 @@ def calibrate_target_and_sl(
 
     # Hard Safety Ceiling: never risk > 35% total option premium
     if opt_ltp > 0:
-        sl_pts = min(sl_pts, round(opt_ltp * 0.35, 1))
+        max_risk_pts = round(opt_ltp * 0.35, 1)
+        if math.isnan(sl_pts):
+            sl_pts = max_risk_pts
+        else:
+            sl_pts = min(sl_pts, max_risk_pts)
 
     if opt_ltp > 0:
         tgt_price = round(opt_ltp + target_gain_pts, 2)

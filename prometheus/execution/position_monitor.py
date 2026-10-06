@@ -79,17 +79,31 @@ class TrailingState:
     low_vix_mode: bool = False
     entry_spot: float = 0.0
     atr: float = 0.0
+    tier: str = "B"
 
     def __post_init__(self):
-        if self.risk_distance == 0.0 and self.entry_premium > 0:
-            if getattr(self, "strategy_type", "") == "credit_spread":
-                self.risk_distance = abs(self.initial_sl - self.entry_premium) if self.initial_sl > 0 else self.entry_premium * 0.5
+        is_credit = (
+            getattr(self, "strategy_type", "") == "credit_spread"
+            or "credit_spread" in getattr(self, "strategy", "").lower()
+            or "spread" in getattr(self, "strategy", "").lower()
+        )
+        if self.entry_premium > 0:
+            if is_credit:
+                if self.risk_distance <= 0:
+                    self.risk_distance = (
+                        abs(self.initial_sl - self.entry_premium)
+                        if self.initial_sl > 0
+                        else self.entry_premium * 0.5
+                    )
             else:
-                self.risk_distance = (
-                    self.entry_premium - self.initial_sl
-                    if self.initial_sl > 0
-                    else self.entry_premium * 0.3
-                )
+                if self.risk_distance <= 0:
+                    self.risk_distance = (
+                        self.entry_premium - self.initial_sl
+                        if self.initial_sl > 0
+                        else self.entry_premium * 0.3
+                    )
+        if self.risk_distance <= 0:
+            self.risk_distance = max(1.0, abs(self.entry_premium - self.initial_sl) if self.initial_sl > 0 else 1.0)
 
     def current_stage(self) -> str:
         """Human-readable current trailing stage."""
@@ -284,11 +298,16 @@ class PositionMonitor:
         stage_changed = False
 
         # ── CREDIT SPREAD DECAY & STOP LOSS MONITORING ──
-        if getattr(state, "strategy_type", "") == "credit_spread":
+        is_credit = (
+            getattr(state, "strategy_type", "") == "credit_spread"
+            or "credit_spread" in getattr(state, "strategy", "").lower()
+            or "spread" in getattr(state, "strategy", "").lower()
+        )
+        if is_credit:
             net_credit = state.entry_premium
-            target_decay = getattr(state, "target_decay_price", 0.0) or (net_credit * 0.30)
+            target_decay = getattr(state, "target_decay_price", 0.0) or (state.target if 0 < state.target < net_credit else net_credit * 0.30)
             breakeven_decay = getattr(state, "breakeven_decay_price", 0.0) or (net_credit * 0.50)
-            hard_sl = getattr(state, "hard_sl_price", 0.0) or (net_credit * 1.50)
+            hard_sl = getattr(state, "hard_sl_price", 0.0) or (state.initial_sl if state.initial_sl > net_credit else net_credit * 1.50)
 
             # 1. Hard Stop Loss: spread jumped above 1.5x initial credit
             if current_price >= hard_sl:
@@ -384,8 +403,8 @@ class PositionMonitor:
                 f"LTP={current_price:.2f} <= SL={effective_sl:.2f} "
                 f"(initial_sl={state.initial_sl:.2f}, current_sl={state.current_sl:.2f}, bars_held={bars_held})"
             )
-            # Sync broker SL up to the effective SL value before exiting
-            self._modify_broker_sl_manual(state, effective_sl)
+            # Do not modify broker SL trigger order right before calling _on_exit to avoid
+            # double-exit / naked short race condition. OrderManager will verify and cancel pending orders.
             if self._on_exit:
                 self._on_exit(state.position_id, current_price, phase_label)
             return
@@ -549,21 +568,46 @@ class PositionMonitor:
         price_for_trail = current_price
 
         if not state.breakeven_set:
-            # Stage 0: Progressive Ratchet (Stage 0B Breakeven / Stage 0A Half-Risk Cut)
-            be_pct = 1.08 if state.low_vix_mode else 1.10
-            pct_trigger = entry * be_pct
-            rd_trigger = entry + rd * state.breakeven_ratio if rd > 0 else pct_trigger
-            tgt_distance = getattr(state, "target_gain_pts", 0.0) or ((state.target - entry) if state.target > entry else 0.0)
-            tgt_trigger = (entry + tgt_distance * 0.50) if tgt_distance > 0 else pct_trigger
-            be_trigger = min(pct_trigger, rd_trigger, tgt_trigger)
-
+            # Stage 0: Progressive Ratchet (Tier C Micro-Lock / Tier S/B Noise Floor Breakeven / Half-Risk Cut)
             sym_root = (getattr(state, "symbol", "") or "").upper()
-            is_high_noise = ("SENSEX" in sym_root or "BANK" in sym_root)
+            if "SENSEX" in sym_root:
+                cost_buffer_pts = 3.0   # ~Rs 60 costs / 20 lot size
+                min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
+            elif "BANK" in sym_root:
+                cost_buffer_pts = 1.9   # ~Rs 57 costs / 30 lot size
+                min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
+            else:
+                cost_buffer_pts = 0.9   # NIFTY default: ~Rs 56.30 costs / 65 lot size
+                min_be_gain = 2.0       # NIFTY default: tight noise floor, standard 0.4R is safe
 
-            # Stage 0B: Breakeven (At 0.85R for SENSEX/BANKNIFTY, or standard trigger for NIFTY)
-            can_be = (price_for_trail >= entry + rd * 0.85) if is_high_noise else (price_for_trail >= be_trigger)
-            if can_be:
-                new_sl = round(max(entry * 1.015, entry + max(rd * 0.10, entry * 0.015)), 2)
+            if getattr(state, "low_vix_mode", False):
+                cost_buffer_pts = max(cost_buffer_pts, entry * 0.015)
+
+            gain_pts = price_for_trail - entry
+            tgt_distance = getattr(state, "target_gain_pts", 0.0) or ((state.target - entry) if state.target > entry else 0.0)
+            be_gain_threshold = min(10.0, tgt_distance * 0.50) if tgt_distance > 0 else 10.0
+            be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
+            progress = gain_pts / max(rd, 1.0)
+
+            is_tier_c = (getattr(state, "tier", "") or "").upper() == "C"
+            micro_lock_pts = 12.0 if ("BANK" in sym_root or "SENSEX" in sym_root) else 5.0
+
+            # Tier C: Offensive Micro-Lock (Capped Scalp Targets)
+            if is_tier_c and not state.breakeven_set and gain_pts >= micro_lock_pts:
+                new_sl = round(entry + cost_buffer_pts, 2)
+                if new_sl > state.current_sl:
+                    state.current_sl = new_sl
+                    state.breakeven_set = True
+                    state.half_risk_set = True
+                    stage_changed = True
+                    logger.info(
+                        f"[TRAIL] {state.position_id} TIER_C_MICRO_LOCK: "
+                        f"SL {old_sl:.2f} -> {new_sl:.2f} (gain={gain_pts:.2f} pts >= {micro_lock_pts:.1f} pts, "
+                        f"covering entry + Rs {cost_buffer_pts:.2f} costs)"
+                    )
+            # Tier S / Tier B (and default): Defensive Runner Ladder outside noise floor
+            elif not is_tier_c and not state.breakeven_set and (gain_pts >= min_be_gain) and (progress >= 0.4 or gain_pts >= be_trigger_pts):
+                new_sl = round(entry + cost_buffer_pts, 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
                     state.breakeven_set = True
@@ -573,8 +617,8 @@ class PositionMonitor:
                         f"[TRAIL] {state.position_id} Stage 0B BREAKEVEN: "
                         f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f}, Entry={entry:.2f})"
                     )
-            # Stage 0A: Half-Risk Cut (for high-noise symbols between be_trigger and 0.85R)
-            elif is_high_noise and not getattr(state, "half_risk_set", False) and price_for_trail >= be_trigger:
+            # Progressive Ratchet Stage 0A: Half-Risk Cut (for Tier S/B between be_trigger_pts and min_be_gain)
+            elif not is_tier_c and not getattr(state, "half_risk_set", False) and not state.breakeven_set and (gain_pts >= be_trigger_pts or progress >= 0.4):
                 half_risk_sl = round(entry - 0.50 * rd, 2)
                 if half_risk_sl > state.current_sl:
                     state.current_sl = half_risk_sl

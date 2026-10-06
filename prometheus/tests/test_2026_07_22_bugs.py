@@ -1767,10 +1767,10 @@ def test_max_pain_aligned_pivot_is_consistent_with_brute_force():
     pain = np.zeros(len(union_strikes))
     for i, E in enumerate(union_strikes):
         pain[i] = (
-            np.sum(ce_oi * np.maximum(union_strikes - E, 0)) +
-            np.sum(pe_oi * np.maximum(E - union_strikes, 0))
+            np.sum(ce_oi * np.maximum(E - union_strikes, 0)) +
+            np.sum(pe_oi * np.maximum(union_strikes - E, 0))
         )
-    brute_mp = float(union_strikes[int(np.argmax(pain))])
+    brute_mp = float(union_strikes[int(np.argmin(pain))])
     
     assert pivot_mp == brute_mp, (
         f"max_pain via pivot analyzer ({pivot_mp}) != "

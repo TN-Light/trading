@@ -55,6 +55,12 @@ class ManagedPosition:
     is_monthly_expiry: bool = False
     spot_at_signal: float = 0.0
     bar_timestamp: str = ""
+    strategy_type: str = ""
+    target_decay_price: float = 0.0
+    breakeven_decay_price: float = 0.0
+    hard_sl_price: float = 0.0
+    tier: str = "B"
+    atr: float = 0.0
 
 
 class OrderManager:
@@ -158,6 +164,13 @@ class OrderManager:
             return self._execute_straddle(signal, quantity)
         elif action == "BUY_STRANGLE":
             return self._execute_strangle(signal, quantity)
+        elif (
+            action in ("BEAR_CALL_SPREAD", "BULL_PUT_SPREAD", "SELL_BEAR_CALL_SPREAD", "SELL_BULL_PUT_SPREAD", "SELL_CALL_SPREAD", "SELL_PUT_SPREAD")
+            or signal.get("strategy_type") == "credit_spread"
+            or "credit_spread" in signal.get("strategy", "").lower()
+            or "spread" in signal.get("strategy", "").lower()
+        ):
+            return self._execute_credit_spread(signal, quantity, risk_check)
         else:
             self.last_execution_error = f"Unknown action: {action}"
             logger.warning(f"Unknown action: {action}")
@@ -429,6 +442,123 @@ class OrderManager:
         # Same structure as straddle, different strikes
         return self._execute_straddle(signal, quantity)
 
+    def _execute_credit_spread(
+        self,
+        signal: Dict,
+        quantity: int,
+        risk_check=None,
+    ) -> Optional[ManagedPosition]:
+        """Execute a defined-risk credit spread (hedged options selling)."""
+        symbol = signal.get("symbol", "")
+        sym_up = symbol.upper()
+        exchange = "BFO" if ("SENSEX" in sym_up or "BSX" in sym_up or "BANKEX" in sym_up) else "NFO"
+        lot_size = get_lot_size(symbol)
+        position_id = self._next_position_id()
+        entry_orders = []
+
+        legs = signal.get("legs", [])
+        net_credit = float(signal.get("net_credit") or signal.get("entry_price") or signal.get("entry_premium") or 0.0)
+
+        if legs:
+            # Sort legs to execute BUY (hedge) leg FIRST for SEBI margin benefit, then SELL leg
+            sorted_legs = sorted(legs, key=lambda l: 0 if (l.get("action", "").upper() == "BUY" or l.get("is_hedge")) else 1)
+            for leg in sorted_legs:
+                leg_side = OrderSide.BUY if (leg.get("action", "").upper() == "BUY" or leg.get("is_hedge")) else OrderSide.SELL
+                leg_ts = leg.get("tradingsymbol") or leg.get("instrument") or ""
+                leg_qty = int(leg.get("quantity") or (leg.get("lots", 1) * leg.get("lot_size", lot_size)) or quantity)
+                leg_price = float(leg.get("premium", 0.0) or leg.get("price", 0.0) or 0.0)
+
+                order = Order(
+                    symbol=symbol,
+                    tradingsymbol=leg_ts,
+                    exchange=exchange,
+                    side=leg_side,
+                    order_type=OrderType.MARKET,
+                    product=ProductType.MIS,
+                    quantity=leg_qty,
+                    price=leg_price,
+                    tag=f"P-CS-{position_id[-4:]}",
+                )
+                filled = self.broker.place_order(order)
+                entry_orders.append(filled)
+
+                if filled.status == OrderStatus.REJECTED:
+                    # Unwind any filled legs to avoid unhedged exposure
+                    for prev in entry_orders[:-1]:
+                        if prev.status in (OrderStatus.OPEN, OrderStatus.COMPLETE):
+                            self._close_order(prev)
+                    self.last_execution_error = f"Credit spread leg rejected: {filled.message}"
+                    logger.error(f"Credit spread leg rejected: {filled.message}")
+                    return None
+        else:
+            # Fallback for single composite tradingsymbol (paper/test scenarios)
+            ts = signal.get("tradingsymbol") or signal.get("instrument", "")
+            order = Order(
+                symbol=symbol,
+                tradingsymbol=ts,
+                exchange=exchange,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                product=ProductType.MIS,
+                quantity=quantity,
+                price=net_credit,
+                tag=f"P-CS-{position_id[-4:]}",
+            )
+            filled = self.broker.place_order(order)
+            entry_orders.append(filled)
+            if filled.status == OrderStatus.REJECTED:
+                self.last_execution_error = f"Credit spread order rejected: {filled.message}"
+                logger.error(f"Credit spread order rejected: {filled.message}")
+                return None
+
+        hard_sl = float(signal.get("hard_sl_price", 0.0) or signal.get("stop_loss", 0.0) or (net_credit * 1.5))
+        tgt_decay = float(signal.get("target_decay_price", 0.0) or signal.get("target", 0.0) or (net_credit * 0.3))
+        be_decay = float(signal.get("breakeven_decay_price", 0.0) or (net_credit * 0.5))
+        tier_val = signal.get("tier", getattr(signal, "tier", "B"))
+
+        managed = ManagedPosition(
+            position_id=position_id,
+            symbol=symbol,
+            strategy=signal.get("strategy", "credit_spread"),
+            direction=signal.get("direction", "neutral_range"),
+            entry_orders=entry_orders,
+            exit_orders=[],
+            stop_loss=hard_sl,
+            target=tgt_decay,
+            trailing_stop=hard_sl,
+            entry_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        managed.tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument", "")
+        managed.entry_premium = net_credit
+        managed.strategy_type = "credit_spread"
+        managed.hard_sl_price = hard_sl
+        managed.target_decay_price = tgt_decay
+        managed.breakeven_decay_price = be_decay
+        managed.tier = tier_val
+        managed.status = "open"
+
+        self.managed_positions[position_id] = managed
+
+        # Log trade to store
+        self.store.log_trade({
+            "symbol": managed.tradingsymbol,
+            "instrument": managed.tradingsymbol,
+            "action": "SELL_SPREAD",
+            "quantity": quantity,
+            "price": net_credit,
+            "order_type": "MARKET",
+            "strategy": managed.strategy,
+            "signal_strength": signal.get("confidence", 0),
+            "stop_loss": managed.stop_loss,
+            "target": managed.target,
+        })
+
+        logger.info(
+            f"Credit spread opened: {position_id} | {managed.tradingsymbol} | "
+            f"Net Credit: Rs {net_credit:.2f} | Hard SL: {hard_sl:.2f} | Target Decay: {tgt_decay:.2f}"
+        )
+        return managed
+
     def close_position(
         self,
         position_id: str,
@@ -505,14 +635,79 @@ class OrderManager:
 
         total_pnl = 0.0
 
-        # Cancel any pending exit orders
-        for exit_order in managed.exit_orders:
+        # Cancel and verify status of any pending exit orders
+        for exit_order in list(managed.exit_orders):
+            if exit_order.order_id:
+                try:
+                    updated = self.broker.get_order_status(exit_order.order_id)
+                    if updated:
+                        exit_order.status = updated.status
+                        if updated.filled_quantity > 0:
+                            exit_order.filled_quantity = updated.filled_quantity
+                        if updated.average_price > 0:
+                            exit_order.average_price = updated.average_price
+                except Exception as e:
+                    logger.debug(f"Error checking status for order {exit_order.order_id}: {e}")
+
             if exit_order.status in (OrderStatus.OPEN, OrderStatus.TRIGGER_PENDING):
-                self.broker.cancel_order(exit_order.order_id)
+                try:
+                    self.broker.cancel_order(exit_order.order_id)
+                    # Re-query broker to verify cancellation or detect if order filled during cancel attempt
+                    updated = self.broker.get_order_status(exit_order.order_id)
+                    if updated:
+                        exit_order.status = updated.status
+                        if updated.filled_quantity > 0:
+                            exit_order.filled_quantity = updated.filled_quantity
+                        if updated.average_price > 0:
+                            exit_order.average_price = updated.average_price
+                except Exception as e:
+                    logger.debug(f"Error cancelling exit order {exit_order.order_id}: {e}")
+
+        # Check broker positions once to detect already-closed legs
+        broker_positions_map = {}
+        try:
+            bps = self.broker.get_positions()
+            for bp in bps:
+                broker_positions_map[bp.tradingsymbol] = bp.quantity
+        except Exception as e:
+            logger.debug(f"Error querying broker positions during close_position: {e}")
 
         # Close all legs
         for entry_order in managed.entry_orders:
             if entry_order.status != OrderStatus.COMPLETE:
+                continue
+
+            # Race condition / duplicate exit guard:
+            # Check if this leg was ALREADY closed by a completed exit order (e.g. broker SL trigger order executed)
+            completed_exit = None
+            for eo in managed.exit_orders:
+                if (
+                    eo.tradingsymbol == entry_order.tradingsymbol
+                    and eo.status == OrderStatus.COMPLETE
+                    and eo.filled_quantity >= entry_order.filled_quantity
+                ):
+                    completed_exit = eo
+                    break
+
+            if completed_exit is not None:
+                logger.info(
+                    f"Leg {entry_order.tradingsymbol} already closed by exit order "
+                    f"{completed_exit.order_id} @ {completed_exit.average_price:.2f}. "
+                    f"Skipping duplicate market order to prevent naked shorting."
+                )
+                if entry_order.side == OrderSide.BUY:
+                    pnl = (completed_exit.average_price - entry_order.average_price) * entry_order.filled_quantity
+                else:
+                    pnl = (entry_order.average_price - completed_exit.average_price) * entry_order.filled_quantity
+                total_pnl += pnl
+                continue
+
+            # Check if broker reports net quantity is already 0 for this tradingsymbol
+            if entry_order.tradingsymbol in broker_positions_map and broker_positions_map[entry_order.tradingsymbol] == 0:
+                logger.info(
+                    f"Broker net position for {entry_order.tradingsymbol} is already 0. "
+                    f"Skipping duplicate market exit to prevent naked shorting."
+                )
                 continue
 
             close_side = OrderSide.SELL if entry_order.side == OrderSide.BUY else OrderSide.BUY
@@ -532,6 +727,7 @@ class OrderManager:
             )
 
             filled = self.broker.place_order(close_order)
+            managed.exit_orders.append(filled)
             if filled.status == OrderStatus.COMPLETE:
                 if entry_order.side == OrderSide.BUY:
                     pnl = (filled.average_price - entry_order.average_price) * entry_order.filled_quantity
@@ -583,6 +779,25 @@ class OrderManager:
         except Exception as e:
             logger.error(f"Error serializing entry orders: {e}")
 
+        strategy_type = getattr(managed, "strategy_type", "")
+        if not strategy_type:
+            strat = getattr(managed, "strategy", "").lower()
+            if "credit_spread" in strat or "spread" in strat:
+                strategy_type = "credit_spread"
+
+        hard_sl = float(getattr(managed, "hard_sl_price", 0.0) or 0.0)
+        target_decay = float(getattr(managed, "target_decay_price", 0.0) or 0.0)
+        be_decay = float(getattr(managed, "breakeven_decay_price", 0.0) or 0.0)
+        tier_val = getattr(managed, "tier", "B")
+
+        if strategy_type == "credit_spread":
+            if hard_sl <= 0:
+                hard_sl = managed.stop_loss if managed.stop_loss > 0 else (managed.entry_premium * 1.5)
+            if target_decay <= 0:
+                target_decay = managed.target if managed.target > 0 else (managed.entry_premium * 0.3)
+            if be_decay <= 0:
+                be_decay = managed.entry_premium * 0.5
+
         return TrailingState(
             position_id=position_id,
             tradingsymbol=managed.tradingsymbol,
@@ -600,6 +815,11 @@ class OrderManager:
             entry_orders_json=orders_json,
             entry_spot=float(getattr(managed, "spot_at_signal", 0.0) or 0.0),
             atr=float(getattr(managed, "atr", 0.0) or 0.0),
+            strategy_type=strategy_type,
+            hard_sl_price=hard_sl,
+            target_decay_price=target_decay,
+            breakeven_decay_price=be_decay,
+            tier=tier_val,
         )
 
     # -------------------------------------------------------------------------

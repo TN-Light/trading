@@ -26,6 +26,7 @@ Identifies both:
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, date, time as dtime
@@ -276,8 +277,12 @@ class PositionHealthEngine:
         inactive_weight = sum(weights[k] for k in weights if abs(p_scores.get(k, 0.0)) == 0)
         effective_denominator = max(3.0, active_weight + (0.35 * inactive_weight))
         raw_composite = weighted_sum / effective_denominator
-        # Bound cleanly to [-100.0, +100.0]
-        composite_score = round(max(-100.0, min(100.0, raw_composite)), 1)
+        # Bound cleanly to [-100.0, +100.0] with NaN trap guard
+        import math
+        if math.isnan(raw_composite):
+            composite_score = 0.0
+        else:
+            composite_score = round(max(-100.0, min(100.0, raw_composite)), 1)
         
         report.health_score = composite_score
         report.pillar_scores = {k: round(v, 1) for k, v in p_scores.items()}
@@ -289,11 +294,25 @@ class PositionHealthEngine:
         # ─────────────────────────────────────────────────────────────────
         # REAL THREAT: Severe structural invalidation (Score <= -35.0 or 2+ threats with <= -25.0)
         gain_pts = current_premium - entry_premium
+        sym_upper = symbol.upper()
+        noise_buffer = 14.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 6.0
+        tier = (getattr(state, "tier", "B") or "B").upper()
+        bars_held = getattr(state, "entry_bar_count", 0)
+
         if composite_score <= -35.0 or (composite_score <= -25.0 and len(threats) >= 2):
             report.real_threat = True
-            # If position is near entry or underwater (loss < hard SL), recommend pre-SL bailout
-            if gain_pts <= 2.0:
-                report.suggested_action = "PRE_SL_BAILOUT"
+            is_tier_sb = tier in ("S", "B")
+            within_noise = gain_pts > -noise_buffer
+
+            # Tier S/B high-conviction runners must never be bailed out within the noise envelope
+            if is_tier_sb and within_noise:
+                report.suggested_action = "HOLD"
+            # Require minimum holding time (>= 1 bar) or meaningful loss past noise floor (<= -noise_buffer)
+            elif gain_pts <= 2.0:
+                if bars_held >= 1 or gain_pts <= -noise_buffer:
+                    report.suggested_action = "PRE_SL_BAILOUT"
+                else:
+                    report.suggested_action = "HOLD"
             else:
                 report.suggested_action = "TIGHTEN_SL"
         elif composite_score >= 45.0 and len(favors) >= 2:
@@ -321,6 +340,10 @@ class PositionHealthEngine:
     ) -> Tuple[float, float, Optional[str], Optional[str]]:
         """P1: Anchored VWAP distance and slope."""
         try:
+            import math
+            if spot is None or math.isnan(spot) or spot <= 0:
+                return 0.0, 0.0, None, None
+
             from prometheus.signals.technical import calculate_session_vwap
             vwap_df = calculate_session_vwap(df)
             if vwap_df.empty or "vwap" not in vwap_df.columns:
@@ -377,6 +400,8 @@ class PositionHealthEngine:
 
             rvol = round(curr_vol / sma_vol, 2)
             spot_progress = (spot - entry_spot) if trade_is_bullish else (entry_spot - spot)
+            if math.isnan(spot_progress):
+                return 0.0, rvol, None, None
 
             # Volume Exhaustion Divergence: Price moves in favor, but volume collapses (< 0.45x)
             if spot_progress > 0 and rvol < 0.45:
@@ -390,7 +415,7 @@ class PositionHealthEngine:
             elif spot_progress > 0 and rvol >= 1.80:
                 favor_msg = f"Institutional breakout confirmation: RVOL surging at {rvol:.2f}x normal volume"
                 return +75.0, rvol, None, favor_msg
-            elif rvol >= 1.10:
+            elif spot_progress > 0 and rvol >= 1.10:
                 return +25.0, rvol, None, None
             else:
                 return 0.0, rvol, None, None
@@ -452,12 +477,14 @@ class PositionHealthEngine:
             return 0.0, 0, None, None
 
     def _eval_pillar_gex(
-        self, symbol: str, spot: float, trade_is_bullish: bool
+        self, symbol: str, spot: float, trade_is_bullish: bool, override: Optional[Any] = None
     ) -> Tuple[float, float, Optional[str], Optional[str]]:
         """P4: Dealer Gamma Exposure and ZGL Migration."""
         try:
             now = time.time()
-            if symbol in self._gex_cache and (now - self._gex_cache[symbol][0]) < self.cache_ttl_seconds:
+            if override is not None:
+                gex_profile = override
+            elif symbol in self._gex_cache and (now - self._gex_cache[symbol][0]) < self.cache_ttl_seconds:
                 gex_profile = self._gex_cache[symbol][1]
             elif self.data_engine and getattr(self.data_engine, "angelone_options", None):
                 ao = self.data_engine.angelone_options
@@ -472,8 +499,36 @@ class PositionHealthEngine:
             if not gex_profile:
                 return 0.0, 0.0, None, None
 
-            net_gex = getattr(gex_profile, "net_gex", 0.0)
-            zgl = getattr(gex_profile, "zero_gamma_level", 0.0) or spot
+            if isinstance(gex_profile, dict):
+                net_gex = float(gex_profile.get("net_gex_cr", 0.0) or (gex_profile.get("net_gex", 0.0) / 1e7 if abs(gex_profile.get("net_gex", 0.0)) > 1000 else gex_profile.get("net_gex", 0.0)))
+                zgl = float(gex_profile.get("zgl", 0.0) or gex_profile.get("zero_gamma_level", 0.0) or spot)
+            else:
+                raw_gex = 0.0
+                for attr in ("net_gex", "net_gex_cr"):
+                    val = getattr(gex_profile, attr, None)
+                    if isinstance(val, (int, float)):
+                        raw_gex = float(val)
+                        break
+                else:
+                    try:
+                        raw_gex = float(getattr(gex_profile, "net_gex_cr", getattr(gex_profile, "net_gex", 0.0)))
+                    except Exception:
+                        raw_gex = 0.0
+
+                net_gex = raw_gex / 1e7 if abs(raw_gex) > 1000 else raw_gex
+
+                raw_zgl = spot
+                for attr in ("zgl", "zero_gamma_level"):
+                    val = getattr(gex_profile, attr, None)
+                    if isinstance(val, (int, float)):
+                        raw_zgl = float(val)
+                        break
+                else:
+                    try:
+                        raw_zgl = float(getattr(gex_profile, "zgl", getattr(gex_profile, "zero_gamma_level", spot)))
+                    except Exception:
+                        raw_zgl = spot
+                zgl = raw_zgl
 
             # SHORT GAMMA REGIME (Dealers must chase price = Squeeze Velocity)
             if net_gex < -0.5:
@@ -639,6 +694,20 @@ class PositionHealthEngine:
         """Clean, retail-friendly runner acceleration notice."""
         reasons_text = "\n".join([f"• {r}" for r in report.favor_reasons[:3]]) or "• High-velocity institutional momentum detected."
         
+        gain_pts = max(0.0, report.current_price - report.entry_price)
+        sym_upper = (report.symbol or "").upper()
+        if "SENSEX" in sym_upper or "BSX" in sym_upper:
+            min_be_buffer = 20.0
+        elif "BANKNIFTY" in sym_upper or "BANK" in sym_upper:
+            min_be_buffer = 18.0
+        else:
+            min_be_buffer = 5.0
+
+        if gain_pts >= min_be_buffer:
+            action_desc = "Move Stop Loss to Breakeven to lock in capital protection (downside mitigated to breakeven, subject to slippage)."
+        else:
+            action_desc = f"Preserve wide breathing room (current gain {gain_pts:.1f} pts < {min_be_buffer:.1f} pt noise floor) to protect runner against premature shakeout."
+
         return (
             f"🚀 <b>RUNNER ACCELERATION: INSTITUTIONAL SQUEEZE</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -650,6 +719,6 @@ class PositionHealthEngine:
             f"🎯 <b>TARGET EXPANDED:</b>\n"
             f"Old Target: Rs {old_target:.2f} ➔ <b>New Runner Target: Rs {new_target:.2f}</b> (+{report.suggested_target_expansion:.1f} pts)\n\n"
             f"⚡ <b>RECOMMENDED ACTION ON KITE/ZERODHA:</b>\n"
-            f"👉 <b>Hold position and let profits run!</b> Move Stop Loss to Breakeven to guarantee a 100% risk-free trade.\n"
+            f"👉 <b>Hold position and let profits run!</b> {action_desc}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )

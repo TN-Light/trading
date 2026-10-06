@@ -36,7 +36,12 @@ def calculate_black_scholes_gamma(
 
     Gamma is identical for European calls and puts.
     """
-    if spot <= 0 or strike <= 0 or sigma <= 0:
+    if (
+        spot is None or strike is None or dte is None or sigma is None
+        or math.isnan(spot) or math.isnan(strike) or math.isnan(dte) or math.isnan(sigma)
+        or math.isinf(spot) or math.isinf(strike) or math.isinf(dte) or math.isinf(sigma)
+        or spot <= 0 or strike <= 0 or sigma <= 0
+    ):
         return 0.0
 
     T = max(dte, 0.25) / 365.0
@@ -94,7 +99,14 @@ class GammaEngine:
             "gamma_regime": "NEUTRAL",
         }
 
-        if chain_df is None or chain_df.empty or spot_price <= 0:
+        if (
+            chain_df is None
+            or chain_df.empty
+            or spot_price is None
+            or math.isnan(spot_price)
+            or math.isinf(spot_price)
+            or spot_price <= 0
+        ):
             return empty_result
 
         try:
@@ -119,17 +131,32 @@ class GammaEngine:
         strikes_data: List[Dict[str, Any]] = []
         for _, row in df.iterrows():
             try:
-                stk = float(row[strike_col])
-                otype = str(row[type_col]).upper().strip()
-                oi = float(row[oi_col] or 0.0)
+                stk_raw = row[strike_col]
+                oi_raw = row[oi_col]
+                if pd.isna(stk_raw) or pd.isna(oi_raw):
+                    continue
+                stk = float(stk_raw)
+                oi = float(oi_raw)
+                if math.isnan(stk) or math.isinf(stk) or math.isnan(oi) or math.isinf(oi):
+                    continue
                 if oi <= 0 or stk <= 0:
                     continue
+
+                otype = str(row[type_col]).upper().strip()
 
                 # Filter to relevant strike envelope (within ±10% of spot)
                 if abs(stk - spot_price) / spot_price > 0.12:
                     continue
 
-                iv = float(row[iv_col]) if iv_col and pd.notna(row.get(iv_col)) else default_iv
+                iv = default_iv
+                if iv_col and pd.notna(row.get(iv_col)):
+                    try:
+                        iv_val = float(row[iv_col])
+                        if not math.isnan(iv_val) and not math.isinf(iv_val):
+                            iv = iv_val
+                    except Exception:
+                        iv = default_iv
+
                 if iv > 1.0:  # e.g. given as percentage like 14.5%
                     iv = iv / 100.0
                 if iv <= 0.02 or iv > 1.50:

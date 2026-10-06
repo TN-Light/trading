@@ -16,14 +16,14 @@ from datetime import datetime
 from prometheus.utils.logger import logger
 
 
-# Regime quality tiers from backtest data (shared with CLI dashboard)
+# Regime classification labels (shared with CLI dashboard)
 REGIME_QUALITY = {
-    "markup":       ("HIGH",  "62% WR"),
-    "markdown":     ("HIGH",  "58% WR"),
-    "accumulation": ("MED",   "~40% WR"),
-    "distribution": ("MED",   "~40% WR"),
-    "volatile":     ("LOW",   "uncertain"),
-    "unknown":      ("WEAK",  "26% WR"),
+    "markup":       ("HIGH",  "Trend Expansion"),
+    "markdown":     ("HIGH",  "Trend Expansion"),
+    "accumulation": ("MED",   "Range Consolidation"),
+    "distribution": ("MED",   "Range Consolidation"),
+    "volatile":     ("LOW",   "High Dispersion"),
+    "unknown":      ("WEAK",  "Unconfirmed Regime"),
 }
 
 
@@ -986,12 +986,12 @@ class TelegramBot:
         emoji = "\U0001f7e2" if "CE" in action else "\U0001f534"
         direction = "BULLISH" if "CE" in action else "BEARISH"
 
-        quality, wr = REGIME_QUALITY.get(regime, ("???", ""))
+        quality, reg_desc = REGIME_QUALITY.get(regime, ("???", ""))
         caution = ""
         if quality == "WEAK":
-            caution = "\n⚠️ Low-confidence regime (26% WR)"
+            caution = f"\n⚠️ Low-confidence regime ({reg_desc})"
         elif quality == "LOW":
-            caution = "\n⚠️ Volatile regime — lower conviction"
+            caution = f"\n⚠️ Volatile regime — lower conviction ({reg_desc})"
 
         INDEX_MAP = {
             "SENSEX": "SENSEX",
@@ -1346,8 +1346,8 @@ class TelegramBot:
             headline = "🛡️ <b>TRAILING STOP: CAPITAL PROTECTED (BREAKEVEN)</b>"
             action_desc = (
                 f"Move Stop Loss order on Kite/Zerodha to <b>Rs {new_sl:.2f}</b> "
-                f"(Covers Entry + all brokerage & taxes). "
-                f"<i>This trade is now 100% risk-free and cannot lose money!</i>"
+                f"(Covers Entry + estimated brokerage & taxes). "
+                f"<i>Capital protection active; downside risk mitigated to breakeven (subject to execution slippage).</i>"
             )
         elif "half_risk" in stage.lower():
             headline = "🛡️ <b>TRAILING STOP: RISK CUT 50% (DEFENSIVE CUSHION)</b>"
@@ -1466,7 +1466,7 @@ class TelegramBot:
                 action_directive = "Ensure position is closed on Kite if not auto-squared off by broker."
             elif "threat" in raw_reason or "invalidation" in raw_reason or "structural" in raw_reason:
                 reason_title = "🛡️ <b>EARLY DEFENSE: STRUCTURAL BAILOUT</b>"
-                reason_desc = "Momentum failed 8-pillar microstructure health check (VWAP breakdown, volume exhaustion, or opposing OI). Exited early to save 50-70% of risk before hard stop loss."
+                reason_desc = "Trade invalidated by 8-pillar microstructure health check (severe VWAP loss, volume exhaustion, or opposing institutional flow beyond noise buffer). Exited early to prevent full stop loss hit."
                 action_directive = "<b>Exit immediately on Kite/Zerodha</b> to protect capital from further breakdown."
             elif "adverse" in raw_reason:
                 reason_title = "⚠️ <b>ADVERSE STRUCTURAL EXIT</b>"

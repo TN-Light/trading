@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 from prometheus.utils.options_math import max_pain, pcr_ratio
+from prometheus.utils.logger import logger
 
 
 @dataclass
@@ -55,10 +56,16 @@ class OIAnalyzer:
         if chain_df.empty:
             return {"signals": [], "metrics": {}}
 
+        # Validate required columns to prevent history poisoning and runtime crashes
+        required_cols = {"option_type", "oi", "strike"}
+        if not required_cols.issubset(set(chain_df.columns)):
+            logger.warning(f"Malformed option chain DF missing required columns: {required_cols - set(chain_df.columns)}")
+            return {"signals": [], "metrics": {}}
+
         calls = chain_df[chain_df["option_type"] == "CE"].copy()
         puts = chain_df[chain_df["option_type"] == "PE"].copy()
 
-        # Store snapshot for velocity calculation
+        # Store snapshot for velocity calculation (only after schema validation)
         self.oi_history.append(chain_df.copy())
         if len(self.oi_history) > self.max_history:
             self.oi_history.pop(0)
@@ -138,7 +145,8 @@ class OIAnalyzer:
         atm_df = chain_df[atm_mask] if not chain_df.empty else chain_df
         tot_oi_change = float(abs(atm_df["oi_change"]).sum()) if not atm_df.empty and "oi_change" in atm_df.columns else 0.0
         tot_volume = float(atm_df["volume"].sum()) if not atm_df.empty and "volume" in atm_df.columns else 0.0
-        commitment_ratio = round(tot_oi_change / max(tot_volume, 1.0), 3) if tot_volume > 0 else 0.0
+        raw_cr = (tot_oi_change / max(tot_volume, 1.0)) if tot_volume > 0 else 0.0
+        commitment_ratio = round(min(1.0, max(0.0, raw_cr)), 3)
         metrics["commitment_ratio"] = commitment_ratio
 
         return {"signals": signals, "metrics": metrics}
@@ -176,6 +184,8 @@ class OIAnalyzer:
         PCR 0.8–1.2 → Neutral zone
         """
         oi_pcr = pcr["oi"]
+        if oi_pcr <= 0.0:
+            return None
 
         if oi_pcr > 1.3:
             return OISignal(

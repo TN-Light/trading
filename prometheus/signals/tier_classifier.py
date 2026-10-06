@@ -102,7 +102,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
             score_label = f" ({score:.1f}/10)" if score > 0 else ""
             return _build_tier_result(
                 tier="A",
-                tier_name="SURE_SHOT_SPREAD",
+                tier_name="DEFINED_RISK_CREDIT_SPREAD",
                 is_live_eligible=True,
                 reasons=cls_reasons,
                 badge="⭐ <b>[TIER A: HIGH CONVICTION SPREAD — 0-DTE]</b>",
@@ -279,7 +279,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                     f"Confluence Edge Score: {score:.1f}/10"
                 ],
                 badge="🌟 <b>[TIER B: GOLDEN SETUP — 1 LOT CONSERVATIVE]</b>",
-                instruction="🎯 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution (Breakeven Trail at +10 pts)"
+                instruction="🎯 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution (Half-Risk Cut & Breakeven Trail at +18/+20 pts outside noise floor)"
             )
 
         # TIER C (Standard Momentum / Partial Confluences):

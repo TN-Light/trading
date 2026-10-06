@@ -214,17 +214,17 @@ def max_pain(
     if n == 0:
         return float(spot)
 
-    total_pain = np.zeros(n)
+    total_payout = np.zeros(n)
 
-    for i, strike in enumerate(strikes):
-        # Call holders' pain at this expiry price
-        call_pain = np.sum(call_oi * np.maximum(strikes - strike, 0))
-        # Put holders' pain at this expiry price
-        put_pain = np.sum(put_oi * np.maximum(strike - strikes, 0))
-        total_pain[i] = call_pain + put_pain
+    for i, expiry_price in enumerate(strikes):
+        # Call buyers' payout at this settlement price (ITM when expiry_price > strike)
+        call_payout = np.sum(call_oi * np.maximum(expiry_price - strikes, 0.0))
+        # Put buyers' payout at this settlement price (ITM when strike > expiry_price)
+        put_payout = np.sum(put_oi * np.maximum(strikes - expiry_price, 0.0))
+        total_payout[i] = call_payout + put_payout
 
-    # Max pain = strike where total buyer pain is maximum
-    return strikes[np.argmax(total_pain)]
+    # Max pain = strike where total buyer payout is minimized (maximum pain for buyers, minimum payout for sellers)
+    return strikes[np.argmin(total_payout)]
 
 
 def pcr_ratio(put_oi_total: float, call_oi_total: float) -> float:

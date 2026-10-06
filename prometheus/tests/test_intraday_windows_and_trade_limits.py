@@ -105,7 +105,7 @@ class TestIntradayWindowsAndTiers:
         }
         res = classify_signal_tier(signal)
         assert res["tier"] == "A"
-        assert res["tier_name"] == "SURE_SHOT_SPREAD"
+        assert res["tier_name"] == "DEFINED_RISK_CREDIT_SPREAD"
         assert res["is_live_eligible"] is True
 
     def test_afternoon_window_option_buying_qualifies_tier_b(self):

@@ -100,7 +100,7 @@ class TestTierClassifier:
         }
         res = classify_signal_tier(signal)
         assert res["tier"] == "A"
-        assert res["tier_name"] == "SURE_SHOT_SPREAD"
+        assert res["tier_name"] == "DEFINED_RISK_CREDIT_SPREAD"
         assert res["is_live_eligible"] is True
         assert "TIER A" in res["tier_badge"]
 
