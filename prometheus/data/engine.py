@@ -628,7 +628,10 @@ class DataEngine:
             cached_df, cached_ts = self._mem_cache[mem_key]
             mem_ttl = getattr(self, "_mem_cache_ttl_seconds", 45.0)
             if is_live_trading_hours and is_intraday_bar:
-                mem_ttl = min(mem_ttl, 30.0)
+                if interval in ("60minute", "hour"):
+                    mem_ttl = 300.0  # 5 minutes for 1-Hour HTF candles to eliminate broker API rate limits
+                else:
+                    mem_ttl = min(mem_ttl, 30.0)
 
             if (now_ts - cached_ts) < mem_ttl:
                 if cached_df is not None and not cached_df.empty:

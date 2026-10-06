@@ -1,0 +1,2 @@
+scenario,period,trades,wins,losses,win_rate,net_pnl,avg_profit,avg_loss,profit_factor,total_return_pct,cagr,max_dd_pct,sharpe,sortino,calmar,alpha_pct,psr_pct,min_trl,max_dd_duration_days,avg_trade_pnl,avg_hold_min,bh_return_pct,bh_cagr,initial_capital,final_capital,evaluation_mode,note
+slip_0.30,full,728,442,286,60.7,16426172.18,45964.55,-13601.95,5.22,109507.81,88.56,20.4,2.16,3.12,4.34,109292.03,100.0,18,111,22563.42,78.3,215.78,10.99,15000,16441172.19,full_run_slice,csv_15m|full_run_slice

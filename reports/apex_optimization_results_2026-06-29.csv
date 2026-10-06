@@ -1,0 +1,4 @@
+mr_min_score,breakeven_ratio,session_open_time,max_intraday_trades,objective_score,trades,win_rate,profit_factor,cagr,max_dd_pct,sharpe,psr_pct,net_pnl,oos_trades,oos_cagr,oos_max_dd,oos_sharpe,oos_status
+1.5,0.4,09:30,3,8.8747,640,57.3,8.74,128.86,14.52,2.1,100.0,11021344.89,285,391.02,25.58,2.05,VERIFIED
+1.8,0.4,09:30,3,8.8747,640,57.3,8.74,128.86,14.52,2.1,100.0,11021344.89,285,391.02,25.58,2.05,VERIFIED
+2.0,0.4,09:30,3,8.8747,640,57.3,8.74,128.86,14.52,2.1,100.0,11021344.89,285,391.02,25.58,2.05,VERIFIED

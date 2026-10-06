@@ -2047,9 +2047,35 @@ class Prometheus:
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
             df_1h = None
             try:
-                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=10, force_refresh=True)
+                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=10, force_refresh=False)
             except Exception as e:
                 logger.debug(f"Could not fetch 1H data for {symbol}: {e}")
+
+            # Resampling Fallback: If 1H historical fetch returned empty (broker rate limit or network timeout),
+            # synthesize 1H bars in-memory directly from cached 15-minute bars to preserve HTF telemetry
+            if (df_1h is None or df_1h.empty) and intra_df is not None and len(intra_df) >= 8:
+                try:
+                    df_res = intra_df.copy()
+                    if not pd.api.types.is_datetime64_any_dtype(df_res["timestamp"]):
+                        df_res["timestamp"] = pd.to_datetime(df_res["timestamp"])
+                    df_1h_synth = (
+                        df_res.set_index("timestamp")
+                        .resample("1h")
+                        .agg({
+                            "open": "first",
+                            "high": "max",
+                            "low": "min",
+                            "close": "last",
+                            "volume": "sum",
+                        })
+                        .dropna()
+                        .reset_index()
+                    )
+                    if len(df_1h_synth) >= 2:
+                        df_1h = df_1h_synth
+                        logger.info(f"Synthesized {len(df_1h)} 1-Hour candles for {symbol} from 15M cache fallback")
+                except Exception as syn_e:
+                    logger.debug(f"Could not synthesize 1H bars for {symbol}: {syn_e}")
 
             pa_sig = None
             is_exp = is_weekly_expiry_day(symbol)

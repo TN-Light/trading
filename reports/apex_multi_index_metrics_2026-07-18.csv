@@ -1,0 +1,4 @@
+symbol,trades,wins,losses,win_rate,net_pnl,avg_profit,avg_loss,profit_factor,total_return_pct,cagr,max_dd_pct,sharpe,sortino,calmar,alpha_pct,psr_pct,min_trl,max_dd_duration_days,avg_trade_pnl,avg_hold_min,bh_return_pct,bh_cagr,initial_capital,final_capital
+NIFTY 50,897,498,399,55.5,15401591.11,37936.4,-8748.71,5.41,102677.27,87.46,24.38,1.77,2.34,3.59,102472.05,100.0,28,108,17170.11,77.7,205.22,10.65,15000,15416591.11
+NIFTY BANK,852,484,368,56.8,15640570.54,42174.28,-12966.79,4.28,104270.47,87.72,23.34,1.96,2.83,3.76,104054.69,100.0,18,360,18357.48,77.6,215.78,10.99,15000,15655570.56
+NIFTY FIN SERVICE,943,514,429,54.5,18453125.02,46251.83,-12401.67,4.47,123020.83,87.12,28.5,1.79,2.52,3.06,122777.94,100.0,21,127,19568.53,77.1,242.89,11.47,15000,18468124.96

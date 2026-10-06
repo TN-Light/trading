@@ -1075,12 +1075,12 @@ class TelegramBot:
         is_golden = bool(signal.get("is_golden_setup")) or ("Golden_Setup" in str(signal.get("strategy", "")))
         if assigned_tier == "S":
             header_title = "🏆 <b>PERFECT STORM IMPULSE SIGNAL</b>"
-        elif assigned_tier == "B" or is_golden:
+        elif (assigned_tier == "B" or assigned_tier == "S") and is_golden:
             header_title = "🌟 <b>NEW GOLDEN SETUP SIGNAL</b>"
         else:
             header_title = f"{emoji} <b>NEW TRADING SIGNAL</b>"
 
-        strat_name = signal.get("strategy") or ("Golden_Setup (1H+VWAP+ORB)" if is_golden else "PriceAction_Momentum")
+        strat_name = signal.get("strategy") or ("Golden_Setup (1H+VWAP+ORB)" if (is_golden and assigned_tier in ("S", "B")) else "PriceAction_Momentum")
         edge_score = signal.get("edge_score") if signal.get("edge_score") is not None else signal.get("signal_score")
         score_str = f" ({float(edge_score):.1f}/10)" if edge_score is not None else ""
         reasons_list = signal.get("reasons") or []
@@ -1100,10 +1100,23 @@ class TelegramBot:
         zgl_val = signal.get("zgl")
         zgl_str = f" | ZGL: {float(zgl_val):.0f}" if zgl_val is not None and float(zgl_val) > 0 else ""
 
+        # High-Velocity Squeeze Alert (Simple, actionable for live traders)
+        squeeze_banner = ""
+        gex_val_num = float(signal.get("net_gex", 0.0) or 0.0)
+        gamma_reg = str(signal.get("gamma_regime", "")).upper()
+        if gex_val_num < 0 or gamma_reg == "SHORT_GAMMA":
+            dir_label = "Call / Upward" if ("CE" in str(action).upper() or "BUY" in str(action).upper()) else "Put / Downward"
+            squeeze_banner = (
+                "⚡ <b>[HIGH-VELOCITY SQUEEZE ALERT]</b>\n"
+                f"<i>⚠️ Option sellers trapped! Fast, aggressive {dir_label} spike expected — take quick target or trail tightly!</i>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+
         conviction_badge = (
             f"{tier_badge}\n"
             f"{action_line}{rr_detail}{comm_str}{vpr_str}{gex_str}{zgl_str}\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{squeeze_banner}"
         )
 
         text = (
