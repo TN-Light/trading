@@ -485,3 +485,30 @@ def test_telegram_alert_formatting():
     assert "RUNNER ACCELERATION" in favor_msg
     assert "TARGET EXPANDED" in favor_msg
     assert "Hold position and let profits run" in favor_msg
+
+
+def test_pillar8_htf_trend_with_live_data_engine():
+    """Verify Pillar 8 calls get_higher_timeframe_trend on PriceActionMomentumScanner without AttributeError."""
+    mock_data = MagicMock()
+    # 5 1-Hour candles: EMA20 > EMA50 -> BULLISH
+    bars_1h = []
+    base_ts = pd.Timestamp("2026-10-06 09:15:00")
+    for i, p in enumerate([54000, 54200, 54500, 54800, 55100]):
+        bars_1h.append({
+            "timestamp": base_ts + pd.Timedelta(hours=i),
+            "open": p - 50,
+            "high": p + 100,
+            "low": p - 100,
+            "close": p,
+            "volume": 50000,
+        })
+    df_1h = pd.DataFrame(bars_1h)
+    mock_data.fetch_historical.return_value = df_1h
+
+    engine = PositionHealthEngine(data_engine=mock_data)
+    score, regime, threat, favor = engine._eval_pillar_htf("NIFTY BANK", trade_is_bullish=True)
+    assert regime in {"BULLISH", "EMERGING_BULLISH"}
+    assert score > 0
+    assert favor is not None
+    assert threat is None
+

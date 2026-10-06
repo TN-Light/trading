@@ -562,8 +562,8 @@ class PositionHealthEngine:
                 htf_regime = self._htf_cache[symbol][1]
             elif self.data_engine:
                 from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
-                scanner = PriceActionMomentumScanner(self.data_engine)
-                htf_regime = scanner._get_higher_timeframe_trend(symbol)
+                df_1h = self.data_engine.fetch_historical(symbol, days=5, interval="60minute")
+                htf_regime = PriceActionMomentumScanner.evaluate_htf_trend(df_1h)
                 self._htf_cache[symbol] = (now, htf_regime)
             else:
                 htf_regime = "NEUTRAL"

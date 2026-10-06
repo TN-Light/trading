@@ -167,31 +167,7 @@ class PriceActionMomentumScanner:
                 return None
 
         # ── 3. Higher Timeframe (1-Hour) Trend Alignment ──
-        htf_trend = "NEUTRAL"
-        if df_1h is not None and len(df_1h) >= 2:
-            try:
-                if not pd.api.types.is_datetime64_any_dtype(df_1h["timestamp"]):
-                    df_1h_clean = df_1h.copy()
-                    df_1h_clean["timestamp"] = pd.to_datetime(df_1h_clean["timestamp"])
-                else:
-                    df_1h_clean = df_1h
-                prior_1h = df_1h_clean[df_1h_clean["timestamp"] <= current_ts]
-                if len(prior_1h) >= 2:
-                    ema20 = float(prior_1h["close"].ewm(span=20, min_periods=1, adjust=False).mean().iloc[-1])
-                    ema50 = float(prior_1h["close"].ewm(span=50, min_periods=1, adjust=False).mean().iloc[-1])
-                    last_1h_close = float(prior_1h["close"].iloc[-1])
-                    if last_1h_close > ema20 and ema20 > ema50:
-                        htf_trend = "BULLISH"
-                    elif last_1h_close < ema20 and ema20 < ema50:
-                        htf_trend = "BEARISH"
-                    elif last_1h_close > ema20 and last_1h_close > ema50:
-                        htf_trend = "EMERGING_BULLISH"
-                    elif last_1h_close < ema20 and last_1h_close < ema50:
-                        htf_trend = "EMERGING_BEARISH"
-                    else:
-                        htf_trend = "NEUTRAL"
-            except Exception as e:
-                logger.debug(f"HTF 1H trend evaluation error: {e}")
+        htf_trend = self.evaluate_htf_trend(df_1h, current_ts)
 
         # ── 4. Momentum & Golden Setup Detection ──
         buffer = atr * self.min_atr_buffer
@@ -528,3 +504,35 @@ class PriceActionMomentumScanner:
             }
 
         return None
+
+    @staticmethod
+    def evaluate_htf_trend(df_1h: Optional[pd.DataFrame], current_ts: Optional[datetime] = None) -> str:
+        """Evaluate 1-Hour Higher Timeframe Trend Alignment (BULLISH, BEARISH, EMERGING, NEUTRAL)."""
+        if df_1h is None or len(df_1h) < 2:
+            return "NEUTRAL"
+        try:
+            if not pd.api.types.is_datetime64_any_dtype(df_1h["timestamp"]):
+                df_1h_clean = df_1h.copy()
+                df_1h_clean["timestamp"] = pd.to_datetime(df_1h_clean["timestamp"])
+            else:
+                df_1h_clean = df_1h
+            if current_ts is not None:
+                prior_1h = df_1h_clean[df_1h_clean["timestamp"] <= current_ts]
+            else:
+                prior_1h = df_1h_clean
+            if len(prior_1h) >= 2:
+                ema20 = float(prior_1h["close"].ewm(span=20, min_periods=1, adjust=False).mean().iloc[-1])
+                ema50 = float(prior_1h["close"].ewm(span=50, min_periods=1, adjust=False).mean().iloc[-1])
+                last_1h_close = float(prior_1h["close"].iloc[-1])
+                if last_1h_close > ema20 and ema20 > ema50:
+                    return "BULLISH"
+                elif last_1h_close < ema20 and ema20 < ema50:
+                    return "BEARISH"
+                elif last_1h_close > ema20 and last_1h_close > ema50:
+                    return "EMERGING_BULLISH"
+                elif last_1h_close < ema20 and last_1h_close < ema50:
+                    return "EMERGING_BEARISH"
+        except Exception as e:
+            logger.debug(f"evaluate_htf_trend error: {e}")
+        return "NEUTRAL"
+
