@@ -95,7 +95,8 @@ class GammaEngine:
             "net_gex_cr": 0.0,
             "call_gex_cr": 0.0,
             "put_gex_cr": 0.0,
-            "zgl": round(spot_price, 2) if spot_price > 0 else 0.0,
+            "zgl": None,
+            "has_zgl": False,
             "gamma_regime": "NEUTRAL",
         }
 
@@ -108,13 +109,6 @@ class GammaEngine:
             or spot_price <= 0
         ):
             return empty_result
-
-        try:
-            lot_size = get_lot_size(symbol)
-            if lot_size <= 0:
-                lot_size = 15 if "BANK" in symbol else 50
-        except Exception:
-            lot_size = 50
 
         # Standardize column names
         df = chain_df.copy()
@@ -174,9 +168,31 @@ class GammaEngine:
         if not strikes_data:
             return empty_result
 
-        # Compute GEX at current spot
+        def _compute_net_gex(s: float) -> float:
+            cg = 0.0
+            pg = 0.0
+            factor = (s ** 2) * 0.01
+            for itm in strikes_data:
+                g = calculate_black_scholes_gamma(
+                    spot=s,
+                    strike=itm["strike"],
+                    dte=dte,
+                    sigma=itm["iv"],
+                    r=self.r,
+                )
+                val = itm["oi"] * g * factor
+                if itm["type"] == "CE":
+                    cg += val
+                else:
+                    pg -= val
+            return cg + pg
+
+        # Compute GEX at current spot:
+        # Rupee Notional Gamma per 1% spot move: GEX_INR = Q * Gamma * S^2 * 0.01
+        # Angel One SmartAPI opnInterest (Q) is already in total underlying shares.
         call_gex_tot = 0.0
         put_gex_tot = 0.0
+        s_factor = (spot_price ** 2) * 0.01
 
         for item in strikes_data:
             gamma = calculate_black_scholes_gamma(
@@ -186,15 +202,13 @@ class GammaEngine:
                 sigma=item["iv"],
                 r=self.r,
             )
-            # Dollar/Rupee Gamma per 1% spot move:
-            # GEX = Gamma * OI * LotSize * Spot * 0.01
-            dollar_gamma = gamma * item["oi"] * lot_size * spot_price * 0.01
+            rupee_gamma = item["oi"] * gamma * s_factor
 
             if item["type"] == "CE":
-                call_gex_tot += dollar_gamma
+                call_gex_tot += rupee_gamma
             else:
                 # Dealers short puts to retail / long hedgers -> dealer put gamma is negative
-                put_gex_tot -= dollar_gamma
+                put_gex_tot -= rupee_gamma
 
         net_gex = call_gex_tot + put_gex_tot
         net_gex_cr = round(net_gex / 1e7, 2)
@@ -202,49 +216,46 @@ class GammaEngine:
         put_gex_cr = round(put_gex_tot / 1e7, 2)
 
         # ── ZERO GAMMA LEVEL (ZGL) SOLVER ──
-        # Scan hypothetical spot prices around current spot to find where Net GEX crosses zero
-        try:
-            interval = get_strike_interval(symbol)
-        except Exception:
-            interval = 50.0
-
-        min_scan = spot_price * 0.92
-        max_scan = spot_price * 1.08
-        steps = 40
-        grid = np.linspace(min_scan, max_scan, steps)
+        # High-resolution scanning grid around ATM to find where Net GEX crosses zero
+        min_scan = spot_price * 0.90
+        max_scan = spot_price * 1.10
+        coarse_grid = np.linspace(min_scan, max_scan, 50)
+        fine_grid = np.linspace(spot_price * 0.96, spot_price * 1.04, 60)
+        grid = np.unique(np.sort(np.concatenate([coarse_grid, fine_grid])))
 
         grid_gex: List[Tuple[float, float]] = []
         for s_eval in grid:
-            cg = 0.0
-            pg = 0.0
-            for item in strikes_data:
-                g = calculate_black_scholes_gamma(
-                    spot=s_eval,
-                    strike=item["strike"],
-                    dte=dte,
-                    sigma=item["iv"],
-                    r=self.r,
-                )
-                dg = g * item["oi"] * lot_size * s_eval * 0.01
-                if item["type"] == "CE":
-                    cg += dg
-                else:
-                    pg -= dg
-            grid_gex.append((float(s_eval), float(cg + pg)))
+            grid_gex.append((float(s_eval), _compute_net_gex(float(s_eval))))
 
         # Find zero crossing
-        zgl = spot_price
+        found_crossing = False
+        zgl_val = None
+
         for i in range(len(grid_gex) - 1):
             s1, g1 = grid_gex[i]
             s2, g2 = grid_gex[i + 1]
             if (g1 <= 0 and g2 >= 0) or (g1 >= 0 and g2 <= 0):
-                # Linear interpolation for zero crossing
-                if abs(g2 - g1) > 1e-6:
-                    zgl = s1 - g1 * (s2 - s1) / (g2 - g1)
-                else:
-                    zgl = (s1 + s2) / 2.0
+                # Bracket found: refine root via bisection
+                low, high = s1, s2
+                flow, fhigh = g1, g2
+                root = (s1 + s2) / 2.0
+                for _ in range(8):
+                    mid = 0.5 * (low + high)
+                    fmid = _compute_net_gex(mid)
+                    if abs(fmid) < 1e-4:
+                        root = mid
+                        break
+                    if (flow <= 0 and fmid >= 0) or (flow >= 0 and fmid <= 0):
+                        high, fhigh = mid, fmid
+                    else:
+                        low, flow = mid, fmid
+                    root = mid
+                zgl_val = round(root, 2)
+                found_crossing = True
                 break
 
+        has_zgl = found_crossing
+        zgl = zgl_val if found_crossing else None
         regime = "LONG_GAMMA" if net_gex >= 0 else "SHORT_GAMMA"
 
         return {
@@ -252,6 +263,7 @@ class GammaEngine:
             "net_gex_cr": net_gex_cr,
             "call_gex_cr": call_gex_cr,
             "put_gex_cr": put_gex_cr,
-            "zgl": round(zgl, 2),
+            "zgl": zgl,
+            "has_zgl": has_zgl,
             "gamma_regime": regime,
         }

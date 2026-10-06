@@ -40,6 +40,7 @@ class ContractOISnapshot:
     current_oi: int
     last_poll_time: float
     poll_count: int = 1
+    volume: int = 0
 
     @property
     def delta_oi_session(self) -> int:
@@ -51,10 +52,11 @@ class ContractOISnapshot:
         """Net open interest change since immediately preceding poll."""
         return self.current_oi - self.prev_poll_oi
 
-    def update(self, new_oi: int, timestamp: Optional[float] = None) -> None:
-        """Update snapshot with next poll open interest."""
+    def update(self, new_oi: int, volume: int = 0, timestamp: Optional[float] = None) -> None:
+        """Update snapshot with next poll open interest and volume."""
         self.prev_poll_oi = self.current_oi
         self.current_oi = int(new_oi)
+        self.volume = int(volume)
         self.last_poll_time = float(timestamp if timestamp is not None else time.time())
         self.poll_count += 1
 
@@ -182,6 +184,7 @@ class AngelOneOptionChain:
         token: str,
         tradingsymbol: str,
         current_oi: int,
+        volume: int = 0,
         timestamp: Optional[float] = None,
         trading_date: Optional[str] = None,
     ) -> ContractOISnapshot:
@@ -193,6 +196,7 @@ class AngelOneOptionChain:
         token_str = str(token)
         now_ts = float(timestamp if timestamp is not None else time.time())
         cur_oi_int = int(current_oi or 0)
+        cur_vol_int = int(volume or 0)
         with self._oi_lock:
             self._check_oi_date_roll(trading_date)
             if token_str not in self._oi_snapshots:
@@ -204,11 +208,12 @@ class AngelOneOptionChain:
                     current_oi=cur_oi_int,
                     last_poll_time=now_ts,
                     poll_count=1,
+                    volume=cur_vol_int,
                 )
                 self._oi_snapshots[token_str] = snap
             else:
                 snap = self._oi_snapshots[token_str]
-                snap.update(cur_oi_int, timestamp=now_ts)
+                snap.update(cur_oi_int, volume=cur_vol_int, timestamp=now_ts)
                 if tradingsymbol:
                     snap.tradingsymbol = tradingsymbol
             return snap
@@ -702,10 +707,12 @@ class AngelOneOptionChain:
                         contract = token_map.get(token, {})
                         tsym = contract.get("tradingsymbol", "") or str(item.get("tradingSymbol", ""))
                         cur_oi = int(item.get("opnInterest", 0) or 0)
+                        cur_vol = int(item.get("tradeVolume", 0) or 0)
                         snap = self._update_oi_snapshot(
                             token=token,
                             tradingsymbol=tsym,
                             current_oi=cur_oi,
+                            volume=cur_vol,
                             trading_date=trading_date,
                         )
                         results.append({

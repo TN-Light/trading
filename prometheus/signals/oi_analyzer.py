@@ -19,7 +19,8 @@ What we upgrade:
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+import math
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 from prometheus.utils.options_math import max_pain, pcr_ratio
@@ -46,7 +47,7 @@ class OIAnalyzer:
         self.oi_history: List[pd.DataFrame] = []  # Store snapshots for velocity calc
         self.max_history = 100  # Keep last 100 snapshots
 
-    def analyze(self, chain_df: pd.DataFrame, spot_price: float) -> Dict:
+    def analyze(self, chain_df: pd.DataFrame, spot_price: float, timestamp: Optional[Any] = None) -> Dict:
         """
         Run full OI analysis on options chain data.
 
@@ -140,16 +141,115 @@ class OIAnalyzer:
         metrics["oi_sentiment"] = self._calculate_oi_sentiment(signals)
 
         # 8. Institutional Commitment Ratio (Residual Flow Telemetry)
-        # Ratio of Net Absolute OI Change to Total Volume near ATM
+        # Ratio of Net Absolute OI Change to Volume near ATM
         atm_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.02
         atm_df = chain_df[atm_mask] if not chain_df.empty else chain_df
         tot_oi_change = float(abs(atm_df["oi_change"]).sum()) if not atm_df.empty and "oi_change" in atm_df.columns else 0.0
         tot_volume = float(atm_df["volume"].sum()) if not atm_df.empty and "volume" in atm_df.columns else 0.0
-        raw_cr = (tot_oi_change / max(tot_volume, 1.0)) if tot_volume > 0 else 0.0
-        commitment_ratio = round(min(1.0, max(0.0, raw_cr)), 3)
+
+        # Check for granular volume (bar-level or rolling volume) to avoid session denominator dilution
+        has_bar_volume = "bar_volume" in atm_df.columns and float(atm_df["bar_volume"].sum()) > 0
+        has_rolling_volume = "rolling_volume" in atm_df.columns and float(atm_df["rolling_volume"].sum()) > 0
+        has_interval_volume = "interval_volume" in atm_df.columns and float(atm_df["interval_volume"].sum()) > 0
+
+        if has_bar_volume:
+            eff_volume = float(atm_df["bar_volume"].sum())
+            eff_oi_change = float(abs(atm_df["delta_oi"]).sum()) if ("delta_oi" in atm_df.columns and abs(atm_df["delta_oi"]).sum() > 0) else tot_oi_change
+            raw_cr = (eff_oi_change / max(eff_volume, 1.0))
+            time_norm_factor = 1.0
+        elif has_rolling_volume:
+            eff_volume = float(atm_df["rolling_volume"].sum())
+            eff_oi_change = float(abs(atm_df["delta_oi"]).sum()) if ("delta_oi" in atm_df.columns and abs(atm_df["delta_oi"]).sum() > 0) else tot_oi_change
+            raw_cr = (eff_oi_change / max(eff_volume, 1.0))
+            time_norm_factor = 1.0
+        elif has_interval_volume:
+            eff_volume = float(atm_df["interval_volume"].sum())
+            eff_oi_change = float(abs(atm_df["delta_oi"]).sum()) if ("delta_oi" in atm_df.columns and abs(atm_df["delta_oi"]).sum() > 0) else tot_oi_change
+            raw_cr = (eff_oi_change / max(eff_volume, 1.0))
+            time_norm_factor = 1.0
+        else:
+            raw_cr = (tot_oi_change / max(tot_volume, 1.0)) if tot_volume > 0 else 0.0
+            time_norm_factor = self._calculate_time_normalized_baseline(chain_df, timestamp)
+
+        commitment_ratio = round(min(1.0, max(0.0, raw_cr * time_norm_factor)), 3)
         metrics["commitment_ratio"] = commitment_ratio
+        metrics["raw_commitment_ratio"] = round(min(1.0, max(0.0, raw_cr)), 3)
+        metrics["time_normalized_baseline"] = round(time_norm_factor, 2)
 
         return {"signals": signals, "metrics": metrics}
+
+    def _calculate_time_normalized_baseline(
+        self, chain_df: pd.DataFrame, timestamp: Optional[Any] = None
+    ) -> float:
+        """
+        Calculate time-of-day normalization factor for cumulative session volume.
+
+        In Indian markets (09:15 to 15:30 IST, 375 mins), cumulative session volume
+        monotonically increases, causing afternoon institutional block flows to be
+        diluted when dividing by full session volume. This normalizes afternoon
+        flow against an opening reference window (45 mins).
+
+        Returns 1.0 if timestamp is not available, outside market hours, or within opening window.
+        """
+        try:
+            ts_val = timestamp
+            if ts_val is None:
+                for col in ("timestamp", "time", "datetime", "bar_time"):
+                    if col in chain_df.columns and not chain_df[col].dropna().empty:
+                        ts_val = chain_df[col].dropna().iloc[-1]
+                        break
+
+            if ts_val is None:
+                return 1.0
+
+            from datetime import datetime, time as dt_time
+            hour, minute = None, None
+
+            if isinstance(ts_val, (int, float)):
+                import datetime as _dt
+                dt = _dt.datetime.fromtimestamp(ts_val)
+                hour, minute = dt.hour, dt.minute
+            elif isinstance(ts_val, pd.Timestamp):
+                hour, minute = ts_val.hour, ts_val.minute
+            elif isinstance(ts_val, datetime):
+                hour, minute = ts_val.hour, ts_val.minute
+            elif isinstance(ts_val, dt_time):
+                hour, minute = ts_val.hour, ts_val.minute
+            elif isinstance(ts_val, str):
+                ts_str = ts_val.strip()
+                if "T" in ts_str or " " in ts_str or "-" in ts_str:
+                    try:
+                        p_ts = pd.to_datetime(ts_str)
+                        hour, minute = p_ts.hour, p_ts.minute
+                    except Exception:
+                        pass
+                if hour is None and ":" in ts_str:
+                    parts = ts_str.split(":")
+                    hour, minute = int(parts[0]), int(parts[1])
+
+            if hour is None or minute is None:
+                return 1.0
+
+            # Indian market session: 09:15 to 15:30 (total 375 minutes)
+            market_open_mins = 9 * 60 + 15   # 555
+            market_close_mins = 15 * 60 + 30 # 930
+            curr_mins = hour * 60 + minute
+
+            if curr_mins < market_open_mins or curr_mins > market_close_mins:
+                return 1.0
+
+            elapsed_mins = curr_mins - market_open_mins
+            baseline_window_mins = 45.0  # Opening reference window (09:15 to 10:00)
+
+            if elapsed_mins <= baseline_window_mins:
+                return 1.0
+
+            # Square-root dampening prevents over-amplifying low-volume late-day noise
+            # while scaling afternoon institutional blocks back to comparable morning baseline
+            norm_factor = math.sqrt(elapsed_mins / baseline_window_mins)
+            return min(3.5, max(1.0, norm_factor))
+        except Exception:
+            return 1.0
 
     def _calculate_pcr(self, calls: pd.DataFrame, puts: pd.DataFrame) -> Dict:
         """Calculate various PCR metrics."""

@@ -107,6 +107,7 @@ class PositionHealthEngine:
         spot_override: Optional[float] = None,
         underlying_df_override: Optional[pd.DataFrame] = None,
         oi_metrics_override: Optional[Dict[str, Any]] = None,
+        gex_override: Optional[Any] = None,
     ) -> PositionHealthReport:
         """
         Evaluate full 8-pillar health for an open TrailingState or Position object.
@@ -199,8 +200,13 @@ class PositionHealthEngine:
         # ─────────────────────────────────────────────────────────────────
         # PILLAR 4: Dealer GEX Regime Migration & Zero Gamma Level
         # ─────────────────────────────────────────────────────────────────
+        effective_gex_override = gex_override or (oi_metrics_override.get("gex") if oi_metrics_override else None)
         p4_score, net_gex, gex_threat, gex_favor = self._eval_pillar_gex(
-            symbol=symbol, spot=spot_price, trade_is_bullish=trade_is_bullish
+            symbol=symbol,
+            spot=spot_price,
+            trade_is_bullish=trade_is_bullish,
+            entry_spot=entry_spot,
+            override=effective_gex_override,
         )
         p_scores["P4_GEX"] = p4_score
         report.net_gex = net_gex
@@ -432,9 +438,16 @@ class PositionHealthEngine:
     ) -> Tuple[float, int, Optional[str], Optional[str]]:
         """P3: Intraday ΔOI Shift and Resistance Walls."""
         try:
-            if override and "delta_oi" in override:
+            delta_oi = 0
+            commitment = 0.0
+            volume = 0.0
+            high_volume = False
+
+            if override:
                 delta_oi = int(override.get("delta_oi", 0))
-                commitment = float(override.get("commitment_ratio", 0.0))
+                commitment = float(override.get("commitment_ratio", override.get("commitment", 0.0)))
+                volume = float(override.get("volume", 0.0) or override.get("trade_volume", 0.0))
+                high_volume = bool(override.get("high_volume", False) or volume >= 20000)
             elif self.data_engine and getattr(self.data_engine, "angelone_options", None):
                 ao = self.data_engine.angelone_options
                 # Check snapshot cache directly
@@ -447,7 +460,12 @@ class PositionHealthEngine:
                 if token and token in ao._oi_snapshots:
                     snap = ao._oi_snapshots[token]
                     delta_oi = snap.delta_oi_poll
-                    commitment = 0.5
+                    volume = float(getattr(snap, "volume", 0.0))
+                    high_volume = volume >= 20000
+                    if volume > 0:
+                        commitment = min(1.0, max(0.0, abs(snap.delta_oi_session) / volume))
+                    else:
+                        commitment = 0.0
                 else:
                     delta_oi = 0
                     commitment = 0.0
@@ -456,31 +474,64 @@ class PositionHealthEngine:
                 commitment = 0.0
 
             # For CE: positive delta_oi indicates option accumulation/demand, negative indicates unwinding
+            base_score = 0.0
+            threat_msg = None
+            favor_msg = None
+
             if trade_is_bullish:
                 if delta_oi < -10000:
                     threat_msg = f"Call open interest unwinding ({delta_oi:+,} contracts) — smart money closing longs"
-                    return -65.0, delta_oi, threat_msg, None
+                    base_score = -65.0
                 elif delta_oi > 25000:
                     favor_msg = f"Call open interest aggressive buildup ({delta_oi:+,} contracts) — institutional backing"
-                    return +70.0, delta_oi, None, favor_msg
+                    base_score = +70.0
             else:
                 if delta_oi < -10000:
                     threat_msg = f"Put open interest unwinding ({delta_oi:+,} contracts) — smart money closing shorts"
-                    return -65.0, delta_oi, threat_msg, None
+                    base_score = -65.0
                 elif delta_oi > 25000:
                     favor_msg = f"Put open interest aggressive buildup ({delta_oi:+,} contracts) — institutional backing"
-                    return +70.0, delta_oi, None, favor_msg
+                    base_score = +70.0
 
-            return 0.0, delta_oi, None, None
+            score = base_score
+
+            # Commitment Ratio Evaluation:
+            # 1. Institutional commitment ratio >= 0.25 reinforces directional conviction (+25 pts)
+            if commitment >= 0.25 and base_score >= 0:
+                score += 25.0
+                if favor_msg:
+                    favor_msg = f"{favor_msg} + strong institutional commitment ({commitment:.2f})"
+                else:
+                    favor_msg = f"Institutional commitment confirmed (ratio {commitment:.2f}) — smart money backing"
+            # 2. When volume is high but commitment ratio is near 0 (< 0.05), penalize as retail churn (-25 pts)
+            elif high_volume and commitment < 0.05:
+                score -= 25.0
+                churn_msg = f"Retail churn warning: High volume ({int(volume):,} contracts) with negligible commitment ({commitment:.2f}) — lacking smart money backing"
+                threat_msg = f"{threat_msg} + {churn_msg}" if threat_msg else churn_msg
+
+            score = max(-100.0, min(100.0, score))
+            return score, delta_oi, threat_msg, favor_msg
         except Exception as e:
             logger.debug(f"Pillar 3 OI error: {e}")
             return 0.0, 0, None, None
 
     def _eval_pillar_gex(
-        self, symbol: str, spot: float, trade_is_bullish: bool, override: Optional[Any] = None
+        self,
+        symbol: str,
+        spot: float,
+        trade_is_bullish: bool,
+        entry_spot: float = 0.0,
+        override: Optional[Any] = None,
     ) -> Tuple[float, float, Optional[str], Optional[str]]:
         """P4: Dealer Gamma Exposure and ZGL Migration."""
         try:
+            # Handle backward compatibility if override passed as 4th positional arg
+            if isinstance(entry_spot, (dict, object)) and not isinstance(entry_spot, (int, float)):
+                override = entry_spot
+                entry_spot = 0.0
+            else:
+                entry_spot = float(entry_spot or 0.0)
+
             now = time.time()
             if override is not None:
                 gex_profile = override
@@ -491,7 +542,7 @@ class PositionHealthEngine:
                 opt_chain = ao.get_option_chain(symbol=symbol, spot_price=spot)
                 from prometheus.signals.gamma_engine import GammaEngine
                 ge = GammaEngine()
-                gex_profile = ge.calculate_gex(opt_chain, spot_price=spot) if not opt_chain.empty else None
+                gex_profile = ge.calculate_gex(opt_chain, spot_price=spot, symbol=symbol) if not opt_chain.empty else None
                 self._gex_cache[symbol] = (now, gex_profile)
             else:
                 gex_profile = None
@@ -530,18 +581,49 @@ class PositionHealthEngine:
                         raw_zgl = spot
                 zgl = raw_zgl
 
-            # SHORT GAMMA REGIME (Dealers must chase price = Squeeze Velocity)
-            if net_gex < -0.5:
-                # Squeeze active
-                favor_msg = f"Dealer SHORT GAMMA active (Net GEX {net_gex:.1f} Cr) — dealer hedging amplifies breakout"
-                return +75.0, net_gex, None, favor_msg
-            # LONG GAMMA REGIME (Dealers dampen volatility = Mean Reversion / Capped Upside)
-            elif net_gex > 1.5:
-                # Upside capped by dealer volatility dampening
-                threat_msg = f"Dealer LONG GAMMA dampening active (Net GEX +{net_gex:.1f} Cr) — upside momentum capped"
-                return -50.0, net_gex, threat_msg, None
+            # Direction-Aware Scoring in Pillar 4 GEX:
+            # Determine spot progress relative to entry:
+            # If entry_spot is available (> 0), positive progress means spot moving favorably.
+            # If entry_spot is not available (<= 0), assume favorable progress for standard scoring.
+            if entry_spot > 0:
+                spot_progress = (spot - entry_spot) if trade_is_bullish else (entry_spot - spot)
             else:
-                return +15.0, net_gex, None, None
+                spot_progress = 1.0
+
+            if trade_is_bullish:
+                # Bullish trades (Long CE / Bullish spreads):
+                if net_gex < -0.5:
+                    if spot_progress >= 0:
+                        # Dealer Short Gamma on positive spot progress: hedging amplifies upside breakouts
+                        favor_msg = f"Dealer SHORT GAMMA active (Net GEX {net_gex:.1f} Cr) — dealer hedging amplifies breakout"
+                        return +75.0, net_gex, None, favor_msg
+                    else:
+                        # Spot is falling against long call: Short Gamma accelerates the decline
+                        threat_msg = f"Dealer SHORT GAMMA adverse acceleration (Net GEX {net_gex:.1f} Cr) — dealer hedging accelerates decline"
+                        return -65.0, net_gex, threat_msg, None
+                elif net_gex > 1.5:
+                    # Dealer Long Gamma dampens volatility and caps upside
+                    threat_msg = f"Dealer LONG GAMMA dampening active (Net GEX +{net_gex:.1f} Cr) — upside momentum capped"
+                    return -50.0, net_gex, threat_msg, None
+                else:
+                    return +15.0, net_gex, None, None
+            else:
+                # Bearish trades (Long PE / Bearish spreads):
+                if net_gex < -0.5:
+                    if spot_progress >= 0:
+                        # Dealer Short Gamma on downward spot progress: hedging accelerates downward flushes
+                        favor_msg = f"Dealer SHORT GAMMA active (Net GEX {net_gex:.1f} Cr) — dealer hedging accelerates downward flush"
+                        return +75.0, net_gex, None, favor_msg
+                    else:
+                        # Spot is rising against long put: Short Gamma accelerates upward rally
+                        threat_msg = f"Dealer SHORT GAMMA adverse acceleration (Net GEX {net_gex:.1f} Cr) — dealer hedging accelerates upward squeeze"
+                        return -65.0, net_gex, threat_msg, None
+                elif net_gex > 1.5:
+                    # Dealer Long Gamma dampening is neutral/favorable (+20.0)
+                    favor_msg = f"Dealer LONG GAMMA dampening active (Net GEX +{net_gex:.1f} Cr) — volatility compression supports put trade"
+                    return +20.0, net_gex, None, favor_msg
+                else:
+                    return +15.0, net_gex, None, None
         except Exception as e:
             logger.debug(f"Pillar 4 GEX error: {e}")
             return 0.0, 0.0, None, None
