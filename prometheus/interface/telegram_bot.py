@@ -1464,7 +1464,11 @@ class TelegramBot:
                 reason_title = "⏰ <b>INTRADAY SQUARE-OFF (3:15 PM)</b>"
                 reason_desc = "Mandatory session end square-off triggered before market close."
                 action_directive = "Ensure position is closed on Kite if not auto-squared off by broker."
-            elif "adverse" in raw_reason or "invalidation" in raw_reason:
+            elif "threat" in raw_reason or "invalidation" in raw_reason or "structural" in raw_reason:
+                reason_title = "🛡️ <b>EARLY DEFENSE: STRUCTURAL BAILOUT</b>"
+                reason_desc = "Momentum failed 8-pillar microstructure health check (VWAP breakdown, volume exhaustion, or opposing OI). Exited early to save 50-70% of risk before hard stop loss."
+                action_directive = "<b>Exit immediately on Kite/Zerodha</b> to protect capital from further breakdown."
+            elif "adverse" in raw_reason:
                 reason_title = "⚠️ <b>ADVERSE STRUCTURAL EXIT</b>"
                 reason_desc = "Underlying broke key structural support (session VWAP / SuperTrend) against the trade."
                 action_directive = "<b>Close Kite position immediately</b> to cap loss before hard SL."

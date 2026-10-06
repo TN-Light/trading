@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+from datetime import date
 from prometheus.data.angelone_options import AngelOneOptionChain, ContractOISnapshot
 from prometheus.signals.oi_analyzer import OIAnalyzer
 
@@ -459,7 +460,7 @@ def test_get_real_premium_attaches_oi_change_and_delta_oi(fake_chain):
     chain._token_cache["NIFTY"] = [
         {"tradingsymbol": "NIFTY26OCT24000CE", "symboltoken": "35001", "strike": 24000, "option_type": "CE", "expiry": "2026-10-29"}
     ]
-    chain._cache_date = "2026-10-01"
+    chain._cache_date = date.today().isoformat()
 
     obj.ltp_data_map["35001"] = 155.0
 

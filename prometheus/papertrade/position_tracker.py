@@ -131,6 +131,15 @@ class PositionTracker:
         self.trend_aware = bool(trend_aware)
         self.max_stagnation_bars = int(max_stagnation_bars)
 
+        # 8-Pillar Microstructure Trade Health Engine
+        self.health_engine = None
+        if self.data_engine:
+            try:
+                from prometheus.execution.position_health import PositionHealthEngine
+                self.health_engine = PositionHealthEngine(data_engine=self.data_engine)
+            except Exception as e:
+                logger.debug(f"PositionTracker: failed to initialize PositionHealthEngine: {e}")
+
         self.open_positions: Dict[str, Position] = {}
         self.closed_trades: List[PaperTrade] = []
 
@@ -612,6 +621,33 @@ class PositionTracker:
                     return sl, ExitReason.STOP_LOSS
                 if tgt > 0 and ltp >= tgt:
                     return ltp, ExitReason.TARGET
+
+                # 8-Pillar Microstructure Trade Health Evaluation (Real Threat & Real Favor)
+                if pos.trade_mode == "intraday" and getattr(self, "health_engine", None):
+                    try:
+                        report = self.health_engine.evaluate_position_health(
+                            pos, current_premium=ltp, spot_override=snap.close if snap else None
+                        )
+                        if report.is_defensive_bailout_recommended():
+                            saved_pts = max(0.0, sl - ltp) if sl > 0 else 0.0
+                            logger.warning(
+                                f"[TRACKER-HEALTH] Real Threat Bailout: {pos.trade_id} Health={report.health_score:+.0f} "
+                                f"Threats={report.threat_reasons} — exiting early at LTP={ltp:.2f} "
+                                f"(saved ~{saved_pts:.1f} pts risk before hard SL {sl:.2f})"
+                            )
+                            return ltp, ExitReason.STRUCTURAL_INVALIDATION
+                        elif report.is_target_expansion_recommended() and not getattr(pos, "_target_expanded", False):
+                            old_tgt = pos.target
+                            expansion_pts = report.suggested_target_expansion
+                            pos.target = round(pos.target + expansion_pts, 2)
+                            pos._target_expanded = True
+                            logger.info(
+                                f"[TRACKER-HEALTH] Real Favor Acceleration: {pos.trade_id} Health={report.health_score:+.0f} "
+                                f"Favors={report.favor_reasons} — expanding target from {old_tgt:.2f} -> {pos.target:.2f} "
+                                f"(+{expansion_pts:.1f} pts runner expansion)"
+                            )
+                    except Exception as he_err:
+                        logger.debug(f"PositionTracker health evaluation error for {pos.trade_id}: {he_err}")
         # Otherwise no LTP — skip SL/target evaluation this bar (don't
         # fabricate an exit price from the underlying snapshot).
 

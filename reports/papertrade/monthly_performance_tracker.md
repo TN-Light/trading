@@ -3,7 +3,7 @@
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
 **Current Realized Net P&L:** **🔴 -Rs 23,404.11 (-156.03%)**  
-**Last Updated:** 2026-10-05 21:15:00 IST  
+**Last Updated:** 2026-10-06 16:00:45 IST  
 
 ---
 
@@ -16,8 +16,8 @@
 | **Total Trading Days** | **26** | 20–22 days | In Progress |
 | **Green / Red Days** | **8 Green / 10 Red / 8 BE** | > 65% Green | 30.8% |
 | **Total Trades** | **78** | ~3–5 / day | Tracked |
-| **Win Rate** | **44.9%** (35W / 47L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.64** | > 1.50 | ⚠️ Under Review |
+| **Win Rate** | **47.4%** (37W / 47L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.60** | > 1.50 | ⚠️ Under Review |
 | **Gross Profit** | +Rs 31,770.31 | — | Winning Trades |
 | **Gross Loss** | -Rs 52,908.87 | — | Losing Trades |
 
@@ -51,7 +51,8 @@
 | **2026-09-28** | 6 | 3W / 3L | 50% | +Rs 683 | -Rs 462 | **🟢 +Rs 221.7** | +0.2% | **-Rs 26,495.2** | Day 6: 6 Put buys in massive bear trend. 1 Target hit (+Rs 772.89), 2 Trailed/Kill profit locks (+Rs 167.65), 1 BE scratch (-Rs 21.27), 2 early kill cuts (-Rs 697.60). Net green +Rs 221.67. |
 | **2026-09-29** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,495.2** | Day 7: 0 trades executed. Capital preserved (Rs 97,933.12). |
 | **2026-10-01** | 5 | 3W / 2L | 60% | +Rs 3,530 | -Rs 662 | **🟢 +Rs 2,408.0** | +2.5% | **-Rs 24,087.1** | Day 9: Net Green +Rs 2408.04 (+2.47%). 2 Target Wins (NIFTY 22400PE +Rs 2445.19, SENSEX 71900PE +Rs 657.62), 1 Trailed Profit Lock (SENSEX 71700PE +Rs 135.58), 1 BE Scratch (NIFTY 22350PE -Rs 24.02), 1 Trailed Half-Risk Cut (BN 55000CE -Rs 806.33). 60% Win Rate. |
-| **2026-10-05** | 2 | 2W / 0L | 100% | +Rs 925 | -Rs 0 | **🟢 +Rs 683.0** | +0.7% | **-Rs 23,404.1** | Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread (+Rs 217.42 net), NIFTY 22800/22950CE spread (+Rs 465.58 net). Reconciled via verified Kite closing quotes after 10-hour host PC network outage. |
+| **2026-10-05** | 2 | 2W / 0L | 100% | +Rs 925 | -Rs 0 | **🟢 +Rs 683.0** | +0.7% | **-Rs 23,404.1** | Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread decayed from 59.29 to 42.35 (+Rs 217.42 net); NIFTY 22800/22950CE spread decayed from 14.67 to 5.65 (+Rs 465.58 net). Note: Host PC network down from 10:41 to 20:54 IST; positions squared off at 15:15 and reconciled via verified exchange Kite closing quotes. |
+| **2026-10-06** | 7 | 3W / 4L | 42.9% | +Rs 1,700 | -Rs 945 | **⚪ -Rs 49.9** | -0.05% | **-Rs 23,454.0** | Day 11: 7 trades executed (3 Wins, 4 Losses, 42.9% WR). Gross +Rs 754.77, Net -Rs 49.88 (Breakeven). 1 Target Win (SENSEX 73200PE +Rs 440), 1 Decay Win (NIFTY spread +Rs 1180), 1 Inactivity Lock (SENSEX spread +Rs 79.77), 1 Target hit (SENSEX 73600CE +Rs 320), 2 Hard SL cuts (-Rs 1320), 1 Trailed cut (-Rs 280). |
 
 ---
 

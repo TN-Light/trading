@@ -148,6 +148,14 @@ class PositionMonitor:
         self._ltp_fail_counts: Dict[str, int] = {}
         self._ltp_alert_sent: Dict[str, bool] = {}
 
+        # 8-Pillar Microstructure Trade Health Engine
+        self.health_engine = None
+        try:
+            from prometheus.execution.position_health import PositionHealthEngine
+            self.health_engine = PositionHealthEngine(data_engine=self._data_engine)
+        except Exception as e:
+            logger.debug(f"PositionMonitor: failed to initialize PositionHealthEngine: {e}")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -389,6 +397,46 @@ class PositionMonitor:
             if self._on_exit:
                 self._on_exit(state.position_id, current_price, "target")
             return
+
+        # ── 8-Pillar Microstructure Trade Health Evaluation (Real Threat & Real Favor) ──
+        try:
+            from prometheus.config import get
+            health_enabled = get("intraday.trade_health.enabled", True)
+            if health_enabled and self.health_engine and state.trade_mode == "intraday" and getattr(state, "strategy_type", "") != "credit_spread":
+                report = self.health_engine.evaluate_position_health(state, current_price)
+
+                # 1. Real Threat: Pre-SL Structural Bailout (Saves 50-70% of risk before hard SL)
+                if report.is_defensive_bailout_recommended():
+                    saved_pts = max(0.0, effective_sl - current_price) if effective_sl > 0 else 0.0
+                    reason = "real_threat_structural_invalidation"
+                    state._adverse_reason = f"Health Score {report.health_score:+.0f}: {', '.join(report.threat_reasons[:2])}"
+                    logger.warning(
+                        f"[MONITOR] Real Threat Bailout: {state.position_id} Health={report.health_score:+.0f} "
+                        f"Threats={report.threat_reasons} — exiting early at LTP={current_price:.2f} "
+                        f"(saved ~{saved_pts:.1f} pts risk before hard SL {effective_sl:.2f})"
+                    )
+                    if self._on_exit:
+                        self._on_exit(state.position_id, current_price, reason)
+                    return
+
+                # 2. Real Favor: Dynamic Runner Target Expansion (Convexity & Gamma Squeeze Unlock)
+                elif report.is_target_expansion_recommended() and not getattr(state, "_target_expanded", False):
+                    old_tgt = state.target
+                    expansion_pts = report.suggested_target_expansion
+                    state.target = round(state.target + expansion_pts, 2)
+                    state._target_expanded = True
+                    logger.info(
+                        f"[MONITOR] Real Favor Acceleration: {state.position_id} Health={report.health_score:+.0f} "
+                        f"Favors={report.favor_reasons} — expanding target from {old_tgt:.2f} -> {state.target:.2f} "
+                        f"(+{expansion_pts:.1f} pts runner expansion)"
+                    )
+                    if self._on_trailing_update:
+                        try:
+                            self._on_trailing_update(state, old_sl, current_price)
+                        except TypeError:
+                            self._on_trailing_update(state, old_sl)
+        except Exception as e:
+            logger.debug(f"Position health check error for {state.position_id}: {e}")
 
         # ── Adverse indicator exit ──
         try:

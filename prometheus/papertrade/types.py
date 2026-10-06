@@ -31,6 +31,7 @@ class ExitReason(str, Enum):
     REVERSE_SIGNAL = "reverse_signal"   # opposite-direction signal arrived
     MANUAL = "manual"
     INACTIVITY_KILL_SWITCH = "inactivity_kill_switch"  # 45-min / 3-bar stagnation stop
+    STRUCTURAL_INVALIDATION = "structural_invalidation"  # 8-Pillar Microstructure Threat Early Bailout
 
     def __str__(self) -> str:
         return self.value
