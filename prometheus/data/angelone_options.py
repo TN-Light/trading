@@ -41,6 +41,7 @@ class ContractOISnapshot:
     last_poll_time: float
     poll_count: int = 1
     volume: int = 0
+    prev_poll_volume: int = 0
 
     @property
     def delta_oi_session(self) -> int:
@@ -52,10 +53,18 @@ class ContractOISnapshot:
         """Net open interest change since immediately preceding poll."""
         return self.current_oi - self.prev_poll_oi
 
+    @property
+    def delta_volume_poll(self) -> int:
+        """Net volume traded since immediately preceding poll."""
+        if self.poll_count <= 1:
+            return 0
+        return max(0, self.volume - self.prev_poll_volume)
+
     def update(self, new_oi: int, volume: int = 0, timestamp: Optional[float] = None) -> None:
         """Update snapshot with next poll open interest and volume."""
         self.prev_poll_oi = self.current_oi
         self.current_oi = int(new_oi)
+        self.prev_poll_volume = self.volume
         self.volume = int(volume)
         self.last_poll_time = float(timestamp if timestamp is not None else time.time())
         self.poll_count += 1

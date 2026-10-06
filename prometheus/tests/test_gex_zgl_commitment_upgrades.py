@@ -366,3 +366,115 @@ def test_commitment_ratio_retail_churn_still_penalized_in_afternoon():
 
     # Even normalized: 0.005 * 2.52 = 0.013 < 0.05
     assert metrics["commitment_ratio"] < 0.05
+
+
+# ============================================================================
+# Additional Adversarial Edge Case & Robustness Proofs
+# ============================================================================
+
+def test_zgl_solver_boundary_underflow_unipolar_returns_none_and_has_zgl_false():
+    """Verify that unipolar chains where gamma underflows at scan grid boundaries
+    do NOT falsely trigger zero crossings due to 0.0 <= 0 and 0.0 >= 0."""
+    engine = GammaEngine()
+    spot = 25000.0
+
+    # Call-only chain far from ATM (gamma is 0.0 at min_scan grid boundary)
+    ce_chain = pd.DataFrame([
+        {"strike_price": 27000, "option_type": "CE", "open_interest": 100000, "iv": 0.10}
+    ])
+    res_ce = engine.calculate_gex(ce_chain, spot_price=spot, symbol="NIFTY 50", dte=0.25)
+    assert res_ce["has_zgl"] is False
+    assert res_ce["zgl"] is None
+
+    # Put-only chain far from ATM (gamma is 0.0 at max_scan grid boundary)
+    pe_chain = pd.DataFrame([
+        {"strike_price": 23000, "option_type": "PE", "open_interest": 100000, "iv": 0.10}
+    ])
+    res_pe = engine.calculate_gex(pe_chain, spot_price=spot, symbol="NIFTY 50", dte=0.25)
+    assert res_pe["has_zgl"] is False
+    assert res_pe["zgl"] is None
+
+
+def test_pillar4_eval_with_entry_spot_none_preserves_override():
+    """Verify that passing entry_spot=None does not wipe out the caller's override to None."""
+    engine = PositionHealthEngine()
+    score, net_gex, threat, favor = engine._eval_pillar_gex(
+        symbol="NIFTY 50",
+        spot=25000.0,
+        trade_is_bullish=True,
+        entry_spot=None,
+        override={"net_gex": -2.0, "net_gex_cr": -2.0},
+    )
+    # Must preserve the override and score the Short Gamma breakout (+75.0)
+    assert score == +75.0
+    assert net_gex == -2.0
+    assert favor is not None
+    assert "amplifies breakout" in favor
+
+
+def test_pillar3_eval_with_none_values_in_override_handles_gracefully():
+    """Verify _eval_pillar_oi defensively handles None values in override dictionary without TypeError."""
+    engine = PositionHealthEngine()
+    score, doi, threat, favor = engine._eval_pillar_oi(
+        symbol="NIFTY 50",
+        tradingsymbol="NIFTY25000CE",
+        trade_is_bullish=True,
+        override={"commitment_ratio": None, "delta_oi": 15000, "volume": None},
+    )
+    assert doi == 15000
+    assert score == 0.0  # Moderate buildup (<25000 threshold), commitment=0.0 fallback
+
+
+def test_pillar3_unwinding_does_not_award_directional_conviction():
+    """Verify that unwinding delta_oi (< 0) does not receive institutional conviction reward for long trades."""
+    engine = PositionHealthEngine()
+    # Call OI is unwinding by 5,000 contracts with commitment ratio 0.35
+    score, doi, threat, favor = engine._eval_pillar_oi(
+        symbol="NIFTY 50",
+        tradingsymbol="NIFTY25000CE",
+        trade_is_bullish=True,
+        override={"delta_oi": -5000, "commitment_ratio": 0.35},
+    )
+    # Must NOT reward +25 or award favor message
+    assert score <= 0.0
+    assert favor is None
+
+
+def test_commitment_ratio_timezone_localization_with_epoch():
+    """Verify _calculate_time_normalized_baseline correctly localizes epoch timestamps to IST."""
+    from datetime import datetime
+    from prometheus.utils.indian_market import IST
+    analyzer = OIAnalyzer()
+
+    # Create epoch timestamp for 14:00 (2:00 PM) IST on today's date
+    today = datetime.now(IST).date()
+    dt_ist = IST.localize(datetime(today.year, today.month, today.day, 14, 0, 0))
+    epoch_ts = dt_ist.timestamp()
+
+    chain_df = pd.DataFrame([{"strike": 25000, "oi_change": 40000, "volume": 500000}])
+    factor = analyzer._calculate_time_normalized_baseline(chain_df, timestamp=epoch_ts)
+    assert factor > 2.0  # Approx 2.52 at 14:00 IST
+
+
+def test_contract_oi_snapshot_incremental_volume_and_bar_volume():
+    """Verify ContractOISnapshot tracks poll-to-poll incremental volume."""
+    from prometheus.data.angelone_options import ContractOISnapshot
+    snap = ContractOISnapshot(
+        token="12345",
+        tradingsymbol="NIFTY25000CE",
+        session_baseline_oi=100000,
+        prev_poll_oi=100000,
+        current_oi=100000,
+        last_poll_time=1000.0,
+        poll_count=1,
+        volume=50000,
+    )
+    # On first poll, incremental volume is 0
+    assert snap.delta_volume_poll == 0
+
+    # On second poll, cumulative volume advances to 55000
+    snap.update(new_oi=105000, volume=55000, timestamp=1060.0)
+    assert snap.delta_oi_poll == 5000
+    assert snap.delta_volume_poll == 5000
+    assert snap.poll_count == 2
+

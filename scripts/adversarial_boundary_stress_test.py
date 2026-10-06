@@ -207,26 +207,17 @@ class StressTestRunner:
             except Exception as e:
                 self.record("gamma_engine", f"spot_gap_{int(gap_pct*100):+d}pct", False, f"CRASH: {e}", "HIGH")
 
-        # 1.4 Mathematical Discrepancy Analysis: GEX Dimension Check
-        # Standard SqueezeMetrics Net GEX: Rupee Gamma = Gamma * OI * LotSize * Spot^2 * 0.01
-        # Code line 164: dollar_gamma = gamma * item["oi"] * lot_size * spot_price * 0.01
-        # Check units:
-        # gamma is dDelta/dSpot in 1/INR.
-        # OI * LotSize is total shares.
-        # gamma * OI * LotSize is shares/INR.
-        # Multiplying by (spot_price * 0.01) (which is INR) yields SHARES to trade per 1% move!
-        # NOT Rupee value of shares to trade per 1% move!
-        # Rupee value requires shares * Spot = gamma * OI * LotSize * Spot^2 * 0.01.
+        # 1.4 Mathematical Verification: Rupee Notional GEX Dimension Check
+        # Standard SqueezeMetrics Net GEX: Rupee Gamma = Q * Gamma * Spot^2 * 0.01 (where Q is shares in open interest)
+        expected_gex = 100000 * calculate_black_scholes_gamma(25000.0, 25000.0, 2.0, 0.15) * (25000.0 ** 2) * 0.01
+        test_chain = pd.DataFrame([{"strike_price": 25000.0, "option_type": "CE", "open_interest": 100000, "iv": 0.15}])
+        gex_out = engine.calculate_gex(test_chain, 25000.0, "NIFTY 50", dte=2.0)
+        is_scaled_properly = math.isclose(gex_out["net_gex"], expected_gex, rel_tol=1e-3)
         self.record(
             "gamma_engine",
             "mathematical_discrepancy_gex_scaling",
-            False,
-            "DISCREPANCY: Line 164 computes shares-delta per 1% move (Gamma * OI * LotSize * Spot * 0.01), "
-            "but lines 81 and 173 divide by 1e7 to report 'Net GEX in Crores (INR)'. "
-            "To reflect true Rupee hedging value per 1% move (SqueezeMetrics formulation), "
-            "it must be multiplied by Spot again (Spot^2 * 0.01). Currently it reports Share-Delta / 1e7, "
-            "understating Rupee GEX by a factor equal to spot_price (e.g. 25,000x for Nifty, 52,000x for Bank Nifty).",
-            severity="HIGH"
+            is_scaled_properly,
+            f"Rupee Notional GEX correctly scaled: {gex_out['net_gex_cr']} Cr matches expected {expected_gex / 1e7:.2f} Cr"
         )
 
 

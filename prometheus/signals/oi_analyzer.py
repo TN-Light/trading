@@ -142,8 +142,9 @@ class OIAnalyzer:
 
         # 8. Institutional Commitment Ratio (Residual Flow Telemetry)
         # Ratio of Net Absolute OI Change to Volume near ATM
-        atm_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.02
-        atm_df = chain_df[atm_mask] if not chain_df.empty else chain_df
+        atm_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.02 if (not chain_df.empty and "strike" in chain_df.columns) else None
+        atm_df = chain_df[atm_mask] if (atm_mask is not None and not chain_df.empty) else pd.DataFrame()
+
         tot_oi_change = float(abs(atm_df["oi_change"]).sum()) if not atm_df.empty and "oi_change" in atm_df.columns else 0.0
         tot_volume = float(atm_df["volume"].sum()) if not atm_df.empty and "volume" in atm_df.columns else 0.0
 
@@ -202,17 +203,20 @@ class OIAnalyzer:
             if ts_val is None:
                 return 1.0
 
+            from prometheus.utils.indian_market import IST
             from datetime import datetime, time as dt_time
             hour, minute = None, None
 
             if isinstance(ts_val, (int, float)):
                 import datetime as _dt
-                dt = _dt.datetime.fromtimestamp(ts_val)
+                dt = _dt.datetime.fromtimestamp(ts_val, tz=IST)
                 hour, minute = dt.hour, dt.minute
-            elif isinstance(ts_val, pd.Timestamp):
-                hour, minute = ts_val.hour, ts_val.minute
-            elif isinstance(ts_val, datetime):
-                hour, minute = ts_val.hour, ts_val.minute
+            elif isinstance(ts_val, (pd.Timestamp, datetime)):
+                if getattr(ts_val, "tzinfo", None) is not None:
+                    ts_ist = ts_val.astimezone(IST)
+                    hour, minute = ts_ist.hour, ts_ist.minute
+                else:
+                    hour, minute = ts_val.hour, ts_val.minute
             elif isinstance(ts_val, dt_time):
                 hour, minute = ts_val.hour, ts_val.minute
             elif isinstance(ts_val, str):

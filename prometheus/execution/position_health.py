@@ -67,7 +67,9 @@ class PositionHealthReport:
     vwap_gap_pts: float = 0.0
     rvol: float = 1.0
     net_gex: float = 0.0
+    zgl: Optional[float] = None
     delta_oi_strike: int = 0
+    commitment_ratio: float = 0.0
     theta_penalty: float = 0.0
     iv_drift: float = 0.0
     htf_regime: str = "UNKNOWN"
@@ -113,18 +115,27 @@ class PositionHealthEngine:
         Evaluate full 8-pillar health for an open TrailingState or Position object.
         Guaranteed zero-exception execution (falls back gracefully to neutral on missing telemetry).
         """
-        pos_id = getattr(state, "position_id", getattr(state, "trade_id", "UNKNOWN"))
-        symbol = getattr(state, "symbol", getattr(state, "underlying", "NIFTY"))
-        tsym = getattr(state, "tradingsymbol", getattr(state, "instrument", ""))
-        direction = getattr(state, "direction", "bullish")
+        if isinstance(state, dict):
+            pos_id = state.get("position_id", state.get("trade_id", "UNKNOWN"))
+            symbol = state.get("symbol", state.get("underlying", "NIFTY"))
+            tsym = state.get("tradingsymbol", state.get("instrument", ""))
+            direction = state.get("direction", "bullish")
+            entry_premium = float(state.get("entry_premium", state.get("entry_price", 0.0)) or 0.0)
+            entry_spot = float(state.get("entry_spot", 0.0) or 0.0)
+            risk_dist = float(state.get("risk_distance", state.get("initial_risk_distance", 0.0)) or 0.0)
+            tier = (str(state.get("tier", "") or "")).upper()
+        else:
+            pos_id = getattr(state, "position_id", getattr(state, "trade_id", "UNKNOWN"))
+            symbol = getattr(state, "symbol", getattr(state, "underlying", "NIFTY"))
+            tsym = getattr(state, "tradingsymbol", getattr(state, "instrument", ""))
+            direction = getattr(state, "direction", "bullish")
+            entry_premium = float(getattr(state, "entry_premium", getattr(state, "entry_price", 0.0)) or 0.0)
+            entry_spot = float(getattr(state, "entry_spot", 0.0) or 0.0)
+            risk_dist = float(getattr(state, "risk_distance", getattr(state, "initial_risk_distance", 0.0)) or 0.0)
+            tier = (getattr(state, "tier", "") or "").upper()
         if hasattr(direction, "value"):
             direction = direction.value
         direction = str(direction).lower()
-
-        entry_premium = getattr(state, "entry_premium", getattr(state, "entry_price", 0.0))
-        entry_spot = getattr(state, "entry_spot", 0.0)
-        risk_dist = getattr(state, "risk_distance", getattr(state, "initial_risk_distance", 0.0))
-        tier = (getattr(state, "tier", "") or "").upper()
 
         report = PositionHealthReport(
             position_id=pos_id,
@@ -192,6 +203,11 @@ class PositionHealthEngine:
         )
         p_scores["P3_OI"] = p3_score
         report.delta_oi_strike = delta_oi
+        if oi_metrics_override:
+            try:
+                report.commitment_ratio = float(oi_metrics_override.get("commitment_ratio") or oi_metrics_override.get("commitment") or 0.0)
+            except (ValueError, TypeError):
+                report.commitment_ratio = 0.0
         if oi_threat:
             threats.append(oi_threat)
         if oi_favor:
@@ -201,6 +217,8 @@ class PositionHealthEngine:
         # PILLAR 4: Dealer GEX Regime Migration & Zero Gamma Level
         # ─────────────────────────────────────────────────────────────────
         effective_gex_override = gex_override or (oi_metrics_override.get("gex") if oi_metrics_override else None)
+        if not effective_gex_override and oi_metrics_override and ("net_gex" in oi_metrics_override or "net_gex_cr" in oi_metrics_override):
+            effective_gex_override = oi_metrics_override
         p4_score, net_gex, gex_threat, gex_favor = self._eval_pillar_gex(
             symbol=symbol,
             spot=spot_price,
@@ -210,6 +228,18 @@ class PositionHealthEngine:
         )
         p_scores["P4_GEX"] = p4_score
         report.net_gex = net_gex
+        if effective_gex_override and isinstance(effective_gex_override, dict) and effective_gex_override.get("zgl") is not None:
+            try:
+                report.zgl = float(effective_gex_override["zgl"])
+            except (ValueError, TypeError):
+                pass
+        elif symbol in self._gex_cache and self._gex_cache[symbol][1] and isinstance(self._gex_cache[symbol][1], dict):
+            cached_zgl = self._gex_cache[symbol][1].get("zgl")
+            if cached_zgl is not None:
+                try:
+                    report.zgl = float(cached_zgl)
+                except (ValueError, TypeError):
+                    pass
         if gex_threat:
             threats.append(gex_threat)
         if gex_favor:
@@ -444,9 +474,24 @@ class PositionHealthEngine:
             high_volume = False
 
             if override:
-                delta_oi = int(override.get("delta_oi", 0))
-                commitment = float(override.get("commitment_ratio", override.get("commitment", 0.0)))
-                volume = float(override.get("volume", 0.0) or override.get("trade_volume", 0.0))
+                doi_raw = override.get("delta_oi")
+                try:
+                    delta_oi = int(doi_raw) if doi_raw is not None else 0
+                except (ValueError, TypeError):
+                    delta_oi = 0
+
+                cr_raw = override.get("commitment_ratio") if override.get("commitment_ratio") is not None else override.get("commitment")
+                try:
+                    commitment = float(cr_raw) if cr_raw is not None else 0.0
+                except (ValueError, TypeError):
+                    commitment = 0.0
+
+                vol_raw = override.get("volume") if override.get("volume") is not None else override.get("trade_volume")
+                try:
+                    volume = float(vol_raw) if vol_raw is not None else 0.0
+                except (ValueError, TypeError):
+                    volume = 0.0
+
                 high_volume = bool(override.get("high_volume", False) or volume >= 20000)
             elif self.data_engine and getattr(self.data_engine, "angelone_options", None):
                 ao = self.data_engine.angelone_options
@@ -462,8 +507,18 @@ class PositionHealthEngine:
                     delta_oi = snap.delta_oi_poll
                     volume = float(getattr(snap, "volume", 0.0))
                     high_volume = volume >= 20000
-                    if volume > 0:
-                        commitment = min(1.0, max(0.0, abs(snap.delta_oi_session) / volume))
+                    delta_vol = getattr(snap, "delta_volume_poll", 0)
+                    if delta_vol > 0:
+                        commitment = min(1.0, max(0.0, abs(snap.delta_oi_poll) / delta_vol))
+                    elif volume > 0:
+                        raw_cr = abs(snap.delta_oi_session) / volume
+                        norm_factor = 1.0
+                        try:
+                            from prometheus.signals.oi_analyzer import OIAnalyzer
+                            norm_factor = OIAnalyzer()._calculate_time_normalized_baseline(pd.DataFrame(), timestamp=time.time())
+                        except Exception:
+                            norm_factor = 1.0
+                        commitment = min(1.0, max(0.0, raw_cr * norm_factor))
                     else:
                         commitment = 0.0
                 else:
@@ -497,7 +552,8 @@ class PositionHealthEngine:
 
             # Commitment Ratio Evaluation:
             # 1. Institutional commitment ratio >= 0.25 reinforces directional conviction (+25 pts)
-            if commitment >= 0.25 and base_score >= 0:
+            # Requires positive delta_oi supporting trade direction
+            if commitment >= 0.25 and delta_oi > 0 and base_score >= 0:
                 score += 25.0
                 if favor_msg:
                     favor_msg = f"{favor_msg} + strong institutional commitment ({commitment:.2f})"
@@ -526,11 +582,14 @@ class PositionHealthEngine:
         """P4: Dealer Gamma Exposure and ZGL Migration."""
         try:
             # Handle backward compatibility if override passed as 4th positional arg
-            if isinstance(entry_spot, (dict, object)) and not isinstance(entry_spot, (int, float)):
+            if override is None and isinstance(entry_spot, dict):
                 override = entry_spot
                 entry_spot = 0.0
             else:
-                entry_spot = float(entry_spot or 0.0)
+                try:
+                    entry_spot = float(entry_spot) if entry_spot is not None else 0.0
+                except (ValueError, TypeError):
+                    entry_spot = 0.0
 
             now = time.time()
             if override is not None:
@@ -542,7 +601,7 @@ class PositionHealthEngine:
                 opt_chain = ao.get_option_chain(symbol=symbol, spot_price=spot)
                 from prometheus.signals.gamma_engine import GammaEngine
                 ge = GammaEngine()
-                gex_profile = ge.calculate_gex(opt_chain, spot_price=spot, symbol=symbol) if not opt_chain.empty else None
+                gex_profile = ge.calculate_gex(opt_chain, spot_price=spot, symbol=symbol) if (opt_chain is not None and not opt_chain.empty) else None
                 self._gex_cache[symbol] = (now, gex_profile)
             else:
                 gex_profile = None
@@ -551,11 +610,35 @@ class PositionHealthEngine:
                 return 0.0, 0.0, None, None
 
             if isinstance(gex_profile, dict):
-                net_gex = float(gex_profile.get("net_gex_cr", 0.0) or (gex_profile.get("net_gex", 0.0) / 1e7 if abs(gex_profile.get("net_gex", 0.0)) > 1000 else gex_profile.get("net_gex", 0.0)))
-                zgl = float(gex_profile.get("zgl", 0.0) or gex_profile.get("zero_gamma_level", 0.0) or spot)
+                cr_val = gex_profile.get("net_gex_cr")
+                raw_val = gex_profile.get("net_gex")
+                if cr_val is not None:
+                    try:
+                        net_gex = float(cr_val)
+                    except (ValueError, TypeError):
+                        net_gex = 0.0
+                elif raw_val is not None:
+                    try:
+                        r = float(raw_val)
+                        net_gex = r / 1e7 if abs(r) > 1000 else r
+                    except (ValueError, TypeError):
+                        net_gex = 0.0
+                else:
+                    net_gex = 0.0
+
+                raw_zgl = gex_profile.get("zgl")
+                if raw_zgl is None:
+                    raw_zgl = gex_profile.get("zero_gamma_level")
+                if raw_zgl is not None:
+                    try:
+                        zgl = float(raw_zgl)
+                    except (ValueError, TypeError):
+                        zgl = None
+                else:
+                    zgl = None
             else:
                 raw_gex = 0.0
-                for attr in ("net_gex", "net_gex_cr"):
+                for attr in ("net_gex_cr", "net_gex"):
                     val = getattr(gex_profile, attr, None)
                     if isinstance(val, (int, float)):
                         raw_gex = float(val)
@@ -568,17 +651,15 @@ class PositionHealthEngine:
 
                 net_gex = raw_gex / 1e7 if abs(raw_gex) > 1000 else raw_gex
 
-                raw_zgl = spot
+                raw_zgl = None
                 for attr in ("zgl", "zero_gamma_level"):
                     val = getattr(gex_profile, attr, None)
-                    if isinstance(val, (int, float)):
-                        raw_zgl = float(val)
-                        break
-                else:
-                    try:
-                        raw_zgl = float(getattr(gex_profile, "zgl", getattr(gex_profile, "zero_gamma_level", spot)))
-                    except Exception:
-                        raw_zgl = spot
+                    if val is not None:
+                        try:
+                            raw_zgl = float(val)
+                            break
+                        except (ValueError, TypeError):
+                            pass
                 zgl = raw_zgl
 
             # Direction-Aware Scoring in Pillar 4 GEX:

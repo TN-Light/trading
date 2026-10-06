@@ -65,7 +65,7 @@ class GammaEngine:
         self,
         chain_df: pd.DataFrame,
         spot_price: float,
-        symbol: str,
+        symbol: str = "NIFTY 50",
         dte: float = 2.0,
         default_iv: float = 0.15,
     ) -> Dict[str, Any]:
@@ -216,43 +216,59 @@ class GammaEngine:
         put_gex_cr = round(put_gex_tot / 1e7, 2)
 
         # ── ZERO GAMMA LEVEL (ZGL) SOLVER ──
-        # High-resolution scanning grid around ATM to find where Net GEX crosses zero
-        min_scan = spot_price * 0.90
-        max_scan = spot_price * 1.10
-        coarse_grid = np.linspace(min_scan, max_scan, 50)
-        fine_grid = np.linspace(spot_price * 0.96, spot_price * 1.04, 60)
-        grid = np.unique(np.sort(np.concatenate([coarse_grid, fine_grid])))
+        # Check if the chain is unipolar (must have both calls and puts to cross zero)
+        has_calls = any(itm["type"] == "CE" for itm in strikes_data)
+        has_puts = any(itm["type"] == "PE" for itm in strikes_data)
 
-        grid_gex: List[Tuple[float, float]] = []
-        for s_eval in grid:
-            grid_gex.append((float(s_eval), _compute_net_gex(float(s_eval))))
-
-        # Find zero crossing
         found_crossing = False
         zgl_val = None
 
-        for i in range(len(grid_gex) - 1):
-            s1, g1 = grid_gex[i]
-            s2, g2 = grid_gex[i + 1]
-            if (g1 <= 0 and g2 >= 0) or (g1 >= 0 and g2 <= 0):
-                # Bracket found: refine root via bisection
-                low, high = s1, s2
-                flow, fhigh = g1, g2
-                root = (s1 + s2) / 2.0
-                for _ in range(8):
-                    mid = 0.5 * (low + high)
-                    fmid = _compute_net_gex(mid)
-                    if abs(fmid) < 1e-4:
+        if has_calls and has_puts:
+            # High-resolution scanning grid around ATM to find where Net GEX crosses zero
+            min_scan = spot_price * 0.90
+            max_scan = spot_price * 1.10
+            coarse_grid = np.linspace(min_scan, max_scan, 50)
+            fine_grid = np.linspace(spot_price * 0.96, spot_price * 1.04, 60)
+            grid = np.unique(np.sort(np.concatenate([coarse_grid, fine_grid])))
+
+            grid_gex: List[Tuple[float, float]] = []
+            for s_eval in grid:
+                grid_gex.append((float(s_eval), _compute_net_gex(float(s_eval))))
+
+            peak_abs_gex = max((abs(g) for _, g in grid_gex), default=0.0)
+            noise_thresh = max(1.0, 1e-4 * peak_abs_gex)
+
+            for i in range(len(grid_gex) - 1):
+                s1, g1 = grid_gex[i]
+                s2, g2 = grid_gex[i + 1]
+                # True zero crossing requires opposite signs and significant amplitude above underflow noise
+                if (g1 < 0 and g2 > 0) or (g1 > 0 and g2 < 0):
+                    if max(abs(g1), abs(g2)) < noise_thresh:
+                        continue
+                    # Bracket found: refine root via bisection
+                    low, high = s1, s2
+                    flow, fhigh = g1, g2
+                    root = (s1 + s2) / 2.0
+                    for _ in range(12):
+                        mid = 0.5 * (low + high)
+                        fmid = _compute_net_gex(mid)
+                        if abs(fmid) < 1e-4:
+                            root = mid
+                            break
+                        if (flow < 0 and fmid > 0) or (flow > 0 and fmid < 0):
+                            high, fhigh = mid, fmid
+                        else:
+                            low, flow = mid, fmid
                         root = mid
+                    zgl_val = round(root, 2)
+                    found_crossing = True
+                    break
+                elif abs(g1) <= 1e-4 and i > 0:
+                    _, g_prev = grid_gex[i - 1]
+                    if ((g_prev < 0 and g2 > 0) or (g_prev > 0 and g2 < 0)) and max(abs(g_prev), abs(g2)) >= noise_thresh:
+                        zgl_val = round(s1, 2)
+                        found_crossing = True
                         break
-                    if (flow <= 0 and fmid >= 0) or (flow >= 0 and fmid <= 0):
-                        high, fhigh = mid, fmid
-                    else:
-                        low, flow = mid, fmid
-                    root = mid
-                zgl_val = round(root, 2)
-                found_crossing = True
-                break
 
         has_zgl = found_crossing
         zgl = zgl_val if found_crossing else None
