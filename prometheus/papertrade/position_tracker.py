@@ -38,6 +38,7 @@ from prometheus.papertrade.types import (
 )
 from prometheus.papertrade.fill_simulator import FillSimulator, FillResult
 from prometheus.utils.logger import logger
+import time as _time
 from prometheus.utils.indian_market import IST
 
 
@@ -119,6 +120,7 @@ class PositionTracker:
         data_engine: Any = None,
         trend_aware: bool = True,
         max_stagnation_bars: int = 6,
+        on_heartbeat: Optional[Callable] = None,
     ):
         self.fill_sim = fill_sim
         self.cost_model = cost_model or CostModel()
@@ -130,6 +132,8 @@ class PositionTracker:
         self.data_engine = data_engine or getattr(getattr(self.fill_sim, "feed", None), "_data_engine", None)
         self.trend_aware = bool(trend_aware)
         self.max_stagnation_bars = int(max_stagnation_bars)
+        self.on_heartbeat = on_heartbeat
+        self._heartbeat_milestones: Dict[str, int] = {}
 
         # 8-Pillar Microstructure Trade Health Engine
         self.health_engine = None
@@ -193,6 +197,7 @@ class PositionTracker:
         if pos is None:
             logger.warning(f"PositionTracker: cannot close unknown trade_id {trade_id}")
             return None
+        self._heartbeat_milestones.pop(trade_id, None)
 
         # Need a nonzero exit fill — if caller passed 0, ask FillSimulator.
         # We bought the option (long-only system) → exit is a SELL regardless
@@ -361,6 +366,7 @@ class PositionTracker:
                 if exit_reason is None:
                     if self.enable_trailing:
                         self._maybe_advance_trailing_stop(p, snapshot.close)
+                    self.check_heartbeat(p, current_price=snapshot.close)
                     continue
                 trade = self.close_position(tid, snapshot.timestamp, exit_price, exit_reason)
                 if trade is not None:
@@ -385,25 +391,27 @@ class PositionTracker:
                         closed.append(trade)
                     continue
 
-                if self.enable_trailing:
-                    ltp = 0.0
-                    if "/" in p.instrument:
-                        parts = p.instrument.split("/")
-                        if len(parts) == 2:
-                            try:
-                                s_ltp = float(self.fill_sim.feed.get_ltp(parts[0].strip()) or 0.0)
-                                l_ltp = float(self.fill_sim.feed.get_ltp(parts[1].strip()) or 0.0)
-                                if s_ltp > 0 or l_ltp > 0:
-                                    ltp = round(max(0.0, s_ltp - l_ltp), 2)
-                            except Exception:
-                                ltp = 0.0
-                    else:
+                ltp = 0.0
+                if "/" in p.instrument:
+                    parts = p.instrument.split("/")
+                    if len(parts) == 2:
                         try:
-                            ltp = float(self.fill_sim.feed.get_ltp(p.instrument) or 0.0)
+                            s_ltp = float(self.fill_sim.feed.get_ltp(parts[0].strip()) or 0.0)
+                            l_ltp = float(self.fill_sim.feed.get_ltp(parts[1].strip()) or 0.0)
+                            if s_ltp > 0 or l_ltp > 0:
+                                ltp = round(max(0.0, s_ltp - l_ltp), 2)
                         except Exception:
                             ltp = 0.0
-                    if ltp > 0:
-                        self._maybe_advance_trailing_stop(p, ltp)
+                else:
+                    try:
+                        ltp = float(self.fill_sim.feed.get_ltp(p.instrument) or 0.0)
+                    except Exception:
+                        ltp = 0.0
+
+                if self.enable_trailing and ltp > 0:
+                    self._maybe_advance_trailing_stop(p, ltp)
+
+                self.check_heartbeat(p, current_price=ltp)
         return closed
 
     def _is_underlying_trend_intact(
@@ -931,3 +939,85 @@ class PositionTracker:
                         self.on_sl_update(pos, old_sl, new_sl, "high_water_trail", current_price, gain_pts, cost_buffer_pts)
                     except Exception as e:
                         logger.error(f"on_sl_update hwm callback failed: {e}")
+
+    @staticmethod
+    def _get_elapsed_seconds(entry_time_val) -> float:
+        """Defensively compute elapsed wall-clock seconds from entry_time."""
+        if not entry_time_val:
+            return 0.0
+        if isinstance(entry_time_val, datetime):
+            entry_dt = entry_time_val
+        elif isinstance(entry_time_val, str) and entry_time_val.strip():
+            s = entry_time_val.strip()
+            try:
+                entry_dt = datetime.fromisoformat(s)
+            except Exception:
+                try:
+                    entry_dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return 0.0
+        else:
+            return 0.0
+
+        try:
+            now = datetime.now(entry_dt.tzinfo) if entry_dt.tzinfo is not None else datetime.now()
+            diff = (now - entry_dt).total_seconds()
+        except TypeError:
+            entry_naive = entry_dt.replace(tzinfo=None)
+            now_naive = datetime.now()
+            diff = (now_naive - entry_naive).total_seconds()
+        return max(0.0, diff)
+
+    def _resolve_current_price(self, pos: Position) -> float:
+        """Resolve latest LTP for position from feed or entry price fallback."""
+        if "/" in pos.instrument:
+            parts = pos.instrument.split("/")
+            if len(parts) == 2 and hasattr(self.fill_sim, "feed"):
+                try:
+                    s_ltp = float(self.fill_sim.feed.get_ltp(parts[0].strip()) or 0.0)
+                    l_ltp = float(self.fill_sim.feed.get_ltp(parts[1].strip()) or 0.0)
+                    if s_ltp > 0 or l_ltp > 0:
+                        return round(max(0.0, s_ltp - l_ltp), 2)
+                except Exception:
+                    pass
+        elif hasattr(self.fill_sim, "feed"):
+            try:
+                ltp = float(self.fill_sim.feed.get_ltp(pos.instrument) or 0.0)
+                if ltp > 0:
+                    return ltp
+            except Exception:
+                pass
+        return float(pos.entry_price or 0.0)
+
+    def check_heartbeat(self, pos: Position, current_price: Optional[float] = None) -> bool:
+        """Check if 5-minute milestone has been reached for open position and fire callback.
+
+        Milestone index M = int(elapsed_seconds // 300).
+        Deduplication: fires if M >= 1 and M > getattr(pos, '_last_heartbeat_milestone', 0).
+        Returns True if heartbeat was triggered, False otherwise.
+        """
+        if not self.on_heartbeat:
+            return False
+        if pos.trade_id not in self.open_positions:
+            return False
+
+        elapsed_sec = self._get_elapsed_seconds(pos.entry_time)
+        m = int(elapsed_sec // 300)
+        last_m = getattr(pos, "_last_heartbeat_milestone", 0)
+
+        if m >= 1 and m > last_m:
+            pos._last_heartbeat_milestone = m
+            pos._last_heartbeat_ts = _time.time()
+            self._heartbeat_milestones[pos.trade_id] = m
+
+            price = current_price
+            if price is None or price <= 0:
+                price = self._resolve_current_price(pos)
+
+            try:
+                self.on_heartbeat(pos, price, int(elapsed_sec), m)
+                return True
+            except Exception as e:
+                logger.error(f"PositionTracker: on_heartbeat callback failed for {pos.trade_id}: {e}")
+        return False
+

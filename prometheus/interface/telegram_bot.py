@@ -10,7 +10,7 @@ Receives commands: /scan, /status, /pnl, /regime, /help
 import threading
 import time
 import queue
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
 
 from prometheus.utils.logger import logger
@@ -1535,6 +1535,194 @@ class TelegramBot:
             lines.append(f"<code>ID: {trade_id}</code>")
 
         self.send_message("\n".join(lines))
+
+    def alert_trade_update(
+        self,
+        update_info: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> bool:
+        """Send an actionable 5-minute in-trade status heartbeat for an active position.
+
+        Displays real-time LTP vs entry, Gross/Net P&L (both points and rupees),
+        active trailing stop loss, profit target, elapsed wall-clock duration,
+        and 8-pillar microstructure health score.
+
+        Accepts either a dictionary payload (update_info) or keyword arguments.
+        Dispatches asynchronously via self.send_message_async by default (async_send=True).
+        """
+        info = dict(update_info) if update_info else {}
+        info.update(kwargs)
+
+        symbol = str(info.get("symbol", "") or "")
+        instrument = str(info.get("instrument", "") or "")
+        side_val = str(info.get("direction", "") or info.get("side", "") or "")
+
+        is_spread = (
+            "/" in instrument
+            or "SPREAD" in str(info.get("strategy", "")).upper()
+            or "SPREAD" in str(info.get("strategy_type", "")).upper()
+            or "SPREAD" in side_val.upper()
+        )
+
+        # Resolve direction display
+        if is_spread:
+            if "BEAR" in side_val.upper() or "CALL" in side_val.upper() or "SHORT" in side_val.upper():
+                direction = "Credit Spread: BEAR CALL SPREAD"
+            elif "BULL" in side_val.upper() or "PUT" in side_val.upper():
+                direction = "Credit Spread: BULL PUT SPREAD"
+            else:
+                direction = "Credit Spread"
+        else:
+            if "BUY CE" in side_val.upper() or "CE" in side_val.upper() or "BULLISH" in side_val.upper() or "LONG" in side_val.upper() or instrument.endswith("CE"):
+                direction = "BUY CE"
+            elif "BUY PE" in side_val.upper() or "PE" in side_val.upper() or "BEARISH" in side_val.upper() or "SHORT" in side_val.upper() or instrument.endswith("PE"):
+                direction = "BUY PE"
+            else:
+                direction = side_val or "BUY"
+
+        qty = int(info.get("quantity", 0) or 0)
+        qty_str = f" {qty}x" if qty > 0 else ""
+
+        entry_price = float(info.get("entry_price", 0.0) or 0.0)
+        current_price = float(info.get("current_price", 0.0) or 0.0)
+
+        # Kite search box formatting
+        kite_search = info.get("kite_search", "")
+        if not kite_search and instrument:
+            try:
+                from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+                kite_search = human_search_name_from_api_symbol(instrument)
+            except Exception:
+                kite_search = instrument
+
+        if is_spread and "/" in instrument:
+            parts = instrument.split("/")
+            leg1_raw = parts[0].strip()
+            leg2_raw = parts[1].strip()
+            try:
+                from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+                leg1_clean = human_search_name_from_api_symbol(leg1_raw)
+                leg2_clean = human_search_name_from_api_symbol(leg2_raw)
+            except Exception:
+                leg1_clean, leg2_clean = leg1_raw, leg2_raw
+
+            contract_box = (
+                f"📋 <b>Zerodha Kite Contracts (Tap to Copy):</b>\n"
+                f"• <b>Leg 1 (Short):</b> <code>{leg1_clean}</code> (BUY to close)\n"
+                f"• <b>Leg 2 (Hedge):</b> <code>{leg2_clean}</code> (SELL to close)\n"
+                f"<i>API: <code>{instrument}</code></i>"
+            )
+        else:
+            contract_box = (
+                f"📋 <b>Zerodha Kite Contract (Tap to Copy):</b>\n"
+                f"<code>{kite_search}</code>\n"
+                f"<i>API: <code>{instrument}</code></i>"
+                if kite_search else (f"<code>{instrument}</code>" if instrument else "")
+            )
+
+        # Points and Return %
+        if is_spread:
+            gross_pts = float(info.get("gross_pnl_pts", 0.0) or (entry_price - current_price if entry_price > 0 else 0.0))
+            return_pct = float(info.get("return_pct", 0.0) or ((gross_pts / entry_price * 100) if entry_price > 0 else 0.0))
+            price_line = f"🔥 <b>Current Spread LTP:</b> Rs {current_price:,.2f} ➔ <b>Net Credit:</b> Rs {entry_price:,.2f} (<b>{return_pct:+.1f}% decay</b>)"
+        else:
+            gross_pts = float(info.get("gross_pnl_pts", 0.0) or (current_price - entry_price if entry_price > 0 else 0.0))
+            return_pct = float(info.get("return_pct", 0.0) or ((gross_pts / entry_price * 100) if entry_price > 0 else 0.0))
+            price_line = f"🔥 <b>Current LTP:</b> Rs {current_price:,.2f} ➔ <b>Entry:</b> Rs {entry_price:,.2f} (<b>{return_pct:+.1f}%</b>)"
+
+        # Gross & Net P&L (Points & Rupees)
+        if "gross_pnl" in info and info["gross_pnl"] is not None:
+            gross_rs = float(info["gross_pnl"])
+        else:
+            gross_rs = gross_pts * qty if qty > 0 else gross_pts
+
+        if "net_pnl" in info and info["net_pnl"] is not None:
+            net_rs = float(info["net_pnl"])
+        else:
+            cost_est = 57.0
+            net_rs = gross_rs - cost_est
+
+        if "net_pnl_pts" in info and info["net_pnl_pts"] is not None:
+            net_pts = float(info["net_pnl_pts"])
+        else:
+            net_pts = (net_rs / qty) if qty > 0 else gross_pts
+
+        gross_emoji = "🟢" if gross_rs >= 0 else "🔴"
+        net_emoji = "🟢" if net_rs >= 0 else "🔴"
+
+        # Trailing SL and Profit Target
+        stop_loss = float(info.get("stop_loss", 0.0) or info.get("current_sl", 0.0) or 0.0)
+        target = float(info.get("target", 0.0) or 0.0)
+        stage = str(info.get("trailing_stage", "") or info.get("stage", "") or "").upper()
+        stage_badge = f" ({stage})" if stage else ""
+
+        # Holding duration
+        dur_str = str(info.get("holding_duration", "") or "")
+        if not dur_str:
+            sec = int(info.get("holding_duration_seconds", 0) or 0)
+            if sec > 0:
+                mins = sec // 60
+                dur_str = f"{mins} minutes" if mins != 1 else "1 minute"
+            else:
+                mins = int(info.get("elapsed_minutes", 0) or 0)
+                if mins > 0:
+                    dur_str = f"{mins} minutes" if mins != 1 else "1 minute"
+                else:
+                    m_idx = int(info.get("milestone", 0) or 0)
+                    if m_idx > 0:
+                        dur_str = f"{m_idx * 5} minutes"
+                    else:
+                        dur_str = "5 minutes"
+
+        # 8-Pillar Health Score Summary
+        health_summary = str(info.get("health_summary", "") or "")
+        health_score_val = info.get("health_score", None)
+        health_report = info.get("health_report", None)
+
+        if not health_summary:
+            if health_report is not None:
+                from prometheus.execution.position_health import format_health_summary
+                health_summary = format_health_summary(health_report)
+            elif health_score_val is not None:
+                from prometheus.execution.position_health import format_health_summary
+                health_summary = format_health_summary(float(health_score_val))
+            else:
+                health_summary = "Score: N/A | Telemetry neutral"
+
+        lines = [
+            "⏱️ <b>TRADE UPDATE — LIVE STATUS</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"<b>Symbol:</b> <code>{symbol}</code> ({direction}{qty_str})",
+        ]
+        if contract_box:
+            lines.append(contract_box)
+
+        lines.extend([
+            price_line,
+            f"{gross_emoji} <b>Running Gross P&L:</b> {gross_pts:+.1f} pts ({gross_rs:+,.2f} Rs)",
+            f"{net_emoji} <b>Running Net P&L:</b> {net_pts:+.1f} pts ({net_rs:+,.2f} Rs)",
+            "",
+            f"🛑 <b>Active Trailing SL:</b> Rs {stop_loss:,.2f}{stage_badge}",
+            f"🎯 <b>Profit Target:</b> Rs {target:,.2f}",
+            f"⏱️ <b>Holding Duration:</b> <code>{dur_str}</code>",
+            "",
+            "🩺 <b>8-Pillar Health Score:</b>",
+            f"<i>{health_summary}</i>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ])
+
+        trade_id = info.get("trade_id")
+        if trade_id:
+            lines.append(f"<code>ID: {trade_id}</code>")
+
+        text = "\n".join(lines)
+
+        async_send = bool(info.get("async_send", True))
+        if async_send:
+            self.send_message_async(text)
+            return True
+        else:
+            return bool(self.send_message(text))
 
     def alert_risk_breach(self, risk_info: Dict):
         """Alert when a risk limit is breached."""

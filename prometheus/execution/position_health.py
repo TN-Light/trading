@@ -885,3 +885,49 @@ class PositionHealthEngine:
             f"👉 <b>Hold position and let profits run!</b> {action_desc}\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         )
+
+    @staticmethod
+    def format_health_summary(report: Any) -> str:
+        """Format clear, informative 1-line health summary reflecting score and microstructure state."""
+        return format_health_summary(report)
+
+
+def format_health_summary(report: Any) -> str:
+    """Format clear, informative 1-line health summary reflecting score and microstructure state.
+    
+    Used by Telegram in-trade status heartbeats (alert_trade_update).
+    """
+    if report is None:
+        return "Score: N/A | Telemetry neutral"
+    if isinstance(report, (int, float)):
+        score = float(report)
+        real_threat = score <= -35.0
+        real_favor = score >= 45.0
+        threat_reasons: List[str] = []
+        favor_reasons: List[str] = []
+    elif isinstance(report, dict):
+        score = float(report.get("health_score", 0.0) or 0.0)
+        real_threat = bool(report.get("real_threat", False)) or score <= -35.0
+        real_favor = bool(report.get("real_favor", False)) or score >= 45.0
+        threat_reasons = report.get("threat_reasons", []) or []
+        favor_reasons = report.get("favor_reasons", []) or []
+    else:
+        score = getattr(report, "health_score", 0.0)
+        real_threat = getattr(report, "real_threat", False) or score <= -35.0
+        real_favor = getattr(report, "real_favor", False) or score >= 45.0
+        threat_reasons = getattr(report, "threat_reasons", []) or []
+        favor_reasons = getattr(report, "favor_reasons", []) or []
+
+    if real_threat or score <= -35.0:
+        reason = threat_reasons[0] if threat_reasons else "Momentum stalling, watching defense threshold"
+        return f"Score: {score:+.0f}/100 [CRITICAL] | ⚠️ Warning: {reason}"
+    elif real_favor or score >= 45.0:
+        reason = favor_reasons[0] if favor_reasons else "Strong impulse"
+        return f"Score: {score:+.0f}/100 [STRONG MOMENTUM] | 🚀 Runner momentum healthy ({reason})"
+    elif score >= 15.0:
+        return f"Score: {score:+.0f}/100 [HEALTHY] | Momentum healthy, moving toward target"
+    elif score <= -15.0:
+        return f"Score: {score:+.0f}/100 [CAUTION] | Warning: Momentum stalling, watching support"
+    else:
+        return f"Score: {score:+.0f}/100 [NEUTRAL] | Consolidating within structural bounds"
+

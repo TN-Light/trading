@@ -80,6 +80,8 @@ class TrailingState:
     entry_spot: float = 0.0
     atr: float = 0.0
     tier: str = "B"
+    _last_heartbeat_milestone: int = 0
+    _last_heartbeat_ts: float = 0.0
 
     def __post_init__(self):
         is_credit = (
@@ -142,6 +144,7 @@ class PositionMonitor:
         on_trailing_update: Optional[Callable] = None,
         on_state_changed: Optional[Callable] = None,
         data_engine=None,
+        on_heartbeat: Optional[Callable] = None,
     ):
         self.broker = broker
         self.poll_interval = poll_interval
@@ -155,12 +158,14 @@ class PositionMonitor:
         self._on_exit = on_exit
         self._on_trailing_update = on_trailing_update
         self._on_state_changed = on_state_changed
+        self._on_heartbeat = on_heartbeat
 
         self._last_bar_increment_date = ""
 
         # LTP failure tracking per position
         self._ltp_fail_counts: Dict[str, int] = {}
         self._ltp_alert_sent: Dict[str, bool] = {}
+        self._heartbeat_milestones: Dict[str, int] = {}
 
         # 8-Pillar Microstructure Trade Health Engine
         self.health_engine = None
@@ -192,6 +197,7 @@ class PositionMonitor:
             self._positions.pop(position_id, None)
         self._ltp_fail_counts.pop(position_id, None)
         self._ltp_alert_sent.pop(position_id, None)
+        self._heartbeat_milestones.pop(position_id, None)
 
     def restore_positions(self, states: List[TrailingState]):
         """Restore positions from SQLite persistence (crash recovery)."""
@@ -351,6 +357,7 @@ class PositionMonitor:
                     self._on_exit(state.position_id, current_price, "breakeven_exit_credit_spread")
                 return
 
+            self._evaluate_heartbeat(state, current_price)
             return
 
         rd = state.risk_distance
@@ -704,6 +711,37 @@ class PositionMonitor:
             if self._on_state_changed:
                 self._on_state_changed(state)
 
+        # ── In-Trade 5-Minute Heartbeat Evaluation ──
+        self._evaluate_heartbeat(state, current_price)
+
+    def _evaluate_heartbeat(self, state: TrailingState, current_price: float) -> None:
+        """Evaluate and emit in-trade 5-minute heartbeat if milestone reached."""
+        if not self._on_heartbeat:
+            return
+        try:
+            elapsed_sec = self._get_elapsed_seconds(state.entry_time)
+            m = int(elapsed_sec // 300)
+            last_m = getattr(state, "_last_heartbeat_milestone", 0)
+            if m >= 1 and m > last_m:
+                state._last_heartbeat_milestone = m
+                state._last_heartbeat_ts = time.time()
+                self._heartbeat_milestones[state.position_id] = m
+                health_report = None
+                if self.health_engine:
+                    try:
+                        health_report = self.health_engine.evaluate_position_health(state, current_price)
+                    except Exception as e:
+                        logger.debug(f"PositionMonitor: health eval failed for heartbeat: {e}")
+                try:
+                    self._on_heartbeat(state, current_price, int(elapsed_sec), m, health_report)
+                except TypeError:
+                    try:
+                        self._on_heartbeat(state, current_price, int(elapsed_sec), m)
+                    except TypeError:
+                        self._on_heartbeat(state, current_price)
+        except Exception as e:
+            logger.error(f"PositionMonitor: error during in-trade heartbeat check: {e}")
+
     def _check_adverse_indicator(self, state: TrailingState, current_price: float) -> bool:
         """Check if price action has structurally invalidated the trade (VWAP re-cross or SuperTrend flip).
         
@@ -909,3 +947,32 @@ class PositionMonitor:
                     bars_to_add = int(elapsed // (interval_minutes * 60))
                     state.entry_bar_count += bars_to_add
                     state._last_bar_ts = now
+
+    @staticmethod
+    def _get_elapsed_seconds(entry_time_val) -> float:
+        """Defensively compute elapsed wall-clock seconds from an entry time string or datetime."""
+        if not entry_time_val:
+            return 0.0
+        if isinstance(entry_time_val, datetime):
+            entry_dt = entry_time_val
+        elif isinstance(entry_time_val, str) and entry_time_val.strip():
+            s = entry_time_val.strip()
+            try:
+                entry_dt = datetime.fromisoformat(s)
+            except Exception:
+                try:
+                    entry_dt = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    return 0.0
+        else:
+            return 0.0
+
+        try:
+            now = datetime.now(entry_dt.tzinfo) if entry_dt.tzinfo is not None else datetime.now()
+            diff = (now - entry_dt).total_seconds()
+        except TypeError:
+            entry_naive = entry_dt.replace(tzinfo=None)
+            now_naive = datetime.now()
+            diff = (now_naive - entry_naive).total_seconds()
+        return max(0.0, diff)
+

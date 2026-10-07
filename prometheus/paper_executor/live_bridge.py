@@ -258,10 +258,12 @@ class LivePaperCapture:
             enable_trailing=config.enable_trailing,
             recorder=self._recorder,
             on_sl_update=self._on_trailing_stop_updated,
+            on_heartbeat=self._on_position_heartbeat,
             data_engine=self._data_engine,
             trend_aware=True,
             max_stagnation_bars=6,
         )
+        self._tracker = tracker
         # PaperTradeEngine with high cap + allow_duplicate_instrument=True
         # so EVERY valid signal becomes a paper position (the user's stated
         # goal: evaluate the strategy itself, not risk management).
@@ -504,6 +506,107 @@ class LivePaperCapture:
             )
         except Exception as e:
             logger.debug(f"[PaperCapture] alert_trailing_stop_updated failed: {e}")
+
+    def _on_position_heartbeat(
+        self,
+        pos,
+        current_price: float,
+        elapsed_seconds: int,
+        milestone: int,
+    ) -> None:
+        """Callback invoked whenever PositionTracker hits a 5-minute milestone."""
+        if self._telegram is None:
+            return
+        try:
+            is_spread = (
+                "/" in (getattr(pos, "instrument", "") or "")
+                or "SPREAD" in str(getattr(pos, "strategy", "")).upper()
+                or "SPREAD" in str(getattr(pos.direction, "value", "")).upper()
+            )
+            if is_spread:
+                side = "BEAR CALL SPREAD" if getattr(pos.direction, "value", "") == "SHORT" else "BULL PUT SPREAD"
+            else:
+                side = "BUY CE" if getattr(pos.direction, "value", "") == "LONG" else "BUY PE"
+
+            entry_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+            curr_price = float(current_price or 0.0)
+            qty = int(getattr(pos, "quantity", 0) or 0)
+
+            if is_spread:
+                gain_pts = round(entry_price - curr_price, 2)
+                return_pct = round((gain_pts / entry_price * 100), 2) if entry_price > 0 else 0.0
+            else:
+                gain_pts = round(curr_price - entry_price, 2)
+                return_pct = round((gain_pts / entry_price * 100), 2) if entry_price > 0 else 0.0
+
+            gross_pnl = round(gain_pts * qty, 2) if qty > 0 else round(gain_pts, 2)
+
+            cost_est = 57.0
+            tracker = getattr(self, "_tracker", None) or getattr(getattr(self, "_engine", None), "tracker", None)
+            if tracker and hasattr(tracker, "cost_model"):
+                try:
+                    entry_notional = entry_price * qty
+                    exit_notional = curr_price * qty
+                    if hasattr(tracker.cost_model, "calculate_trade_cost"):
+                        cost_est = tracker.cost_model.calculate_trade_cost(
+                            entry_notional=entry_notional,
+                            exit_notional=exit_notional,
+                            is_spread=is_spread,
+                        )
+                    elif hasattr(tracker.cost_model, "cost_for_notional"):
+                        cost_est = tracker.cost_model.cost_for_notional(entry_notional) + tracker.cost_model.cost_for_notional(exit_notional)
+                except Exception:
+                    cost_est = 57.0
+            net_pnl = round(gross_pnl - cost_est, 2)
+            net_pnl_pts = round(net_pnl / qty, 2) if qty > 0 else gain_pts
+
+            stage = "INITIAL"
+            if getattr(pos, "breakeven_set", False):
+                stage = "BREAKEVEN"
+            elif getattr(pos, "half_risk_set", False):
+                stage = "HALF RISK"
+
+            health_score = None
+            health_summary = ""
+            if tracker and getattr(tracker, "health_engine", None):
+                try:
+                    report = tracker.health_engine.evaluate_position_health(pos, curr_price)
+                    if report:
+                        health_score = report.health_score
+                        from prometheus.execution.position_health import format_health_summary
+                        health_summary = format_health_summary(report)
+                except Exception as e:
+                    logger.debug(f"[PaperCapture] health engine eval error: {e}")
+
+            mins = milestone * 5
+            duration_str = f"{mins} minutes"
+
+            update_info = {
+                "trade_id": getattr(pos, "trade_id", ""),
+                "symbol": getattr(pos, "symbol", ""),
+                "instrument": getattr(pos, "instrument", ""),
+                "direction": side,
+                "side": side,
+                "quantity": qty,
+                "entry_price": entry_price,
+                "current_price": curr_price,
+                "gross_pnl_pts": gain_pts,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "net_pnl_pts": net_pnl_pts,
+                "stop_loss": getattr(pos, "stop_loss", 0.0),
+                "target": getattr(pos, "target", 0.0),
+                "trailing_stage": stage,
+                "holding_duration": duration_str,
+                "holding_duration_seconds": elapsed_seconds,
+                "health_score": health_score,
+                "health_summary": health_summary,
+                "milestone": milestone,
+            }
+
+            self._telegram.alert_trade_update(update_info)
+        except Exception as e:
+            logger.warning(f"[PaperCapture] _on_position_heartbeat failed: {e}")
 
     def _alert_position_opened(self, notif, trade_id: str) -> None:
         # Internal capture logging — main signal alert already sent rank & execution details
