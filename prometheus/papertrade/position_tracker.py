@@ -420,10 +420,11 @@ class PositionTracker:
         current_spot: float,
         entry_spot: float,
         bar_interval: str = "15minute",
+        atr: float = 0.0,
     ) -> bool:
         """Evaluate if the underlying trend is intact during a consolidation pause.
         Checks:
-        1. Directional spot drift (spot has not drifted adversely against trade).
+        1. Directional spot drift with noise envelope tolerance (0.35 * ATR or 14/6 pts).
         2. EMA9 vs EMA21 and SuperTrend direction if data_engine is available.
         """
         if current_spot <= 0 and hasattr(self, "fill_sim") and getattr(self.fill_sim, "feed", None):
@@ -436,7 +437,10 @@ class PositionTracker:
             return False
 
         trade_is_bullish = (direction == Direction.LONG)
-        favorable_drift = (current_spot >= entry_spot) if trade_is_bullish else (current_spot <= entry_spot)
+        sym_upper = symbol.upper()
+        default_buf = 35.0 if "SENSEX" in sym_upper else (18.0 if "BANK" in sym_upper else 8.0)
+        noise_buf = max(default_buf, 0.35 * atr) if atr > 0 else default_buf
+        favorable_drift = (current_spot >= (entry_spot - noise_buf)) if trade_is_bullish else (current_spot <= (entry_spot + noise_buf))
         if not favorable_drift:
             return False
 
@@ -453,9 +457,9 @@ class PositionTracker:
                     st_dir = int(st_df["supertrend_direction"].iloc[-1]) if len(st_df) > 0 else 0
 
                     if trade_is_bullish:
-                        return (ema9 >= ema21) and (st_dir == 1)
+                        return (ema9 > ema21) and (st_dir == 1)
                     else:
-                        return (ema9 <= ema21) and (st_dir == -1)
+                        return (ema9 < ema21) and (st_dir == -1)
             except Exception as e:
                 logger.debug(f"Trend health check error for {symbol}: {e}")
 
@@ -677,17 +681,35 @@ class PositionTracker:
 
             if is_stagnant:
                 trend_intact = False
+                health_report = None
                 if self.trend_aware:
+                    # 1. Technical trend check (directional drift within noise buffer + EMA/SuperTrend)
                     trend_intact = self._is_underlying_trend_intact(
                         symbol=pos.symbol,
                         direction=pos.direction,
                         current_spot=current_spot,
                         entry_spot=entry_spot,
+                        atr=atr,
                     )
+                    # 2. If technical trend is intact, verify with 8-Pillar Health Engine (Veto Gate)
+                    if trend_intact and getattr(self, "health_engine", None):
+                        try:
+                            health_report = self.health_engine.evaluate_position_health(pos, current_premium=ltp)
+                            if health_report:
+                                if health_report.real_threat or health_report.health_score <= -15.0:
+                                    logger.info(
+                                        f"[TRACKER-FEED] Health veto: technical trend intact, but health is critical "
+                                        f"({health_report.health_score:+.0f}, threats={health_report.threat_reasons}). Killing."
+                                    )
+                                    trend_intact = False
+                        except Exception as he_err:
+                            logger.debug(f"Health engine evaluation error during inactivity check: {he_err}")
+
                 if trend_intact and pos.bars_held < self.max_stagnation_bars:
+                    health_str = f" Health={health_report.health_score:+.0f}" if health_report else ""
                     logger.info(
                         f"[TRACKER-FEED] Inactivity Kill-Switch deferred for {pos.trade_id}: "
-                        f"underlying trend intact for {pos.symbol} (spot={current_spot:.2f}, entry={entry_spot:.2f}). "
+                        f"underlying trend intact for {pos.symbol}{health_str} (spot={current_spot:.2f}, entry={entry_spot:.2f}). "
                         f"Holding in consolidation flag (bar {pos.bars_held}/{self.max_stagnation_bars})."
                     )
                 else:

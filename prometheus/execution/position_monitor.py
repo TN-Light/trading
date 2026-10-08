@@ -515,8 +515,8 @@ class PositionMonitor:
                             spot_disp = (curr_spot - state.entry_spot) if trade_is_bullish else (state.entry_spot - curr_spot)
                             min_progress = 0.5 * current_atr
                             if spot_disp < min_progress and current_price < entry * 1.05:
-                                # Check trend health
                                 trend_intact = False
+                                health_report = None
                                 try:
                                     from prometheus.signals.technical import calculate_ema, calculate_supertrend
                                     ema9 = float(calculate_ema(data["close"], period=9).iloc[-1])
@@ -524,20 +524,38 @@ class PositionMonitor:
                                     st_df = calculate_supertrend(data, period=10, multiplier=3.0)
                                     st_dir = int(st_df["supertrend_direction"].iloc[-1]) if len(st_df) > 0 else 0
 
+                                    sym_upper = (state.symbol or "").upper()
+                                    default_buf = 35.0 if "SENSEX" in sym_upper else (18.0 if "BANK" in sym_upper else 8.0)
+                                    noise_buf = max(default_buf, 0.35 * current_atr) if current_atr > 0 else default_buf
                                     if trade_is_bullish:
-                                        trend_intact = (curr_spot >= state.entry_spot) and (ema9 >= ema21) and (st_dir == 1)
+                                        trend_intact = (curr_spot >= (state.entry_spot - noise_buf)) and (ema9 >= ema21) and (st_dir == 1)
                                     else:
-                                        trend_intact = (curr_spot <= state.entry_spot) and (ema9 <= ema21) and (st_dir == -1)
+                                        trend_intact = (curr_spot <= (state.entry_spot + noise_buf)) and (ema9 <= ema21) and (st_dir == -1)
                                 except Exception as te:
                                     logger.debug(f"Trend health check error: {te}")
                                     trend_intact = False
 
+                                # If technical indicators show intact trend, check Health Engine as a Veto Gate
+                                if trend_intact and self.health_engine and getattr(state, "strategy_type", "") != "credit_spread":
+                                    try:
+                                        health_report = self.health_engine.evaluate_position_health(state, current_price)
+                                        if health_report:
+                                            if health_report.real_threat or health_report.health_score <= -15.0:
+                                                logger.info(
+                                                    f"[MONITOR] Health veto: technical trend intact, but health is critical "
+                                                    f"({health_report.health_score:+.0f}, threats={health_report.threat_reasons}). Killing."
+                                                )
+                                                trend_intact = False
+                                    except Exception as he_err:
+                                        logger.debug(f"Health engine check in inactivity kill-switch: {he_err}")
+
                                 max_stagnation_bars = 6  # 90m max hold for intact trends
                                 if trend_intact and state.entry_bar_count < max_stagnation_bars:
                                     is_stagnant = False
+                                    health_str = f" Health={health_report.health_score:+.0f}" if health_report else ""
                                     logger.info(
                                         f"[MONITOR] Inactivity Kill-Switch deferred for {state.position_id}: "
-                                        f"underlying trend is INTACT (dir={state.direction}, spot={curr_spot:.2f}, "
+                                        f"underlying trend is INTACT{health_str} (dir={state.direction}, spot={curr_spot:.2f}, "
                                         f"entry_spot={state.entry_spot:.2f}). Holding in trend consolidation flag "
                                         f"(bar {state.entry_bar_count}/{max_stagnation_bars})."
                                     )

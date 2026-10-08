@@ -942,16 +942,16 @@ def format_health_summary(report: Any) -> str:
 
     if real_threat or score <= -35.0:
         reason = threat_reasons[0] if threat_reasons else "Momentum stalling, watching defense threshold"
-        return f"Score: {score:+.0f}/100 [CRITICAL] | ⚠️ Warning: {reason}"
+        return f"Score: {score:+.0f} (Scale: -100 to +100) [CRITICAL] | ⚠️ Warning: {reason}"
     elif real_favor or score >= 45.0:
         reason = favor_reasons[0] if favor_reasons else "Strong impulse"
-        return f"Score: {score:+.0f}/100 [STRONG MOMENTUM] | 🚀 Runner momentum healthy ({reason})"
+        return f"Score: {score:+.0f} (Scale: -100 to +100) [STRONG MOMENTUM] | 🚀 Runner momentum healthy ({reason})"
     elif score >= 15.0:
-        return f"Score: {score:+.0f}/100 [HEALTHY] | Momentum healthy, moving toward target"
+        return f"Score: {score:+.0f} (Scale: -100 to +100) [HEALTHY] | Momentum healthy, moving toward target"
     elif score <= -15.0:
-        return f"Score: {score:+.0f}/100 [CAUTION] | Warning: Momentum stalling, watching support"
+        return f"Score: {score:+.0f} (Scale: -100 to +100) [CAUTION] | Warning: Momentum stalling, watching support"
     else:
-        return f"Score: {score:+.0f}/100 [NEUTRAL] | Consolidating within structural bounds"
+        return f"Score: {score:+.0f} (Scale: -100 to +100) [NEUTRAL] | Consolidating within structural bounds"
 
 
 def get_operator_action_command(
