@@ -776,6 +776,8 @@ class DataEngine:
             "volume": 0,
             "oi": 0,
             "oi_change": 0,
+            "delta_oi": 0,
+            "delta_volume": 0,
             "iv": 0.0,
             "underlying": 0.0,
         }
@@ -784,7 +786,7 @@ class DataEngine:
             if col not in df.columns:
                 df[col] = default
 
-        numeric_cols = ["strike", "ltp", "bid", "ask", "volume", "oi", "oi_change", "iv", "underlying"]
+        numeric_cols = ["strike", "ltp", "bid", "ask", "volume", "oi", "oi_change", "delta_oi", "delta_volume", "iv", "underlying"]
         for col in numeric_cols:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
@@ -996,6 +998,28 @@ class DataEngine:
                 )
                 if not df.empty:
                     df = self._normalize_options_chain(df, symbol)
+                    if "oi_change" in df.columns and float(df["oi_change"].abs().sum()) == 0.0:
+                        try:
+                            nse_raw = self.nse.get_options_chain(symbol)
+                            if nse_raw:
+                                nse_df = self.nse.parse_options_chain(nse_raw)
+                                if not nse_df.empty and "oi_change" in nse_df.columns:
+                                    change_map = {
+                                        (round(float(r["strike"]), 2), str(r["option_type"]).upper()): float(r["oi_change"])
+                                        for _, r in nse_df.iterrows()
+                                        if r.get("oi_change") is not None
+                                    }
+                                    df["oi_change"] = df.apply(
+                                        lambda row: change_map.get(
+                                            (round(float(row["strike"]), 2), str(row["option_type"]).upper()),
+                                            row["oi_change"]
+                                        ),
+                                        axis=1
+                                    )
+                                    df["oi_change"] = pd.to_numeric(df["oi_change"], errors="coerce").fillna(0)
+                        except Exception as ne:
+                            logger.debug(f"NSE oi_change enrichment failed for {symbol}: {ne}")
+
                     self.store.save_options_chain(df)
                     return df
             except Exception as e:

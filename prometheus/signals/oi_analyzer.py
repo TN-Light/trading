@@ -145,13 +145,58 @@ class OIAnalyzer:
         atm_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.02 if (not chain_df.empty and "strike" in chain_df.columns) else None
         atm_df = chain_df[atm_mask] if (atm_mask is not None and not chain_df.empty) else pd.DataFrame()
 
-        tot_oi_change = float(abs(atm_df["oi_change"]).sum()) if not atm_df.empty and "oi_change" in atm_df.columns else 0.0
+        session_oi_change_avail = False
+        if not atm_df.empty and "oi_change" in atm_df.columns:
+            tot_oi_change = float(abs(atm_df["oi_change"]).sum())
+            if tot_oi_change > 0.0:
+                session_oi_change_avail = True
+        else:
+            tot_oi_change = 0.0
+
         tot_volume = float(atm_df["volume"].sum()) if not atm_df.empty and "volume" in atm_df.columns else 0.0
 
-        # Check for granular volume (bar-level or rolling volume) to avoid session denominator dilution
+        used_delta_fallback = False
+        # If tot_oi_change is 0 in 2% window, fallback to delta_oi or wider ATM window (3.5%)
+        if not session_oi_change_avail and not atm_df.empty and "delta_oi" in atm_df.columns:
+            d_oi = float(abs(atm_df["delta_oi"]).sum())
+            if d_oi > 0.0:
+                tot_oi_change = d_oi
+                used_delta_fallback = True
+
+        if not session_oi_change_avail and not chain_df.empty and "strike" in chain_df.columns:
+            wider_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.035
+            wider_df = chain_df[wider_mask]
+            if not wider_df.empty:
+                w_oi_change = float(abs(wider_df["oi_change"]).sum()) if "oi_change" in wider_df.columns else 0.0
+                if w_oi_change > 0:
+                    tot_oi_change = w_oi_change
+                    session_oi_change_avail = True
+                    used_delta_fallback = False
+                    if "volume" in wider_df.columns and float(wider_df["volume"].sum()) > 0:
+                        tot_volume = float(wider_df["volume"].sum())
+                elif "delta_oi" in wider_df.columns:
+                    w_delta = float(abs(wider_df["delta_oi"]).sum())
+                    if w_delta > 0:
+                        tot_oi_change = w_delta
+                        used_delta_fallback = True
+
+        # Check for granular volume (bar-level, rolling, interval, or poll delta_volume when falling back) to avoid session denominator dilution
         has_bar_volume = "bar_volume" in atm_df.columns and float(atm_df["bar_volume"].sum()) > 0
         has_rolling_volume = "rolling_volume" in atm_df.columns and float(atm_df["rolling_volume"].sum()) > 0
         has_interval_volume = "interval_volume" in atm_df.columns and float(atm_df["interval_volume"].sum()) > 0
+
+        has_delta_volume = False
+        eff_delta_volume = 0.0
+        if used_delta_fallback:
+            if not atm_df.empty and "delta_volume" in atm_df.columns and float(atm_df["delta_volume"].sum()) > 0:
+                eff_delta_volume = float(atm_df["delta_volume"].sum())
+                has_delta_volume = True
+            elif not chain_df.empty and "strike" in chain_df.columns:
+                wider_mask = abs(chain_df["strike"] - spot_price) < spot_price * 0.035
+                wider_df = chain_df[wider_mask]
+                if not wider_df.empty and "delta_volume" in wider_df.columns and float(wider_df["delta_volume"].sum()) > 0:
+                    eff_delta_volume = float(wider_df["delta_volume"].sum())
+                    has_delta_volume = True
 
         if has_bar_volume:
             eff_volume = float(atm_df["bar_volume"].sum())
@@ -166,6 +211,11 @@ class OIAnalyzer:
         elif has_interval_volume:
             eff_volume = float(atm_df["interval_volume"].sum())
             eff_oi_change = float(abs(atm_df["delta_oi"]).sum()) if ("delta_oi" in atm_df.columns and abs(atm_df["delta_oi"]).sum() > 0) else tot_oi_change
+            raw_cr = (eff_oi_change / max(eff_volume, 1.0))
+            time_norm_factor = 1.0
+        elif has_delta_volume:
+            eff_volume = eff_delta_volume
+            eff_oi_change = tot_oi_change
             raw_cr = (eff_oi_change / max(eff_volume, 1.0))
             time_norm_factor = 1.0
         else:

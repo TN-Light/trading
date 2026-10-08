@@ -14,6 +14,8 @@ SmartAPI endpoints used:
 
 import time
 import re
+import os
+import sqlite3
 import threading
 from dataclasses import dataclass
 import pandas as pd
@@ -188,6 +190,84 @@ class AngelOneOptionChain:
         with self._oi_lock:
             return dict(self._oi_snapshots)
 
+    def _lookup_previous_oi_baseline(
+        self,
+        token: str,
+        tradingsymbol: str,
+        trading_date: Optional[str] = None,
+    ) -> Optional[int]:
+        """Query previous day's closing OI from SQLite options_chain table to seed session baseline OI."""
+        if not tradingsymbol:
+            return None
+
+        db_paths = ["data/prometheus.db", "prometheus/data/prometheus.db"]
+        db_path = next((p for p in db_paths if os.path.exists(p)), None)
+        if not db_path:
+            return None
+
+        parsed_info = None
+        detected_root = None
+        for root in ("BANKNIFTY", "MIDCPNIFTY", "FINNIFTY", "NIFTYIT", "NIFTY", "SENSEX"):
+            if tradingsymbol.startswith(root):
+                detected_root = root
+                parsed_info = self._parse_tradingsymbol(tradingsymbol, root)
+                break
+
+        if not parsed_info or "strike" not in parsed_info or "option_type" not in parsed_info:
+            return None
+
+        strike = float(parsed_info["strike"])
+        option_type = str(parsed_info["option_type"]).upper()
+        expiry_str = parsed_info.get("expiry_str")
+
+        symbol_pattern = "%"
+        if detected_root == "BANKNIFTY":
+            symbol_pattern = "%BANK%"
+        elif detected_root == "SENSEX":
+            symbol_pattern = "%SENSEX%"
+        elif detected_root == "NIFTY":
+            symbol_pattern = "%NIFTY 50%"
+        elif detected_root == "FINNIFTY":
+            symbol_pattern = "%FIN%"
+
+        session_date = trading_date or date.today().isoformat()
+        cutoff_ts = f"{session_date} 09:15:00"
+
+        conn = None
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            cursor = conn.cursor()
+            if expiry_str:
+                query_expiry = """
+                    SELECT oi FROM options_chain
+                    WHERE symbol LIKE ? AND strike = ? AND option_type = ? AND expiry = ? AND timestamp < ?
+                    ORDER BY timestamp DESC LIMIT 1
+                """
+                cursor.execute(query_expiry, (symbol_pattern, strike, option_type, expiry_str, cutoff_ts))
+                row = cursor.fetchone()
+                if row and row[0] is not None and int(row[0]) > 0:
+                    return int(row[0])
+
+            query_fallback = """
+                SELECT oi FROM options_chain
+                WHERE symbol LIKE ? AND strike = ? AND option_type = ? AND timestamp < ?
+                ORDER BY timestamp DESC LIMIT 1
+            """
+            cursor.execute(query_fallback, (symbol_pattern, strike, option_type, cutoff_ts))
+            row = cursor.fetchone()
+            if row and row[0] is not None and int(row[0]) > 0:
+                return int(row[0])
+        except Exception as e:
+            logger.debug(f"AngelOne: _lookup_previous_oi_baseline query error: {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        return None
+
     def _update_oi_snapshot(
         self,
         token: str,
@@ -209,10 +289,19 @@ class AngelOneOptionChain:
         with self._oi_lock:
             self._check_oi_date_roll(trading_date)
             if token_str not in self._oi_snapshots:
+                baseline_oi = cur_oi_int
+                prev_baseline = self._lookup_previous_oi_baseline(
+                    token=token_str,
+                    tradingsymbol=tradingsymbol,
+                    trading_date=trading_date,
+                )
+                if prev_baseline is not None and prev_baseline > 0:
+                    baseline_oi = prev_baseline
+
                 snap = ContractOISnapshot(
                     token=token_str,
                     tradingsymbol=tradingsymbol,
-                    session_baseline_oi=cur_oi_int,
+                    session_baseline_oi=baseline_oi,
                     prev_poll_oi=cur_oi_int,
                     current_oi=cur_oi_int,
                     last_poll_time=now_ts,
@@ -739,6 +828,7 @@ class AngelOneOptionChain:
                             "oi": cur_oi,
                             "oi_change": snap.delta_oi_session,
                             "delta_oi": snap.delta_oi_poll,
+                            "delta_volume": snap.delta_volume_poll,
                             "bid": float(item.get("bestBidPrice", 0) or 0),
                             "ask": float(item.get("bestAskPrice", 0) or 0),
                             "underlying": float(item.get("ltp", 0)),
@@ -986,9 +1076,11 @@ class AngelOneOptionChain:
                                 token=token,
                                 tradingsymbol=tsym,
                                 current_oi=raw_oi,
+                                volume=premium["volume"],
                             )
                             premium["oi_change"] = snap.delta_oi_session
                             premium["delta_oi"] = snap.delta_oi_poll
+                            premium["delta_volume"] = snap.delta_volume_poll
                 except Exception:
                     pass
 

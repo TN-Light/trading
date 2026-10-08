@@ -820,6 +820,7 @@ class OrderManager:
             target_decay_price=target_decay,
             breakeven_decay_price=be_decay,
             tier=tier_val,
+            quantity=int(getattr(managed, "quantity", 0) or 0),
         )
 
     # -------------------------------------------------------------------------

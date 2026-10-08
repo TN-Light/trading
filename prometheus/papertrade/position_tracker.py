@@ -137,12 +137,11 @@ class PositionTracker:
 
         # 8-Pillar Microstructure Trade Health Engine
         self.health_engine = None
-        if self.data_engine:
-            try:
-                from prometheus.execution.position_health import PositionHealthEngine
-                self.health_engine = PositionHealthEngine(data_engine=self.data_engine)
-            except Exception as e:
-                logger.debug(f"PositionTracker: failed to initialize PositionHealthEngine: {e}")
+        try:
+            from prometheus.execution.position_health import PositionHealthEngine
+            self.health_engine = PositionHealthEngine(data_engine=self.data_engine)
+        except Exception as e:
+            logger.debug(f"PositionTracker: failed to initialize PositionHealthEngine: {e}")
 
         self.open_positions: Dict[str, Position] = {}
         self.closed_trades: List[PaperTrade] = []
@@ -763,16 +762,72 @@ class PositionTracker:
         if current_price > pos.high_water_mark:
             pos.high_water_mark = current_price
 
-        # Calculate exact cost buffer and symbol noise floor
+        # 1. Compulsive 8-Pillar Trade Health & Heartbeat Evaluation before trailing advancement
+        health_report = None
+        if getattr(self, "health_engine", None):
+            try:
+                health_report = self.health_engine.evaluate_position_health(
+                    pos, current_premium=current_price
+                )
+            except Exception as he_err:
+                logger.debug(f"PositionTracker health evaluation error for {pos.trade_id}: {he_err}")
+
+        # Extract Telemetry & Signal Strength
+        health_score = health_report.health_score if health_report else 0.0
+        net_gex = health_report.net_gex if health_report else float(getattr(pos, "net_gex", 0.0) or 0.0)
+        net_gex_cr = net_gex / 1e7 if abs(net_gex) > 1000 else net_gex
+        zgl = health_report.zgl if health_report and health_report.zgl is not None else getattr(pos, "zgl", None)
+        comm_ratio = health_report.commitment_ratio if health_report else float(getattr(pos, "commitment_ratio", 0.0) or 0.0)
+
+        # Contextual Spot Price & Direction for ZGL Evaluation
+        pos_dir = pos.direction.value if hasattr(pos.direction, "value") else str(pos.direction)
+        is_bullish = pos_dir.lower() in ("bullish", "long", "buy")
         sym_root = (pos.underlying or pos.symbol or "").upper()
+        spot = float(getattr(pos, "entry_spot", 0.0) or 0.0)
+        if spot <= 0 and self.data_engine and hasattr(self.data_engine, "get_spot_price"):
+            try:
+                spot = float(self.data_engine.get_spot_price(sym_root) or 0.0)
+            except Exception:
+                pass
+
+        zgl_adverse = bool(zgl is not None and zgl > 0 and spot > 0 and ((spot < zgl) if is_bullish else (spot > zgl)))
+        zgl_favorable = bool(zgl is not None and zgl > 0 and spot > 0 and ((spot > zgl) if is_bullish else (spot < zgl)))
+
+        # Categorize Signal Edge
+        # Weak / Failing: Negative health score, threat flag, suggested TIGHTEN_SL, or weak commitment with high churn
+        is_weak_edge = bool(
+            health_report is not None
+            and (
+                health_score <= -10.0
+                or getattr(health_report, "suggested_action", "") in ("TIGHTEN_SL", "PRE_SL_BAILOUT")
+                or getattr(health_report, "real_threat", False)
+                or (health_score < 0.0 and comm_ratio < 0.15)
+                or (zgl_adverse and health_score <= 0.0)
+                or (is_bullish and net_gex_cr > 2.0 and health_score <= 0.0)
+            )
+        )
+        # Strong / High-Conviction: Positive score >= 25, real favor, short-gamma squeeze acceleration, or robust commitment
+        is_strong_edge = bool(
+            health_report is not None
+            and (
+                health_score >= 25.0
+                or getattr(health_report, "real_favor", False)
+                or (health_score >= 10.0 and comm_ratio >= 0.40)
+                or (net_gex_cr < -1.0 and health_score > 0)
+                or (zgl_favorable and net_gex_cr < -0.5 and health_score >= 10.0)
+            )
+        )
+
+        # 2. Recalibrate Cost Buffer (Bank Nifty 4.50, Sensex 5.0, Nifty 1.5 for 1-lot trading)
+        qty = int(getattr(pos, "quantity", 0) or 0)
         if "SENSEX" in sym_root:
-            cost_buffer_pts = 3.0   # ~Rs 60 costs / 20 lot size
+            cost_buffer_pts = 3.0 if qty == 20 else 5.0
             min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
         elif "BANK" in sym_root:
-            cost_buffer_pts = 1.9   # ~Rs 57 costs / 30 lot size
+            cost_buffer_pts = 1.9 if qty == 30 else 4.50
             min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
         else:
-            cost_buffer_pts = 0.9   # NIFTY default: ~Rs 56.30 costs / 65 lot size
+            cost_buffer_pts = 0.9 if qty in (50, 65) else 1.5
             min_be_gain = 2.0       # NIFTY default: tight noise floor, standard 0.4R is safe
 
         gain_pts = current_price - pos.entry_price
@@ -783,6 +838,31 @@ class PositionTracker:
         )
         be_gain_threshold = min(10.0, tgt_distance * 0.50) if tgt_distance > 0 else 10.0
         be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
+
+        # Weak Edge Capital Defense: If signal health has broken down or edge is failing,
+        # advance SL to Breakeven early at smaller gain without waiting for full 0.4R/min_be_gain
+        if is_weak_edge and not pos.breakeven_set and gain_pts >= (cost_buffer_pts + 1.0):
+            new_sl = pos.entry_price + cost_buffer_pts
+            if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_sl
+                pos.breakeven_set = True
+                pos.half_risk_set = True
+                logger.warning(
+                    f"[{pos.trade_id}] WEAK_EDGE_DEFENSIVE_LOCK: SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(Health={health_score:+.0f}, NetGEX={net_gex_cr:+.1f}Cr, Commitment={comm_ratio:.2f}) "
+                    f"— early capital defense at gain=+{gain_pts:.2f} pts"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "weak_edge_lock", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update weak_edge_lock callback failed: {e}")
 
         # Progressive Ratchet Stage 2: Breakeven (100% Risk-Free Guarantee)
         # Tier C: Offensive Micro-Lock (Capped Scalp Targets)
@@ -924,7 +1004,8 @@ class PositionTracker:
         # Approximate by tightening SL to max(current_sl, 70%-floor, hwm - small buffer)
         elif pos.breakeven_set and progress >= 3.5:
             hwm_floor = pos.entry_price + 0.70 * risk_distance
-            trail_candidate = pos.high_water_mark - 0.05 * risk_distance  # 5% of R buffer
+            trail_buf = 0.02 * risk_distance if is_weak_edge else (0.08 * risk_distance if is_strong_edge else 0.05 * risk_distance)
+            trail_candidate = pos.high_water_mark - trail_buf
             new_sl = max(pos.stop_loss, hwm_floor, trail_candidate)
             if new_sl > pos.stop_loss:
                 old_sl = pos.stop_loss
@@ -1014,9 +1095,23 @@ class PositionTracker:
             if price is None or price <= 0:
                 price = self._resolve_current_price(pos)
 
+            health_report = None
+            if self.health_engine:
+                try:
+                    health_report = self.health_engine.evaluate_position_health(pos, current_premium=price)
+                except Exception as e:
+                    logger.debug(f"PositionTracker: health eval failed for heartbeat: {e}")
+
             try:
-                self.on_heartbeat(pos, price, int(elapsed_sec), m)
+                self.on_heartbeat(pos, price, int(elapsed_sec), m, health_report)
                 return True
+            except TypeError:
+                try:
+                    self.on_heartbeat(pos, price, int(elapsed_sec), m)
+                    return True
+                except TypeError:
+                    self.on_heartbeat(pos, price)
+                    return True
             except Exception as e:
                 logger.error(f"PositionTracker: on_heartbeat callback failed for {pos.trade_id}: {e}")
         return False

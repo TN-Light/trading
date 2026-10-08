@@ -3277,6 +3277,7 @@ class Prometheus:
             on_trailing_update=self._handle_trailing_update,
             on_state_changed=self._handle_state_persist,
             data_engine=self.data,
+            on_heartbeat=self._handle_position_heartbeat,
         )
         self.position_monitor.start()
 
@@ -3584,6 +3585,94 @@ class Prometheus:
             )
         self.telegram.send_message(text)
 
+    def _handle_position_heartbeat(
+        self,
+        state,
+        current_price: float,
+        elapsed_seconds: int = 0,
+        milestone: int = 0,
+        health_report=None,
+    ):
+        """Callback when PositionMonitor emits an in-trade 5-minute heartbeat."""
+        if not getattr(self, "telegram", None):
+            return
+        try:
+            is_spread = getattr(state, "strategy_type", "") == "credit_spread" or "/" in str(getattr(state, "tradingsymbol", ""))
+            if is_spread:
+                side = "BEAR CALL SPREAD" if getattr(state, "direction", "bearish") == "bearish" else "BULL PUT SPREAD"
+            else:
+                side = "BUY CE" if getattr(state, "direction", "bullish") == "bullish" else "BUY PE"
+
+            entry_price = float(getattr(state, "entry_premium", 0.0) or 0.0)
+            curr_price = float(current_price or 0.0)
+            qty = int(getattr(state, "quantity", 0) or 0)
+            if qty <= 0:
+                sym_upper = (getattr(state, "symbol", "") or "").upper()
+                if "SENSEX" in sym_upper:
+                    qty = 10
+                elif "BANK" in sym_upper:
+                    qty = 15
+                elif "MIDCP" in sym_upper:
+                    qty = 50
+                else:
+                    qty = 25
+
+            if is_spread:
+                gain_pts = round(entry_price - curr_price, 2)
+            else:
+                gain_pts = round(curr_price - entry_price, 2)
+
+            gross_pnl = round(gain_pts * qty, 2) if qty > 0 else round(gain_pts, 2)
+            cost_est = 115.0 if is_spread else 57.0
+            net_pnl = round(gross_pnl - cost_est, 2)
+            net_pnl_pts = round(net_pnl / qty, 2) if qty > 0 else gain_pts
+
+            stage = state.current_stage() if hasattr(state, "current_stage") else "INITIAL"
+
+            health_score = None
+            health_summary = ""
+            if health_report is not None:
+                health_score = getattr(health_report, "health_score", None)
+                from prometheus.execution.position_health import format_health_summary
+                health_summary = format_health_summary(health_report)
+
+            dur_str = f"{milestone * 5} minutes" if milestone > 0 else f"{elapsed_seconds // 60} minutes"
+            if "/" in str(state.tradingsymbol):
+                try:
+                    from prometheus.utils.symbol_format import human_search_name_from_api_symbol
+                    kite_search = " / ".join([human_search_name_from_api_symbol(p.strip()) for p in state.tradingsymbol.split("/") if p.strip()])
+                except Exception:
+                    kite_search = state.tradingsymbol
+            else:
+                kite_search = self._make_kite_search_name(state.tradingsymbol, state.symbol)
+
+            update_info = {
+                "trade_id": getattr(state, "position_id", ""),
+                "symbol": getattr(state, "symbol", ""),
+                "instrument": getattr(state, "tradingsymbol", ""),
+                "kite_search": kite_search,
+                "direction": side,
+                "side": side,
+                "quantity": qty,
+                "entry_price": entry_price,
+                "current_price": curr_price,
+                "gross_pnl_pts": gain_pts,
+                "gross_pnl": gross_pnl,
+                "net_pnl": net_pnl,
+                "net_pnl_pts": net_pnl_pts,
+                "stop_loss": getattr(state, "current_sl", 0.0),
+                "target": getattr(state, "target", 0.0),
+                "trailing_stage": stage,
+                "holding_duration": dur_str,
+                "holding_duration_seconds": elapsed_seconds,
+                "health_score": health_score,
+                "health_summary": health_summary,
+                "milestone": milestone,
+            }
+            self.telegram.alert_trade_update(update_info)
+        except Exception as e:
+            logger.warning(f"Error handling position heartbeat: {e}")
+
     def _handle_state_persist(self, state):
         """Callback to persist trailing state to SQLite."""
         self.store.save_position_state(state.to_dict())
@@ -3857,6 +3946,7 @@ class Prometheus:
                 # underscore) — we just plumb it back through the
                 # dataclass field here.
                 _current_phase=int(row.get("current_phase", 1)),
+                quantity=int(row.get("quantity", 0) or 0),
             )
             if ma_label:
                 ts._multi_account_label = ma_label
@@ -4851,6 +4941,7 @@ class Prometheus:
             on_trailing_update=self._handle_trailing_update,
             on_state_changed=self._handle_state_persist,
             data_engine=self.data,
+            on_heartbeat=self._handle_position_heartbeat,
         )
         self.position_monitor.start()
         if isinstance(self.broker, PaperTrader):
@@ -5418,6 +5509,7 @@ class Prometheus:
             on_trailing_update=self._handle_trailing_update,
             on_state_changed=self._handle_state_persist,
             data_engine=self.data,
+            on_heartbeat=self._handle_position_heartbeat,
         )
         self.position_monitor.start()
         self._restore_equity_state()

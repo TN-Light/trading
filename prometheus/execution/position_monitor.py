@@ -80,6 +80,7 @@ class TrailingState:
     entry_spot: float = 0.0
     atr: float = 0.0
     tier: str = "B"
+    quantity: int = 0
     _last_heartbeat_milestone: int = 0
     _last_heartbeat_ts: float = 0.0
 
@@ -574,17 +575,66 @@ class PositionMonitor:
         # The trailing logic is the same: premium goes up = profit.
         price_for_trail = current_price
 
+        # ── Compulsive 8-Pillar Trade Health & Heartbeat Evaluation before trailing advancement ──
+        health_report = report if ('report' in locals() and report is not None) else None
+        if health_report is None and self.health_engine and getattr(state, "strategy_type", "") != "credit_spread":
+            try:
+                health_report = self.health_engine.evaluate_position_health(state, current_price)
+            except Exception as e:
+                logger.debug(f"PositionMonitor: health eval in trailing check failed for {state.position_id}: {e}")
+
+        health_score = health_report.health_score if health_report else 0.0
+        net_gex = health_report.net_gex if health_report else float(getattr(state, "net_gex", 0.0) or 0.0)
+        net_gex_cr = net_gex / 1e7 if abs(net_gex) > 1000 else net_gex
+        zgl = health_report.zgl if health_report and health_report.zgl is not None else getattr(state, "zgl", None)
+        comm_ratio = health_report.commitment_ratio if health_report else float(getattr(state, "commitment_ratio", 0.0) or 0.0)
+
+        # Contextual spot and direction for Zero Gamma Level (ZGL) integration
+        is_bullish = getattr(state, "direction", "bullish").lower() in ("bullish", "long", "buy")
+        spot = float(getattr(state, "entry_spot", 0.0) or 0.0)
+        if spot <= 0 and self._data_engine and hasattr(self._data_engine, "get_spot_price"):
+            try:
+                spot = float(self._data_engine.get_spot_price(state.symbol) or 0.0)
+            except Exception:
+                pass
+
+        zgl_adverse = bool(zgl is not None and zgl > 0 and spot > 0 and ((spot < zgl) if is_bullish else (spot > zgl)))
+        zgl_favorable = bool(zgl is not None and zgl > 0 and spot > 0 and ((spot > zgl) if is_bullish else (spot < zgl)))
+
+        is_weak_edge = bool(
+            health_report is not None
+            and (
+                health_score <= -10.0
+                or getattr(health_report, "suggested_action", "") in ("TIGHTEN_SL", "PRE_SL_BAILOUT")
+                or getattr(health_report, "real_threat", False)
+                or (health_score < 0.0 and comm_ratio < 0.15)
+                or (zgl_adverse and health_score <= 0.0)
+                or (is_bullish and net_gex_cr > 2.0 and health_score <= 0.0)
+            )
+        )
+        is_strong_edge = bool(
+            health_report is not None
+            and (
+                health_score >= 25.0
+                or getattr(health_report, "real_favor", False)
+                or (health_score >= 10.0 and comm_ratio >= 0.40)
+                or (net_gex_cr < -1.0 and health_score > 0)
+                or (zgl_favorable and net_gex_cr < -0.5 and health_score >= 10.0)
+            )
+        )
+
         if not state.breakeven_set:
             # Stage 0: Progressive Ratchet (Tier C Micro-Lock / Tier S/B Noise Floor Breakeven / Half-Risk Cut)
             sym_root = (getattr(state, "symbol", "") or "").upper()
+            qty = int(getattr(state, "quantity", 0) or 0)
             if "SENSEX" in sym_root:
-                cost_buffer_pts = 3.0   # ~Rs 60 costs / 20 lot size
+                cost_buffer_pts = 3.0 if qty == 20 else (5.0 if (qty in (10, 1) or qty > 0) else 3.0)
                 min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
             elif "BANK" in sym_root:
-                cost_buffer_pts = 1.9   # ~Rs 57 costs / 30 lot size
+                cost_buffer_pts = 1.9 if qty == 30 else (4.50 if (qty in (15, 1) or qty > 0) else 1.9)
                 min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
             else:
-                cost_buffer_pts = 0.9   # NIFTY default: ~Rs 56.30 costs / 65 lot size
+                cost_buffer_pts = 0.9 if qty in (50, 65, 75) else (1.5 if (qty in (25, 1) or qty > 0) else 0.9)
                 min_be_gain = 2.0       # NIFTY default: tight noise floor, standard 0.4R is safe
 
             if getattr(state, "low_vix_mode", False):
@@ -595,6 +645,20 @@ class PositionMonitor:
             be_gain_threshold = min(10.0, tgt_distance * 0.50) if tgt_distance > 0 else 10.0
             be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
             progress = gain_pts / max(rd, 1.0)
+
+            # Weak Edge Capital Defense: Early breakeven lock at lower gain threshold
+            if is_weak_edge and not state.breakeven_set and gain_pts >= (cost_buffer_pts + 1.0):
+                new_sl = round(entry + cost_buffer_pts, 2)
+                if new_sl > state.current_sl:
+                    state.current_sl = new_sl
+                    state.breakeven_set = True
+                    state.half_risk_set = True
+                    stage_changed = True
+                    logger.warning(
+                        f"[TRAIL] {state.position_id} WEAK_EDGE_DEFENSIVE_LOCK: "
+                        f"SL {old_sl:.2f} -> {new_sl:.2f} (Health={health_score:+.0f}, NetGEX={net_gex_cr:+.1f}Cr, Commitment={comm_ratio:.2f}) "
+                        f"at gain=+{gain_pts:.2f} pts"
+                    )
 
             is_tier_c = (getattr(state, "tier", "") or "").upper() == "C"
             micro_lock_pts = 12.0 if ("BANK" in sym_root or "SENSEX" in sym_root) else 5.0
@@ -688,14 +752,15 @@ class PositionMonitor:
             if price_for_trail > state.premium_hwm:
                 state.premium_hwm = price_for_trail
             floor_sl = entry + rd * 0.70
-            trail_offset = (state.premium_hwm - entry) * 0.30
+            trail_mult = 0.15 if is_weak_edge else (0.40 if is_strong_edge else 0.30)
+            trail_offset = (state.premium_hwm - entry) * trail_mult
             dynamic_sl = state.premium_hwm - trail_offset
             new_sl = max(floor_sl, dynamic_sl)
             if new_sl > state.current_sl:
                 state.current_sl = new_sl
                 stage_changed = True
                 logger.info(
-                    f"[TRAIL] {state.position_id} Stage 4 DYNAMIC: "
+                    f"[TRAIL] {state.position_id} Stage 4 DYNAMIC (mult={trail_mult:.2f}): "
                     f"SL {old_sl:.2f} -> {new_sl:.2f} "
                     f"(HWM={state.premium_hwm:.2f})"
                 )

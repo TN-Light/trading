@@ -116,16 +116,45 @@ class FillSimulator:
         """
         # Multi-leg spread support (e.g. "SHORT_LEG/LONG_LEG")
         if "/" in instrument:
-            parts = instrument.split("/")
+            parts = [p.strip() for p in instrument.split("/") if p.strip()]
             if len(parts) == 2:
-                short_leg, long_leg = parts[0].strip(), parts[1].strip()
-                s_ltp = float(self.feed.get_ltp(short_leg) or 0.0)
-                l_ltp = float(self.feed.get_ltp(long_leg) or 0.0)
-                if s_ltp > 0 or l_ltp > 0:
-                    spread_val = round(max(0.0, s_ltp - l_ltp), 2)
-                    slip = spread_val * self.slippage_bps / 10000.0
-                    fp = round(spread_val + slip if side == "BUY" else max(0.0, spread_val - slip), 2)
-                    return FillResult(fp, "live_spread_2leg")
+                short_leg, long_leg = parts[0], parts[1]
+                # Priority 1 for spreads: per-leg live quotes (bid/ask worst-case fills)
+                if self.use_bid_ask:
+                    try:
+                        s_quote = self.feed.get_quote(short_leg)
+                        l_quote = self.feed.get_quote(long_leg)
+                        if s_quote and l_quote:
+                            s_ltp, s_bid, s_ask = s_quote
+                            l_ltp, l_bid, l_ask = l_quote
+                            if side == "SELL":
+                                # Selling to open credit spread: sell short leg at bid, buy long hedge at ask
+                                s_px = s_bid if s_bid > 0 else s_ltp
+                                l_px = l_ask if l_ask > 0 else l_ltp
+                            else:
+                                # Buying to close spread: buy short leg back at ask, sell long hedge at bid
+                                s_px = s_ask if s_ask > 0 else s_ltp
+                                l_px = l_bid if l_bid > 0 else l_ltp
+
+                            if s_px > 0 and l_px > 0:
+                                spread_val = round(max(0.05, s_px - l_px), 2)
+                                slip = spread_val * self.slippage_bps / 10000.0
+                                fp = round(spread_val + slip if side == "BUY" else max(0.05, spread_val - slip), 2)
+                                return FillResult(fp, "live_spread_2leg")
+                    except Exception as e:
+                        logger.debug(f"FillSimulator: per-leg quote failed for spread {instrument}: {e}")
+
+                # Priority 2 for spreads: per-leg LTP from feed with slippage
+                try:
+                    s_ltp = float(self.feed.get_ltp(short_leg) or 0.0)
+                    l_ltp = float(self.feed.get_ltp(long_leg) or 0.0)
+                    if s_ltp > 0 and l_ltp > 0:
+                        spread_val = round(max(0.05, s_ltp - l_ltp), 2)
+                        slip = spread_val * self.slippage_bps / 10000.0
+                        fp = round(spread_val + slip if side == "BUY" else max(0.05, spread_val - slip), 2)
+                        return FillResult(fp, "live_spread_2leg")
+                except Exception as e:
+                    logger.debug(f"FillSimulator: per-leg ltp failed for spread {instrument}: {e}")
 
         # Priority 1: live bid/ask (worst-case real-world fill)
         if self.use_bid_ask:

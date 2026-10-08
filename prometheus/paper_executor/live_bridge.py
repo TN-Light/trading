@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Dict
+import pandas as pd
 
 from prometheus.papertrade.engine import PaperTradeEngine
 from prometheus.papertrade.fill_simulator import FillSimulator
@@ -441,6 +442,29 @@ class LivePaperCapture:
                 f"id={synth_id}"
             )
             notif.instrument = synth_id
+
+        # If commitment_ratio is missing or <= 0.0, compute residual flow fallback via data engine & OI analyzer
+        if (notif.commitment_ratio is None or notif.commitment_ratio <= 0.0) and self._data_engine:
+            try:
+                spot = notif.entry_spot or (self._data_engine.get_spot_price(notif.symbol) if hasattr(self._data_engine, "get_spot_price") else 0.0) or 0.0
+                if hasattr(self._data_engine, "fetch_options_chain"):
+                    chain_df = self._data_engine.fetch_options_chain(notif.symbol)
+                    if not chain_df.empty:
+                        if (spot is None or spot <= 0) and "underlying" in chain_df.columns:
+                            und_series = pd.to_numeric(chain_df["underlying"], errors="coerce").dropna()
+                            und_series = und_series[und_series > 0]
+                            if not und_series.empty:
+                                spot = float(und_series.iloc[0])
+                        if spot and spot > 0:
+                            from prometheus.signals.oi_analyzer import OIAnalyzer
+                            oi_analyzer = OIAnalyzer()
+                            res = oi_analyzer.analyze(chain_df, spot)
+                            cr = res.get("metrics", {}).get("commitment_ratio", 0.0)
+                            if cr > 0.0:
+                                notif.commitment_ratio = float(cr)
+                                refined_signal["commitment_ratio"] = float(cr)
+            except Exception as e:
+                logger.debug(f"[PaperCapture] fallback commitment_ratio calculation failed: {e}")
 
         return notif
 
