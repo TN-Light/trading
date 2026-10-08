@@ -161,9 +161,18 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         
         is_htf_bull = any("1H_Trend_Bullish" in r for r in reasons)
         is_htf_bear = any("1H_Trend_Bearish" in r for r in reasons)
-        is_htf_aligned = (("CE" in action and is_htf_bull) or ("PE" in action and is_htf_bear))
+        has_htf_explicit = is_htf_bull or is_htf_bear or ("is_htf_aligned" in signal)
+        is_htf_aligned = (("CE" in action and is_htf_bull) or ("PE" in action and is_htf_bear)) or bool(signal.get("is_htf_aligned", False))
         
         is_golden = bool(signal.get("is_golden_setup", False)) or "golden_setup" in strat_name
+
+        # Dealer Gamma Regime Invariant (Option Buying vs Selling):
+        # In Long Gamma (net_gex > +1.5 Cr), dealers supply counter-trend liquidity and dampen range.
+        # Directional breakout expansion is suppressed. Option buying is capped to Tier C (Paper Only).
+        net_gex_val = float(signal.get("net_gex", 0.0) or signal.get("gex", 0.0) or 0.0)
+        net_gex_cr = float(signal.get("net_gex_cr", 0.0) or (net_gex_val / 1e7 if abs(net_gex_val) > 1000 else net_gex_val))
+        gamma_reg = str(signal.get("gamma_regime", "")).upper()
+        is_dealer_long_gamma = (net_gex_cr > 1.5) or (gamma_reg == "LONG_GAMMA" and net_gex_cr > 0.5)
 
         # Time Window Validation (60-day Angel One empirical tick distribution):
         # Window A (Morning): 09:30 - 11:30 IST (Primary ORB & momentum impulses)
@@ -189,10 +198,11 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
 
         # LUNCH DEAD ZONE HARD GATE:
         # Strictly prevent option buying between 11:30 and 13:15 to eliminate theta decay cremation
-        # EXCEPTION: Institutional Trend Day (ADX >= 25, Volume >= 1.5x 20-SMA, ORB Breakout)
+        # EXCEPTION: Institutional Trend Day (ADX >= 25, Volume >= 1.5x 20-SMA, ORB Breakout,
+        # HTF trend aligned, and NOT in dealer long gamma)
         is_trend_day = bool(signal.get("is_institutional_trend_day"))
         if is_lunch_dead_zone:
-            if is_trend_day:
+            if is_trend_day and (is_htf_aligned if has_htf_explicit else True) and not is_dealer_long_gamma:
                 adx_disp = signal.get("adx", 25.0)
                 return _build_tier_result(
                     tier="B",
@@ -201,21 +211,28 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                     reasons=[
                         "Trend-Day Lunch Bypass Gate Active",
                         f"Institutional Trend Confirmed (ADX={adx_disp} >= 25, Volume >= 1.5x 20-SMA)",
+                        "1-Hour HTF Trend Strictly Aligned (BULLISH for CE / BEARISH for PE)",
+                        f"Short/Neutral Gamma Regime ({net_gex_cr:+.1f}Cr)",
                         "ORB Breakout expansion overriding midday theta dead zone",
                         f"Confluence Edge Score: {score:.1f}/10"
                     ],
                     badge="🚀 <b>[TIER B: INSTITUTIONAL TREND DAY CONTINUATION]</b>",
                     instruction="⚡ <b>ACTION:</b> Execute Trend Continuation (ORB Trend Day Active Through Lunch)"
                 )
+            lunch_reasons = [
+                "Lunch Dead Zone Gate (11:30-13:15 IST)",
+                "15M directional range collapses by ~60%; Option Buying strictly blocked to prevent theta decay chop",
+                f"Confluence Edge Score: {score:.1f}/10"
+            ]
+            if is_dealer_long_gamma:
+                lunch_reasons.append(f"Dealer Long Gamma ({net_gex_cr:+.1f}Cr) vetoes midday expansion")
+            if is_trend_day and not is_htf_aligned:
+                lunch_reasons.append("1H HTF Trend not strictly aligned during lunch")
             return _build_tier_result(
                 tier="C",
                 tier_name="STANDARD_MOMENTUM",
                 is_live_eligible=False,
-                reasons=[
-                    "Lunch Dead Zone Gate (11:30-13:15 IST)",
-                    "15M directional range collapses by ~60%; Option Buying strictly blocked to prevent theta decay chop",
-                    f"Confluence Edge Score: {score:.1f}/10"
-                ],
+                reasons=lunch_reasons,
                 badge="📊 <b>[TIER C: LUNCH DEAD ZONE — PAPER ONLY]</b>",
                 instruction="📝 <b>ACTION:</b> Paper Trading Engine Only (Lunch Dead Zone 11:30-13:15: Option Buying Gated)"
             )
@@ -228,7 +245,8 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         #   4. Strict 1H HTF Trend Aligned (BULLISH for CE, BEARISH for PE; NEUTRAL not allowed for S)
         #   5. High Edge Score (>= 7.0)
         #   6. Morning Power Hour (09:35 - 10:35) OR Afternoon Squeeze Window (13:15 - 14:15)
-        if has_orb and has_vwap and has_vol_surge and is_htf_aligned and score >= 7.0 and (is_morning_power_hour or is_afternoon_squeeze):
+        #   7. Dealer Regime NOT Long Gamma (net_gex <= 1.5 Cr)
+        if has_orb and has_vwap and has_vol_surge and is_htf_aligned and score >= 7.0 and (is_morning_power_hour or is_afternoon_squeeze) and not is_dealer_long_gamma:
             window_label = "Morning Power Hour (09:35-10:35 AM)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Squeeze Window (13:15-14:15 PM)"
             return _build_tier_result(
                 tier="S",
@@ -239,6 +257,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                     "Session VWAP Confluence",
                     "Volume Expansion Surge Confirmed (>=1.15x SMA10)",
                     "1-Hour HTF EMA20/50 Strict Trend Alignment",
+                    f"Short/Neutral Dealer Gamma Regime ({net_gex_cr:+.1f}Cr)",
                     f"{window_label} Execution Window",
                     f"Confluence Edge Score: {score:.1f}/10"
                 ],
@@ -262,28 +281,37 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         # Requirements:
         #   1. 15M ORB + Session VWAP alignment
         #   2. STRICT 1H HTF Trend Alignment (BULLISH for CE, BEARISH for PE; NEUTRAL is banned)
-        #   3. Edge score >= 6.5 (real institutional confluence)
+        #   3. Edge score >= 6.5 (non-0DTE) OR >= 8.0 (0-DTE Golden Setup)
         #   4. Valid Trading Window: 09:30-11:30 AM OR 13:15-14:15 PM
-        #   5. Non-0DTE: 0-DTE option buying strictly requires Tier S; weak/moderate 0-DTE buys are paper-only
-        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= 6.5 and is_valid_entry_window and not is_0dte_buying:
+        #   5. Dealer Net GEX NOT Long Gamma (net_gex_cr <= 1.5 Cr)
+        min_tier_b_score = 8.0 if is_0dte_buying else 6.5
+        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= min_tier_b_score and is_valid_entry_window and not is_dealer_long_gamma:
             window_desc = "Morning Window (09:30-11:30)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Window (13:15-14:15)"
+            reasons_b = [
+                "15M Opening Range Breakout (with ATR Buffer)",
+                "Session VWAP Clearance >= 0.10%",
+                "1-Hour HTF Trend Strictly Aligned (BULLISH for CE / BEARISH for PE)",
+                f"Valid Trading Window ({window_desc})",
+                f"Short/Neutral Gamma Regime ({net_gex_cr:+.1f}Cr)",
+            ]
+            if is_0dte_buying:
+                reasons_b.append(f"0-DTE Golden Setup High Conviction ({score:.1f}/10 >= 8.0)")
+                badge_text = "🌟 <b>[TIER B: 0-DTE HIGH CONVICTION GOLDEN SETUP]</b>"
+            else:
+                reasons_b.append(f"Confluence Edge Score: {score:.1f}/10")
+                badge_text = "🌟 <b>[TIER B: GOLDEN SETUP — 1 LOT CONSERVATIVE]</b>"
+
             return _build_tier_result(
                 tier="B",
                 tier_name="GOLDEN_SETUP",
                 is_live_eligible=True,
-                reasons=[
-                    "15M Opening Range Breakout (with ATR Buffer)",
-                    "Session VWAP Clearance >= 0.10%",
-                    "1-Hour HTF Trend Strictly Aligned (BULLISH for CE / BEARISH for PE)",
-                    f"Valid Trading Window ({window_desc})",
-                    f"Confluence Edge Score: {score:.1f}/10"
-                ],
-                badge="🌟 <b>[TIER B: GOLDEN SETUP — 1 LOT CONSERVATIVE]</b>",
+                reasons=reasons_b,
+                badge=badge_text,
                 instruction="🎯 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution (Half-Risk Cut & Breakeven Trail at +18/+20 pts outside noise floor)"
             )
 
         # TIER C (Standard Momentum / Partial Confluences):
-        # Triggered when score >= 3.5 but missing decisive 1H trend, score < 6.5, or 0-DTE buying
+        # Triggered when score >= 3.5 but missing decisive 1H trend, score < 6.5, or 0-DTE buying < 8.0
         if score >= 3.5:
             missing = []
             if not is_htf_aligned:
@@ -292,10 +320,12 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 missing.append("Missing 15M ORB Breakout")
             if not has_vwap:
                 missing.append("Missing VWAP Clearance")
-            if score < 6.5:
+            if is_0dte_buying and score < 8.0:
+                missing.append(f"0-DTE Expiry Option Buying gated (Requires score >= 8.0 for Tier B, got {score:.1f}/10)")
+            elif score < 6.5:
                 missing.append(f"Score {score:.1f}/10 is below Tier B requirement (6.5+)")
-            if is_0dte_buying:
-                missing.append("0-DTE Expiry Option Buying gated (Requires Tier S Perfect Storm to trade live)")
+            if is_dealer_long_gamma:
+                missing.append(f"Dealer Long Gamma Regime (Net GEX {net_gex_cr:+.1f}Cr > +1.5Cr: Volatility dampening caps breakout expansion; routed to Paper)")
             if not is_valid_entry_window:
                 if bar_time and bar_time > dtime(14, 15):
                     missing.append("Post-Cutoff Window (After 14:15 IST)")

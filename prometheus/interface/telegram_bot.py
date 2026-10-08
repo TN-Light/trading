@@ -867,9 +867,35 @@ class TelegramBot:
                 source_tag = ""
 
             rank = signal.get("leaderboard_rank")
+            from prometheus.signals.tier_classifier import classify_signal_tier
+            tier_info = classify_signal_tier(signal)
+            assigned_tier = tier_info.get("tier", "C")
+            tier_badge = tier_info["tier_badge"]
+            action_line = tier_info["action_instruction"]
+            is_live_eligible = bool(tier_info.get("is_live_eligible", False))
+            is_live_execution = is_live_eligible and (rank is None or rank == 1) and assigned_tier in ("S", "A", "B")
+
+            if is_live_execution:
+                action_banner = "🟢🟢🟢 <b>ACTION: EXECUTE LIVE ON KITE</b> 🟢🟢🟢\n"
+                spread_execution_box = copy_boxes
+                spread_notice = "💡 <i>How to Execute on Kite: Open Basket Order ➔ Add BUY Hedge leg FIRST (to unlock margin discount) ➔ Add SELL leg.</i>\n"
+            else:
+                action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
+                spread_execution_box = ""
+                reasons_str = "; ".join(tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
+                spread_notice = (
+                    f"📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy. Do NOT execute on Kite with real capital.</i>\n"
+                    f"💡 <i>Spread Guideline (when live): Add BUY Hedge leg FIRST (to unlock margin benefit) ➔ Add SELL leg.</i>\n"
+                    f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
+                )
+
             if rank:
                 if rank == 1:
-                    rank_header = "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+                    rank_header = (
+                        "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+                        if is_live_execution
+                        else "🥇 <b>RANK #1 SIGNAL (PAPER ONLY)</b>\n"
+                    )
                 elif rank == 2:
                     rank_header = "🥈 <b>RANK #2 SIGNAL (SHADOW PAPER TRADED)</b>\n"
                 elif rank == 3:
@@ -878,11 +904,6 @@ class TelegramBot:
                     rank_header = f"🎖️ <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
             else:
                 rank_header = ""
-
-            from prometheus.signals.tier_classifier import classify_signal_tier
-            tier_info = classify_signal_tier(signal)
-            tier_badge = tier_info["tier_badge"]
-            action_line = tier_info["action_instruction"]
 
             pop = signal.get("pop_pct") or signal.get("theoretical_pop")
             sigma = signal.get("otm_sigma")
@@ -911,19 +932,20 @@ class TelegramBot:
                 oi_wall_line = f"🏛️ <b>Institutional OI Wall:</b> <code>{wall_stk}</code> Strike{sh_part}\n"
 
             text = (
+                f"{action_banner}"
                 f"{rank_header}"
                 f"{conviction_banner}"
                 f"🛡️ <b>STRATEGY: {spread_type}</b>{source_tag}\n"
                 f"<b>Underlying:</b> <code>{symbol}</code>\n"
                 f"{oi_wall_line}\n"
                 f"<b>Legs Breakdown:</b>\n{legs_text}"
-                f"{copy_boxes}\n"
+                f"{spread_execution_box}\n"
                 f"💰 <b>Net Live Credit (Angel One):</b> Rs {net_credit:,.1f}/share\n"
                 f"🎯 <b>Target Exit (70% Decay):</b> Rs {target_decay:,.1f}\n"
                 f"🛑 <b>Hard Stop Loss (1.5x):</b> Rs {hard_sl:,.1f}\n"
                 f"💼 <b>Est. Margin Required:</b> Rs {margin_req:,.0f}/lot\n"
                 f"⏳ <b>Hold:</b> <code>same-day theta decay</code>\n\n"
-                f"💡 <i>How to Execute on Kite: Open Basket Order ➔ Add BUY Hedge leg FIRST (to unlock margin discount) ➔ Add SELL leg.</i>\n"
+                f"{spread_notice}"
                 f"⚠️ <i>Capital Notice: Credit Spreads involve Option Selling which requires exchange margin (~Rs 35k on normal days, ~Rs 65k on expiry day due to mandatory SEBI 2% ELM). If your account capital is under Rs 50,000, ignore Barbell alerts and trade single-leg Option Buying (CE/PE) signals (which require only Rs 1.5k–5k premium).</i>"
             )
             self.send_message(text)
@@ -1041,7 +1063,7 @@ class TelegramBot:
                 if kite_search else ""
             )
 
-        contract_name = friendly_contract or instrument or f"{symbol} {int(float(strike))}{option_type}"
+        contract_name = friendly_contract or kite_search or instrument or f"{symbol} {int(float(strike))}{option_type}"
 
         # Source tag for alert segregation
         if source == "scan":
@@ -1054,9 +1076,34 @@ class TelegramBot:
             source_tag = ""
 
         rank = signal.get("leaderboard_rank")
+        from prometheus.signals.tier_classifier import classify_signal_tier
+        tier_info = classify_signal_tier(signal)
+        tier_badge = tier_info["tier_badge"]
+        action_line = tier_info["action_instruction"]
+        assigned_tier = tier_info["tier"]
+        is_live_eligible = bool(tier_info.get("is_live_eligible", False))
+        is_live_execution = is_live_eligible and (rank is None or rank == 1) and assigned_tier in ("S", "A", "B")
+
+        if is_live_execution:
+            action_banner = "🟢🟢🟢 <b>ACTION: EXECUTE LIVE ON KITE</b> 🟢🟢🟢\n"
+            execution_copy_box = copy_box
+            execution_notice = ""
+        else:
+            action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
+            execution_copy_box = ""  # Strip Kite search copy box completely for paper signals!
+            reasons_str = "; ".join(tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
+            execution_notice = (
+                f"\n📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy & edge calibration. Do NOT trade live with real capital.</i>\n"
+                f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
+            )
+
         if rank:
             if rank == 1:
-                rank_header = "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+                rank_header = (
+                    "🥇 <b>RANK #1 SIGNAL (PRIMARY EXECUTION)</b>\n"
+                    if is_live_execution
+                    else "🥇 <b>RANK #1 SIGNAL (PAPER ONLY)</b>\n"
+                )
             elif rank == 2:
                 rank_header = "🥈 <b>RANK #2 SIGNAL (SHADOW PAPER TRADED)</b>\n"
             elif rank == 3:
@@ -1065,12 +1112,6 @@ class TelegramBot:
                 rank_header = f"🎖️ <b>RANK #{rank} SIGNAL (SHADOW PAPER TRADED)</b>\n"
         else:
             rank_header = ""
-
-        from prometheus.signals.tier_classifier import classify_signal_tier
-        tier_info = classify_signal_tier(signal)
-        tier_badge = tier_info["tier_badge"]
-        action_line = tier_info["action_instruction"]
-        assigned_tier = tier_info["tier"]
 
         is_golden = bool(signal.get("is_golden_setup")) or ("Golden_Setup" in str(signal.get("strategy", "")))
         if assigned_tier == "S":
@@ -1120,6 +1161,7 @@ class TelegramBot:
         )
 
         text = (
+            f"{action_banner}"
             f"{rank_header}"
             f"{conviction_badge}"
             f"{header_title}{source_tag}\n"
@@ -1129,13 +1171,14 @@ class TelegramBot:
             f"<b>Contract:</b> {contract_name}\n"
             f"{strategy_line}"
             f"{confluence_line}"
-            f"{copy_box}\n"
+            f"{execution_copy_box}\n"
             f"<b>Live Entry LTP (Angel One):</b> Rs {entry:,.1f}\n"
             f"<b>Stop Loss:</b> Rs {sl:,.1f}\n"
             f"<b>Target:</b> Rs {target:,.1f}\n\n"
             f"<i>{sizing_line.replace('Sizing: ', 'Quantity: ')}</i>"
             f"<i>{cost_line.replace('Margin Required: ', 'Est. Capital: ')}</i>"
             f"{hold_line}\n"
+            f"{execution_notice}"
         )
         if reasoning and reasoning != strat_name:
             text += f"\n<i>Note: {reasoning[:150]}</i>"

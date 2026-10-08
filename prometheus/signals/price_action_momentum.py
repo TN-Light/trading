@@ -142,10 +142,9 @@ class PriceActionMomentumScanner:
             if vol_sma20 > 0 and curr_vol >= (vol_sma20 * 1.5):
                 has_inst_volume = True
             elif vol_sma20 == 0 and curr_vol == 0:
-                if orb_high and (close > orb_high + 1.5 * atr):
-                    has_inst_volume = True
-                elif orb_low and (close < orb_low - 1.5 * atr):
-                    has_inst_volume = True
+                # Do NOT spoof institutional volume on spot index data lacking real volume.
+                # A wide price plunge without real volume is exhaustion, not institutional buying.
+                has_inst_volume = False
 
         is_orb_breakout = (orb_high is not None and close > orb_high) or (orb_low is not None and close < orb_low)
         is_institutional_trend_day = bool(is_orb_breakout and (adx_val >= 25.0) and has_inst_volume)
@@ -283,7 +282,28 @@ class PriceActionMomentumScanner:
             min_threshold = 3.5
         net_edge = bull_score - bear_score
 
+        curr_high = float(current_row["high"])
+        curr_low = float(current_row["low"])
+        bar_stretch = (curr_high - curr_low) / max(atr, 1.0)
+        has_prior_consolidation = False
+        if len(today_bars) >= 4:
+            prev_2 = today_bars.iloc[-3:-1]
+            prev_range = float(prev_2["high"].max() - prev_2["low"].min())
+            if prev_range <= 1.2 * atr:
+                has_prior_consolidation = True
+
         if bull_score >= min_threshold and net_edge >= 1.5:
+            # Climax Bar Overextension Gate (Mean-Reversion Trap Prevention):
+            # Veto entry if price is extended >= 60 bps (0.60%) above VWAP or
+            # current bar is >= 1.8x ATR without prior consolidation (exhaustion climax).
+            is_climax_extended = ((close - vwap) / max(close, 1.0) >= 0.0060) or (bar_stretch >= 1.80 and not has_prior_consolidation)
+            if is_climax_extended:
+                logger.debug(
+                    f"[PA-MOMENTUM] Climax overextension veto for {symbol} BUY_CE: "
+                    f"vwap_dist={(close - vwap) / close:.4%}, bar_stretch={bar_stretch:.2f}x ATR"
+                )
+                return None
+
             # If golden_mode is active and 1H data is present, require either:
             # 1) Full Golden Setup (1H BULLISH + ORB + VWAP) -> Eligible for Tier S / B Live
             # 2) Valid ORB/VWAP breakout with NEUTRAL or EMERGING 1H trend -> Passes to Tier C (Paper Only)
@@ -329,6 +349,17 @@ class PriceActionMomentumScanner:
             }
 
         elif bear_score >= min_threshold and net_edge <= -1.5:
+            # Climax Bar Overextension Gate (Mean-Reversion Trap Prevention):
+            # Veto entry if price is plunged >= 60 bps (0.60%) below VWAP or
+            # current bar is >= 1.8x ATR without prior consolidation (exhaustion plunge).
+            is_climax_extended = ((vwap - close) / max(close, 1.0) >= 0.0060) or (bar_stretch >= 1.80 and not has_prior_consolidation)
+            if is_climax_extended:
+                logger.debug(
+                    f"[PA-MOMENTUM] Climax plunge veto for {symbol} BUY_PE: "
+                    f"vwap_dist={(vwap - close) / close:.4%}, bar_stretch={bar_stretch:.2f}x ATR"
+                )
+                return None
+
             # If golden_mode is active and 1H data is present, require either:
             # 1) Full Golden Setup (1H BEARISH + ORB + VWAP) -> Eligible for Tier S / B Live
             # 2) Valid ORB/VWAP breakdown with NEUTRAL or EMERGING 1H trend -> Passes to Tier C (Paper Only)

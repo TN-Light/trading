@@ -457,12 +457,16 @@ class PositionTracker:
                     st_dir = int(st_df["supertrend_direction"].iloc[-1]) if len(st_df) > 0 else 0
 
                     if trade_is_bullish:
-                        return (ema9 > ema21) and (st_dir == 1)
+                        return (ema9 >= ema21) and (st_dir == 1)
                     else:
-                        return (ema9 < ema21) and (st_dir == -1)
+                        return (ema9 <= ema21) and (st_dir == -1)
+                else:
+                    # In live engine when historical fetch returns None (API timeout or rate limit),
+                    # do not falsely kill when favorable drift is True
+                    return True
             except Exception as e:
                 logger.debug(f"Trend health check error for {symbol}: {e}")
-
+                return True
         return False
 
     def _evaluate_exit(
@@ -535,6 +539,18 @@ class PositionTracker:
 
             if is_stagnant:
                 trend_intact = False
+                health_report = None
+                if getattr(self, "health_engine", None):
+                    try:
+                        health_report = self.health_engine.evaluate_position_health(pos, current_premium=snap.close)
+                    except Exception as he_err:
+                        logger.debug(f"Health engine check in _evaluate_exit inactivity: {he_err}")
+                health_is_ok = bool(
+                    health_report is not None
+                    and health_report.health_score >= -5.0
+                    and not health_report.real_threat
+                )
+
                 if self.trend_aware:
                     curr_spot = 0.0
                     if entry_spot > 0:
@@ -545,11 +561,19 @@ class PositionTracker:
                         direction=pos.direction,
                         current_spot=curr_spot,
                         entry_spot=entry_spot,
+                        atr=atr,
                     )
+                    if health_report:
+                        if health_report.real_threat or health_report.health_score <= -15.0:
+                            trend_intact = False
+                        elif trend_intact and health_is_ok:
+                            trend_intact = True
+
                 if trend_intact and pos.bars_held < self.max_stagnation_bars:
+                    health_str = f" Health={health_report.health_score:+.0f}" if health_report else ""
                     logger.info(
                         f"[TRACKER] Inactivity Kill-Switch deferred for {pos.trade_id}: "
-                        f"underlying trend intact for {pos.symbol}. Holding in consolidation flag "
+                        f"underlying trend intact for {pos.symbol}{health_str}. Holding in consolidation flag "
                         f"(bar {pos.bars_held}/{self.max_stagnation_bars})."
                     )
                 else:
@@ -670,7 +694,19 @@ class PositionTracker:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
             atr = getattr(pos, "atr", 0.0)
-            current_spot = snap.close if (snap and snap.close > 0) else 0.0
+            current_spot = 0.0
+            if snap and snap.close > 0:
+                if entry_spot > 0 and abs(snap.close - entry_spot) / entry_spot < 0.20:
+                    current_spot = snap.close
+                elif entry_spot <= 0:
+                    current_spot = snap.close
+            if current_spot <= 0 and hasattr(self, "fill_sim") and getattr(self.fill_sim, "feed", None):
+                try:
+                    current_spot = float(self.fill_sim.feed.get_ltp(pos.symbol) or 0.0)
+                except Exception:
+                    current_spot = 0.0
+            if current_spot <= 0:
+                current_spot = float(getattr(pos, "current_spot", 0.0) or 0.0)
 
             if entry_spot > 0 and atr > 0 and current_spot > 0:
                 spot_disp = (current_spot - entry_spot) if pos.direction == Direction.LONG else (entry_spot - current_spot)
@@ -682,6 +718,20 @@ class PositionTracker:
             if is_stagnant:
                 trend_intact = False
                 health_report = None
+                if getattr(self, "health_engine", None):
+                    try:
+                        health_report = self.health_engine.evaluate_position_health(
+                            pos, current_premium=ltp, spot_override=current_spot if current_spot > 0 else None
+                        )
+                    except Exception as he_err:
+                        logger.debug(f"Health engine evaluation error during inactivity check: {he_err}")
+
+                health_is_ok = bool(
+                    health_report is not None
+                    and health_report.health_score >= -5.0
+                    and not health_report.real_threat
+                )
+
                 if self.trend_aware:
                     # 1. Technical trend check (directional drift within noise buffer + EMA/SuperTrend)
                     trend_intact = self._is_underlying_trend_intact(
@@ -691,19 +741,17 @@ class PositionTracker:
                         entry_spot=entry_spot,
                         atr=atr,
                     )
-                    # 2. If technical trend is intact, verify with 8-Pillar Health Engine (Veto Gate)
-                    if trend_intact and getattr(self, "health_engine", None):
-                        try:
-                            health_report = self.health_engine.evaluate_position_health(pos, current_premium=ltp)
-                            if health_report:
-                                if health_report.real_threat or health_report.health_score <= -15.0:
-                                    logger.info(
-                                        f"[TRACKER-FEED] Health veto: technical trend intact, but health is critical "
-                                        f"({health_report.health_score:+.0f}, threats={health_report.threat_reasons}). Killing."
-                                    )
-                                    trend_intact = False
-                        except Exception as he_err:
-                            logger.debug(f"Health engine evaluation error during inactivity check: {he_err}")
+                    # 2. If technical trend is intact, check 8-Pillar Health Engine as a Veto Gate
+                    if health_report:
+                        if health_report.real_threat or health_report.health_score <= -15.0:
+                            logger.info(
+                                f"[TRACKER-FEED] Health veto: technical trend intact, but health is critical "
+                                f"({health_report.health_score:+.0f}, threats={health_report.threat_reasons}). Killing."
+                            )
+                            trend_intact = False
+                        elif trend_intact and health_is_ok:
+                            # Neutral to healthy score confirms consolidation flag
+                            trend_intact = True
 
                 if trend_intact and pos.bars_held < self.max_stagnation_bars:
                     health_str = f" Health={health_report.health_score:+.0f}" if health_report else ""
@@ -840,7 +888,7 @@ class PositionTracker:
             )
         )
 
-        # 2. Recalibrate Cost Buffer (Bank Nifty 4.50, Sensex 5.0, Nifty 1.5 for 1-lot trading)
+        # 2. Recalibrate Cost Buffer (Bank Nifty 4.50, Sensex 5.0, Finnifty 1.8, Nifty 1.5 for 1-lot trading)
         qty = int(getattr(pos, "quantity", 0) or 0)
         if "SENSEX" in sym_root:
             cost_buffer_pts = 3.0 if qty == 20 else 5.0
@@ -848,9 +896,12 @@ class PositionTracker:
         elif "BANK" in sym_root:
             cost_buffer_pts = 1.9 if qty == 30 else 4.50
             min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
+        elif "FINNIFTY" in sym_root:
+            cost_buffer_pts = 1.8
+            min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
         else:
             cost_buffer_pts = 0.9 if qty in (50, 65) else 1.5
-            min_be_gain = 2.0       # NIFTY default: tight noise floor, standard 0.4R is safe
+            min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
 
         gain_pts = current_price - pos.entry_price
 
@@ -862,13 +913,19 @@ class PositionTracker:
         be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
 
         # Weak Edge Capital Defense: If signal health has broken down or edge is failing,
-        # advance SL to Breakeven early at smaller gain without waiting for full 0.4R/min_be_gain
-        if is_weak_edge and not pos.breakeven_set and gain_pts >= (cost_buffer_pts + 1.0):
-            new_sl = pos.entry_price + cost_buffer_pts
+        # For Tier S / Tier B runners, cut maximum risk by 50% (Half-Risk Cut) without moving SL into entry noise envelope.
+        # If gain is already >= min_be_gain, or for non-Tier S/B setups, lock breakeven.
+        is_tier_runner = (getattr(pos, "tier", "") or "").upper() in ("S", "B")
+        if is_weak_edge and not (pos.half_risk_set or pos.breakeven_set) and gain_pts >= (cost_buffer_pts + 1.0):
+            if gain_pts >= min_be_gain or not is_tier_runner:
+                new_sl = round(pos.entry_price + cost_buffer_pts, 2)
+                pos.breakeven_set = True
+            else:
+                # Half-Risk Cut: cuts max risk by 50% while preserving breathing room outside noise envelope below entry
+                new_sl = round(pos.entry_price - (0.50 * risk_distance), 2)
             if new_sl > pos.stop_loss:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_sl
-                pos.breakeven_set = True
                 pos.half_risk_set = True
                 logger.warning(
                     f"[{pos.trade_id}] WEAK_EDGE_DEFENSIVE_LOCK: SL {old_sl:.2f} -> {new_sl:.2f} "

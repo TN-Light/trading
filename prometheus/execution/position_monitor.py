@@ -533,10 +533,14 @@ class PositionMonitor:
                                         trend_intact = (curr_spot <= (state.entry_spot + noise_buf)) and (ema9 <= ema21) and (st_dir == -1)
                                 except Exception as te:
                                     logger.debug(f"Trend health check error: {te}")
-                                    trend_intact = False
+                                    sym_upper = (state.symbol or "").upper()
+                                    default_buf = 35.0 if "SENSEX" in sym_upper else (18.0 if "BANK" in sym_upper else 8.0)
+                                    noise_buf = max(default_buf, 0.35 * current_atr) if current_atr > 0 else default_buf
+                                    trend_intact = (curr_spot >= (state.entry_spot - noise_buf)) if trade_is_bullish else (curr_spot <= (state.entry_spot + noise_buf))
 
-                                # If technical indicators show intact trend, check Health Engine as a Veto Gate
-                                if trend_intact and self.health_engine and getattr(state, "strategy_type", "") != "credit_spread":
+                                # Check Health Engine as an active arbiter
+                                health_is_ok = False
+                                if self.health_engine and getattr(state, "strategy_type", "") != "credit_spread":
                                     try:
                                         health_report = self.health_engine.evaluate_position_health(state, current_price)
                                         if health_report:
@@ -546,11 +550,14 @@ class PositionMonitor:
                                                     f"({health_report.health_score:+.0f}, threats={health_report.threat_reasons}). Killing."
                                                 )
                                                 trend_intact = False
+                                            elif health_report.health_score >= -5.0 and not health_report.real_threat:
+                                                health_is_ok = True
+                                                trend_intact = True
                                     except Exception as he_err:
                                         logger.debug(f"Health engine check in inactivity kill-switch: {he_err}")
 
                                 max_stagnation_bars = 6  # 90m max hold for intact trends
-                                if trend_intact and state.entry_bar_count < max_stagnation_bars:
+                                if (trend_intact or health_is_ok) and state.entry_bar_count < max_stagnation_bars:
                                     is_stagnant = False
                                     health_str = f" Health={health_report.health_score:+.0f}" if health_report else ""
                                     logger.info(
@@ -561,7 +568,7 @@ class PositionMonitor:
                                     )
                                 else:
                                     is_stagnant = True
-                                    if trend_intact and state.entry_bar_count >= max_stagnation_bars:
+                                    if (trend_intact or health_is_ok) and state.entry_bar_count >= max_stagnation_bars:
                                         stagnation_detail = (
                                             f"reached max trend extension ({state.entry_bar_count} bars / 90m) without 0.5*ATR advance; "
                                             f"liquidating to stop theta decay"
@@ -576,8 +583,22 @@ class PositionMonitor:
 
             # 2. Fallback: option premium stagnation (< +3% gain after 3 bars / 45 min) when spot check wasn't performed
             if not is_stagnant and not spot_checked and current_price < entry * 1.03:
-                is_stagnant = True
-                stagnation_detail = f"premium LTP={current_price:.2f} <= Entry*1.03={entry*1.03:.2f}"
+                health_report = None
+                if self.health_engine and getattr(state, "strategy_type", "") != "credit_spread":
+                    try:
+                        health_report = self.health_engine.evaluate_position_health(state, current_price)
+                    except Exception as he_err:
+                        logger.debug(f"Health engine check in fallback inactivity: {he_err}")
+                if health_report and health_report.health_score >= -5.0 and not health_report.real_threat and state.entry_bar_count < 6:
+                    is_stagnant = False
+                    logger.info(
+                        f"[MONITOR] Inactivity Kill-Switch deferred for {state.position_id}: "
+                        f"Health={health_report.health_score:+.0f} (Neutral/Healthy). Holding in consolidation flag "
+                        f"(bar {state.entry_bar_count}/6)."
+                    )
+                else:
+                    is_stagnant = True
+                    stagnation_detail = f"premium LTP={current_price:.2f} <= Entry*1.03={entry*1.03:.2f}"
 
             if is_stagnant:
                 logger.warning(
@@ -651,9 +672,12 @@ class PositionMonitor:
             elif "BANK" in sym_root:
                 cost_buffer_pts = 1.9 if qty == 30 else (4.50 if (qty in (15, 1) or qty > 0) else 1.9)
                 min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
+            elif "FINNIFTY" in sym_root:
+                cost_buffer_pts = 1.8
+                min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
             else:
                 cost_buffer_pts = 0.9 if qty in (50, 65, 75) else (1.5 if (qty in (25, 1) or qty > 0) else 0.9)
-                min_be_gain = 2.0       # NIFTY default: tight noise floor, standard 0.4R is safe
+                min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
 
             if getattr(state, "low_vix_mode", False):
                 cost_buffer_pts = max(cost_buffer_pts, entry * 0.015)
@@ -664,12 +688,17 @@ class PositionMonitor:
             be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
             progress = gain_pts / max(rd, 1.0)
 
-            # Weak Edge Capital Defense: Early breakeven lock at lower gain threshold
-            if is_weak_edge and not state.breakeven_set and gain_pts >= (cost_buffer_pts + 1.0):
-                new_sl = round(entry + cost_buffer_pts, 2)
+            # Weak Edge Capital Defense: Early half-risk cut without moving SL into entry noise envelope
+            is_tier_runner = (getattr(state, "tier", "") or "").upper() in ("S", "B")
+            if is_weak_edge and not (state.half_risk_set or state.breakeven_set) and gain_pts >= (cost_buffer_pts + 1.0):
+                if gain_pts >= min_be_gain or not is_tier_runner:
+                    new_sl = round(entry + cost_buffer_pts, 2)
+                    state.breakeven_set = True
+                else:
+                    # Half-Risk Cut: cuts max risk by 50% while preserving breathing room outside noise envelope below entry
+                    new_sl = round(entry - (0.50 * rd), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
-                    state.breakeven_set = True
                     state.half_risk_set = True
                     stage_changed = True
                     logger.warning(
