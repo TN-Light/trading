@@ -267,6 +267,9 @@ def test_telegram_card_formatting_all_required_fields():
     # 8-Pillar Health Score Summary
     assert "8-Pillar Health Score" in msg
     assert "Momentum healthy, moving toward target" in msg
+    # Action Command
+    assert "ACTION COMMAND" in msg
+    assert "HOLD IT" in msg
     # Trade ID
     assert "POS-20261007-001" in msg
 
@@ -555,3 +558,76 @@ def test_live_paper_capture_heartbeat_wiring(tmp_path):
     assert update["gross_pnl"] == 1875.0
     assert update["holding_duration"] == "5 minutes"
     assert update["milestone"] == 1
+
+
+def test_operator_action_command_variants():
+    """Verify get_operator_action_command generates correct operator directives across all health states."""
+    from prometheus.execution.position_health import get_operator_action_command, PositionHealthReport
+
+    # 1. Strong Momentum Runner (+55 score, real_favor)
+    rep_favor = PositionHealthReport(
+        position_id="P-01",
+        symbol="BANK NIFTY",
+        tradingsymbol="BANKNIFTY55000CE",
+        direction="bullish",
+        current_price=1050.0,
+        entry_price=1000.0,
+        health_score=55.0,
+        real_favor=True,
+        favor_reasons=["Dealer SHORT GAMMA active — dealer hedging amplifies breakout"],
+    )
+    cmd, detail = get_operator_action_command(rep_favor, gross_pts=50.0, net_pts=45.0)
+    assert "HOLD IT" in cmd
+    assert "STRONG MOMENTUM EXPECTED" in cmd
+    assert "SHORT GAMMA" in detail or "accelerating" in detail
+
+    # 2. Healthy Trend (+25 score)
+    cmd, detail = get_operator_action_command(25.0, gross_pts=15.0, net_pts=12.0)
+    assert "HOLD IT" in cmd
+    assert "STRONG MOMENTUM" not in cmd
+    assert "intact" in detail.lower() or "target" in detail.lower()
+
+    # 3. Neutral with Profit (+8 score, +10 pts gain)
+    cmd, detail = get_operator_action_command(8.0, gross_pts=10.0, net_pts=8.0)
+    assert "HOLD WITH CAUTION" in cmd
+    assert "STALLING" not in cmd
+
+    # 4. Neutral with Drawdown (+8 score, -20 pts drawdown)
+    cmd, detail = get_operator_action_command(8.0, gross_pts=-20.0, net_pts=-25.0)
+    assert "HOLD WITH CAUTION" in cmd
+    assert "MOMENTUM STALLING" in cmd
+
+    # 5. Caution / Degrading (-20 score)
+    cmd, detail = get_operator_action_command(-20.0, gross_pts=-15.0, net_pts=-20.0)
+    assert "PREPARE TO EXIT" in cmd or "TIGHTEN" in cmd
+
+    # 6. Critical Breakdown / Real Threat (-50 score, real_threat)
+    rep_threat = PositionHealthReport(
+        position_id="P-02",
+        symbol="SENSEX",
+        tradingsymbol="SENSEX72200PE",
+        direction="bearish",
+        current_price=140.0,
+        entry_price=185.0,
+        health_score=-50.0,
+        real_threat=True,
+        threat_reasons=["Spot rallied above Session VWAP"],
+    )
+    cmd, detail = get_operator_action_command(rep_threat, gross_pts=-45.0, net_pts=-48.0)
+    assert "SELL" in cmd or "EXIT RECOMMENDED" in cmd
+    assert "VWAP" in detail or "breakdown" in detail.lower()
+
+
+def test_theta_pillar_severe_erosion_decay():
+    """Verify _eval_pillar_theta penalizes options losing >10% after 2+ bars regardless of time of day."""
+    from prometheus.execution.position_health import PositionHealthEngine
+
+    engine = PositionHealthEngine()
+
+    # Option down from 185 to 148 (-20%) held 2 bars
+    penalty, threat = engine._eval_pillar_theta(current_premium=148.0, entry_premium=185.0, bars_held=2)
+    assert penalty <= -20.0
+    assert threat is not None
+    assert "Severe Premium Erosion" in threat
+    assert "Down -20.0%" in threat or "Down -20" in threat
+

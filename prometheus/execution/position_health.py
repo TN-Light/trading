@@ -80,6 +80,9 @@ class PositionHealthReport:
     def is_target_expansion_recommended(self) -> bool:
         return self.real_favor and self.suggested_action == "EXPAND_TARGET" and self.suggested_target_expansion > 0.0
 
+    def get_action_command(self, gross_pts: float = 0.0, net_pts: float = 0.0) -> Tuple[str, str]:
+        return get_operator_action_command(self, gross_pts=gross_pts, net_pts=net_pts)
+
 
 class PositionHealthEngine:
     """
@@ -333,7 +336,7 @@ class PositionHealthEngine:
         sym_upper = symbol.upper()
         noise_buffer = 14.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 6.0
         tier = (getattr(state, "tier", "B") or "B").upper()
-        bars_held = getattr(state, "entry_bar_count", 0)
+        bars_held = getattr(state, "entry_bar_count", getattr(state, "bars_held", 0))
 
         if composite_score <= -35.0 or (composite_score <= -25.0 and len(threats) >= 2):
             report.real_threat = True
@@ -751,10 +754,22 @@ class PositionHealthEngine:
         else:
             theta_mult = 1.0
 
-        # If trade has been stagnant (< 2% progress) after 3+ bars in afternoon
+        # 1. Severe option stagnation/decay: down >= 10% after holding 2+ bars (especially 0-DTE expiry)
+        if bars_held >= 2 and gain_pct <= -10.0:
+            penalty = -25.0 * max(1.0, theta_mult)
+            threat_msg = f"Severe Premium Erosion: Down {gain_pct:.1f}% after {bars_held} bars — theta decay active"
+            return penalty, threat_msg
+
+        # 2. Time-of-day afternoon theta burn (stagnant after 13:15)
         if bars_held >= 3 and gain_pct < 2.0 and theta_mult > 1.0:
             penalty = -20.0 * theta_mult
             threat_msg = f"Intraday Theta Burn: Held {bars_held} bars past {now_time.strftime('%H:%M')} without progress (-{penalty:.0f} pts)"
+            return penalty, threat_msg
+
+        # 3. Mild stagnation decay: held >= 3 bars and drifting negative (< -5%)
+        if bars_held >= 3 and gain_pct < -5.0:
+            penalty = -15.0
+            threat_msg = f"Stagnation Decay: Down {gain_pct:.1f}% after {bars_held} bars without momentum"
             return penalty, threat_msg
 
         return 0.0, None
@@ -891,6 +906,13 @@ class PositionHealthEngine:
         """Format clear, informative 1-line health summary reflecting score and microstructure state."""
         return format_health_summary(report)
 
+    @staticmethod
+    def get_operator_action_command(
+        report: Any, gross_pts: float = 0.0, net_pts: float = 0.0, elapsed_minutes: int = 0
+    ) -> Tuple[str, str]:
+        """Derive actionable Operator Command for Telegram alerts."""
+        return get_operator_action_command(report, gross_pts, net_pts, elapsed_minutes)
+
 
 def format_health_summary(report: Any) -> str:
     """Format clear, informative 1-line health summary reflecting score and microstructure state.
@@ -930,4 +952,76 @@ def format_health_summary(report: Any) -> str:
         return f"Score: {score:+.0f}/100 [CAUTION] | Warning: Momentum stalling, watching support"
     else:
         return f"Score: {score:+.0f}/100 [NEUTRAL] | Consolidating within structural bounds"
+
+
+def get_operator_action_command(
+    report: Any,
+    gross_pts: float = 0.0,
+    net_pts: float = 0.0,
+    elapsed_minutes: int = 0,
+) -> Tuple[str, str]:
+    """Derive an unambiguous, actionable Operator Command for Telegram alerts.
+
+    Returns:
+        (command_text, directive_subtext)
+        e.g. ("🟢 HOLD IT — STRONG MOMENTUM EXPECTED", "Breakout accelerating toward target. Let profits run!")
+    """
+    if report is None:
+        return "🟡 HOLD WITH CAUTION", "Telemetry initializing. Maintain predefined stop loss."
+
+    if isinstance(report, (int, float)):
+        score = float(report)
+        real_threat = score <= -35.0
+        real_favor = score >= 45.0
+        threat_reasons: List[str] = []
+        favor_reasons: List[str] = []
+    elif isinstance(report, dict):
+        score = float(report.get("health_score", 0.0) or 0.0)
+        real_threat = bool(report.get("real_threat", False)) or score <= -35.0
+        real_favor = bool(report.get("real_favor", False)) or score >= 45.0
+        threat_reasons = report.get("threat_reasons", []) or []
+        favor_reasons = report.get("favor_reasons", []) or []
+    elif isinstance(report, str):
+        summary_str = report.upper()
+        if "CRITICAL" in summary_str or "THREAT" in summary_str:
+            return "🔴 SELL / EXIT RECOMMENDED", "Structural breakdown detected. Cut risk early to protect capital!"
+        elif "STRONG MOMENTUM" in summary_str:
+            return "🟢 HOLD IT — STRONG MOMENTUM EXPECTED", "Breakout accelerating toward target. Let profits run!"
+        elif "HEALTHY" in summary_str:
+            return "🟢 HOLD IT", "Trend healthy and intact, moving steadily toward target."
+        elif "CAUTION" in summary_str:
+            return "🟠 PREPARE TO EXIT / TIGHTEN STOP", "Momentum stalling. Keep stop loss tight."
+        else:
+            return "🟡 HOLD WITH CAUTION", "Consolidating within structural bounds."
+    else:
+        score = getattr(report, "health_score", 0.0)
+        real_threat = getattr(report, "real_threat", False) or score <= -35.0
+        real_favor = getattr(report, "real_favor", False) or score >= 45.0
+        threat_reasons = getattr(report, "threat_reasons", []) or []
+        favor_reasons = getattr(report, "favor_reasons", []) or []
+
+    # Priority 1: Real Threat or Critical Breakdown
+    if real_threat or score <= -35.0:
+        sub = threat_reasons[0] if threat_reasons else "Structural breakdown detected. Cut risk early to protect capital!"
+        return "🔴 SELL / EXIT RECOMMENDED", f"Structural breakdown: {sub}"
+
+    # Priority 2: Real Favor or Strong Momentum Runner
+    if real_favor or score >= 45.0:
+        sub = favor_reasons[0] if favor_reasons else "Breakout accelerating toward target. Let profits run!"
+        return "🟢 HOLD IT — STRONG MOMENTUM EXPECTED", f"Runner acceleration: {sub}"
+
+    # Priority 3: Healthy Trend Progress
+    if score >= 15.0:
+        return "🟢 HOLD IT", "Trend healthy and intact, moving steadily toward target."
+
+    # Priority 4: Stalling / Caution
+    if score <= -15.0:
+        sub = threat_reasons[0] if threat_reasons else "Momentum stalling. Watch defense threshold closely."
+        return "🟠 PREPARE TO EXIT / TIGHTEN STOP", f"Warning: {sub}"
+
+    # Score between -15 and +15 (Neutral)
+    if gross_pts < -5.0 or net_pts < 0:
+        return "🟡 HOLD WITH CAUTION — MOMENTUM STALLING", "Consolidating with slight drawdown. Monitor key support closely."
+    else:
+        return "🟡 HOLD WITH CAUTION", "Consolidating within structural bounds. Waiting for impulse expansion."
 

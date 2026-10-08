@@ -1689,6 +1689,18 @@ class TelegramBot:
             else:
                 health_summary = "Score: N/A | Telemetry neutral"
 
+        # Operator Action Command (e.g. HOLD IT, SELL, STRONG MOMENTUM EXPECTED)
+        action_cmd = str(info.get("operator_action", "") or info.get("action_cmd", "") or "")
+        action_detail = str(info.get("action_detail", "") or "")
+        if not action_cmd:
+            from prometheus.execution.position_health import get_operator_action_command
+            rep_source = health_report if health_report is not None else (health_score_val if health_score_val is not None else health_summary)
+            action_cmd, action_detail = get_operator_action_command(
+                report=rep_source,
+                gross_pts=gross_pts,
+                net_pts=net_pts,
+            )
+
         lines = [
             "⏱️ <b>TRADE UPDATE — LIVE STATUS</b>",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1705,6 +1717,10 @@ class TelegramBot:
             f"🛑 <b>Active Trailing SL:</b> Rs {stop_loss:,.2f}{stage_badge}",
             f"🎯 <b>Profit Target:</b> Rs {target:,.2f}",
             f"⏱️ <b>Holding Duration:</b> <code>{dur_str}</code>",
+            "",
+            "⚡ <b>ACTION COMMAND:</b>",
+            f"👉 <b>{action_cmd}</b>",
+            f"<i>{action_detail}</i>",
             "",
             "🩺 <b>8-Pillar Health Score:</b>",
             f"<i>{health_summary}</i>",

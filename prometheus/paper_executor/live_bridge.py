@@ -537,6 +537,7 @@ class LivePaperCapture:
         current_price: float,
         elapsed_seconds: int,
         milestone: int,
+        health_report=None,
     ) -> None:
         """Callback invoked whenever PositionTracker hits a 5-minute milestone."""
         if self._telegram is None:
@@ -592,15 +593,17 @@ class LivePaperCapture:
 
             health_score = None
             health_summary = ""
-            if tracker and getattr(tracker, "health_engine", None):
+            report = health_report
+            if report is None and tracker and getattr(tracker, "health_engine", None):
                 try:
                     report = tracker.health_engine.evaluate_position_health(pos, curr_price)
-                    if report:
-                        health_score = report.health_score
-                        from prometheus.execution.position_health import format_health_summary
-                        health_summary = format_health_summary(report)
                 except Exception as e:
                     logger.debug(f"[PaperCapture] health engine eval error: {e}")
+
+            if report:
+                health_score = getattr(report, "health_score", None)
+                from prometheus.execution.position_health import format_health_summary
+                health_summary = format_health_summary(report)
 
             mins = milestone * 5
             duration_str = f"{mins} minutes"
@@ -625,6 +628,7 @@ class LivePaperCapture:
                 "holding_duration_seconds": elapsed_seconds,
                 "health_score": health_score,
                 "health_summary": health_summary,
+                "health_report": report,
                 "milestone": milestone,
             }
 

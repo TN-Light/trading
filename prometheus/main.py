@@ -3667,6 +3667,7 @@ class Prometheus:
                 "holding_duration_seconds": elapsed_seconds,
                 "health_score": health_score,
                 "health_summary": health_summary,
+                "health_report": health_report,
                 "milestone": milestone,
             }
             self.telegram.alert_trade_update(update_info)
