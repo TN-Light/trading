@@ -24,59 +24,15 @@ import pandas as pd
 import time
 import threading
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any, Union
 
 from prometheus.utils.logger import logger
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Thread-safe rate limiter — enforces minimum interval between API calls
-# ═══════════════════════════════════════════════════════════════════════════
-class SmartAPIRateLimiter:
-    """Centralised sliding-window rate limiter for SmartAPI calls.
-
-    Guarantees a minimum ``delay_between_calls`` gap between successive
-    calls across ALL threads / symbols.  Any thread calling ``wait()``
-    will block until at least ``delay`` seconds have elapsed since the
-    last API call.  Thread-safe via a ``threading.Lock``.
-    """
-
-    def __init__(self, delay_between_calls: float = 1.0):
-        self.delay = delay_between_calls
-        self._last_call: float = 0.0
-        self._lock = threading.Lock()
-        # Global cooldown: when a 429/AB1021 is received, ALL threads
-        # must wait until this monotonic timestamp before retrying.
-        self._cooldown_until: float = 0.0
-
-    def wait(self):
-        """Block until the next API call is safe to make."""
-        with self._lock:
-            now = time.monotonic()
-            # Respect global cooldown first
-            if now < self._cooldown_until:
-                sleep_for = self._cooldown_until - now
-                logger.debug(f"[RateLimiter] global cooldown: sleeping {sleep_for:.1f}s")
-                time.sleep(sleep_for)
-                now = time.monotonic()
-            # Enforce per-call delay
-            elapsed = now - self._last_call
-            if elapsed < self.delay:
-                time.sleep(self.delay - elapsed)
-            self._last_call = time.monotonic()
-
-    def set_cooldown(self, seconds: float):
-        """Set a global cooldown after a rate-limit hit.
-
-        All threads will wait until ``seconds`` from now before making
-        their next API call.
-        """
-        with self._lock:
-            target = time.monotonic() + seconds
-            # Only extend, never shorten, an existing cooldown
-            if target > self._cooldown_until:
-                self._cooldown_until = target
-                logger.info(f"[RateLimiter] global cooldown set: {seconds:.0f}s")
+from prometheus.data.rate_limiter import (
+    PrioritizedTokenBucketLimiter,
+    SmartAPIRateLimiter,
+    EndpointCategory,
+    PriorityTier,
+)
 
 
 class AngelOneFetcher:
@@ -135,7 +91,14 @@ class AngelOneFetcher:
         "ONE_DAY": 1,
     }
 
-    def __init__(self, api_key: str, client_code: str, password: str, totp_secret: str):
+    def __init__(
+        self,
+        api_key: str,
+        client_code: str,
+        password: str,
+        totp_secret: str,
+        rate_limiter: Optional[PrioritizedTokenBucketLimiter] = None,
+    ):
         self.api_key = api_key
         self.client_code = client_code
         self.password = password
@@ -144,11 +107,11 @@ class AngelOneFetcher:
         self._auth_token = None
         self._login_time = None
         self._lock = threading.Lock()
-        # Shared rate limiter — 1.0s minimum gap = 1.0 req/sec.
-        # Angel One's cap is ~3 req/sec, but burst limits trip if calls arrive
-        # too closely (<0.5s). Pacing at 1.0s ensures completely clean throughput across all
-        # callers (fetcher + option-chain + VIX).
-        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=1.0)
+        # Primary prioritized token bucket rate limiter (85% broker ceilings:
+        # Historical: 2.5 req/s, Quotes: 8.5 req/s, Orders: 8.5 req/s)
+        self.rate_limiter = rate_limiter or PrioritizedTokenBucketLimiter()
+        # Backward-compatibility adapter for legacy callers and unit test fixtures
+        self._rate_limiter = SmartAPIRateLimiter(delay_between_calls=1.0, limiter=self.rate_limiter)
 
     def _login(self) -> bool:
         """Login to Angel One SmartAPI with TOTP."""
@@ -191,6 +154,12 @@ class AngelOneFetcher:
             except Exception as e:
                 logger.debug(f"Angel One: could not override SDK retries: {e}")
 
+            # Rate limit gate for auth session generation (Priority 1: Immediate)
+            self.rate_limiter.acquire(
+                endpoint=EndpointCategory.QUOTES,
+                priority=PriorityTier.P1_ORDER_EXECUTION,
+                timeout=10.0,
+            )
             data = self._obj.generateSession(self.client_code, self.password, totp)
 
             if data.get("status"):
@@ -219,6 +188,7 @@ class AngelOneFetcher:
         symbol: str,
         days: int = 365,
         interval: str = "5minute",
+        priority: PriorityTier = PriorityTier.P4_BACKGROUND_SCANNER,
     ) -> pd.DataFrame:
         """
         Fetch historical candle data from Angel One.
@@ -272,8 +242,12 @@ class AngelOneFetcher:
             success = False
             for attempt in range(max_retries):
                 try:
-                    # Gate through the centralised rate limiter
-                    self._rate_limiter.wait()
+                    # Gate through prioritized token bucket (HISTORICAL: 2.5 req/s)
+                    self.rate_limiter.acquire(
+                        endpoint=EndpointCategory.HISTORICAL,
+                        priority=priority,
+                        timeout=15.0,
+                    )
                     result = self._obj.getCandleData(params)
 
                     if result and result.get("status") and result.get("data"):
@@ -293,8 +267,9 @@ class AngelOneFetcher:
                         if err_code == "AB1021" or "too many requests" in err_msg.lower():
                             # Aggressive backoff: 5s, 10s, 20s
                             wait = min(5 * (2 ** attempt), 60)
-                            # Set global cooldown so other threads/symbols also back off
-                            self._rate_limiter.set_cooldown(wait)
+                            # Set cooldown on historical endpoint and propagate
+                            self.rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
+                            self._rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
                             logger.warning(
                                 f"Angel One rate limited (AB1021) on {symbol} "
                                 f"at {chunk_start.strftime('%Y-%m-%d')} "
@@ -322,7 +297,8 @@ class AngelOneFetcher:
                     )
                     if is_rate_limit:
                         wait = min(5 * (2 ** attempt), 60)  # 5s, 10s, 20s (cap 60s)
-                        self._rate_limiter.set_cooldown(wait)
+                        self.rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
+                        self._rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
                         logger.warning(
                             f"Angel One rate limited on {symbol} "
                             f"at {chunk_start.strftime('%Y-%m-%d')} "
@@ -384,6 +360,60 @@ class AngelOneFetcher:
         """Check if Angel One credentials are configured."""
         return bool(self.api_key and self.client_code and self.password and self.totp_secret)
 
+    def get_candles(
+        self,
+        symbol: str,
+        days: int = 365,
+        interval: str = "5minute",
+        priority: PriorityTier = PriorityTier.P4_BACKGROUND_SCANNER,
+    ) -> pd.DataFrame:
+        """Fetch candle data with priority scheduling.
+
+        Endpoint Category: HISTORICAL (2.5 req/s)
+        Default Priority: P4_BACKGROUND_SCANNER (can be overridden to P3 for health checks).
+        """
+        return self.fetch_historical(symbol=symbol, days=days, interval=interval, priority=priority)
+
+    def get_candle_data(
+        self,
+        params: Dict[str, Any],
+        priority: PriorityTier = PriorityTier.P4_BACKGROUND_SCANNER,
+        timeout: float = 15.0,
+    ) -> Optional[Dict[str, Any]]:
+        """Low-level wrapper for getCandleData SmartAPI calls with rate-limit protection."""
+        if not self._ensure_connected():
+            return None
+
+        if not self.rate_limiter.acquire(
+            endpoint=EndpointCategory.HISTORICAL,
+            priority=priority,
+            timeout=timeout,
+        ):
+            logger.warning("[AngelOneFetcher] get_candle_data rate limiter timeout")
+            return None
+
+        try:
+            res = self._obj.getCandleData(params)
+            if res and not res.get("status"):
+                code = str(res.get("errorcode", ""))
+                msg = str(res.get("message", "")).lower()
+                if code in ("AB1021", "AB1020") or "too many requests" in msg:
+                    self.rate_limiter.set_cooldown(20.0, endpoint=EndpointCategory.HISTORICAL)
+                    self._rate_limiter.set_cooldown(20.0, endpoint=EndpointCategory.HISTORICAL)
+            return res
+        except Exception as e:
+            logger.warning(f"[AngelOneFetcher] getCandleData failed: {e}")
+            return None
+
+    def rate_limit_wait(
+        self,
+        endpoint: Union[EndpointCategory, str] = EndpointCategory.HISTORICAL,
+        priority: PriorityTier = PriorityTier.P4_BACKGROUND_SCANNER,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Block until rate limiter allows dispatch for the specified endpoint."""
+        return self.rate_limiter.acquire(endpoint=endpoint, priority=priority, timeout=timeout)
+
 
 def create_angelone_fetcher() -> Optional[AngelOneFetcher]:
     """Create an AngelOneFetcher from credentials.yaml config."""
@@ -413,3 +443,14 @@ def create_angelone_fetcher() -> Optional[AngelOneFetcher]:
     except Exception as e:
         logger.warning(f"Angel One fetcher init failed: {e}")
         return None
+
+
+# Architecture alias for consistency across dispatchers and documentation
+SmartAPIFetcher = AngelOneFetcher
+
+__all__ = [
+    "AngelOneFetcher",
+    "SmartAPIFetcher",
+    "SmartAPIRateLimiter",
+    "create_angelone_fetcher",
+]

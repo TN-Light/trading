@@ -821,6 +821,10 @@ class PositionTracker:
         if is_spread:
             return
 
+        # Strict freeze guard: non-positive or stale price prevents ratchet alteration
+        if current_price <= 0.0:
+            return
+
         # Determine constant initial risk distance (never changes as stop_loss is ratcheted up)
         risk_distance = getattr(pos, "initial_risk_distance", 0.0)
         if risk_distance <= 0.0:

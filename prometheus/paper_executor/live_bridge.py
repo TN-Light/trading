@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Dict
 import pandas as pd
+import time
 
 from prometheus.papertrade.engine import PaperTradeEngine
 from prometheus.papertrade.fill_simulator import FillSimulator
@@ -44,12 +45,37 @@ class LivePriceFeed:
     def __init__(self, ltp_source: Any, data_engine: Any = None):
         self._ltp = ltp_source
         self._data_engine = data_engine
+        self._last_known_prices: Dict[str, float] = {}
+        self._last_known_times: Dict[str, float] = {}
+        self._last_known_tokens: Dict[str, str] = {}
 
     def get_ltp(self, instrument: str) -> float:
+        cache = None
+        tok_cached = ""
         try:
-            v = self._ltp.get_ltp(instrument)
-            if v is not None and float(v) > 0.0:
-                return float(v)
+            from prometheus.data.price_micro_cache import get_shared_micro_cache
+            cache = get_shared_micro_cache()
+            cached = cache.get_by_symbol(instrument)
+            if cached and cached.price > 0:
+                p = float(cached.price)
+                self._last_known_prices[instrument] = p
+                self._last_known_times[instrument] = time.monotonic()
+                tok = getattr(cached, "symboltoken", "") or cache._by_symbol.get(instrument, "")
+                if tok:
+                    self._last_known_tokens[instrument] = str(tok)
+                return p
+            tok_cached = cache._by_symbol.get(instrument, "")
+        except Exception:
+            pass
+
+        try:
+            if self._ltp is not None:
+                v = self._ltp.get_ltp(instrument)
+                if v is not None and float(v) > 0.0:
+                    p = float(v)
+                    self._last_known_prices[instrument] = p
+                    self._last_known_times[instrument] = time.monotonic()
+                    return p
         except Exception as e:
             logger.debug(f"LivePriceFeed.get_ltp({instrument}) failed on primary source: {e}")
 
@@ -76,6 +102,8 @@ class LivePriceFeed:
                                 ltp1 = float(q1.get("ltp", 0.0) or 0.0)
                                 ltp2 = float(q2.get("ltp", 0.0) or 0.0)
                                 spread_val = max(0.05, ltp1 - ltp2)
+                                self._last_known_prices[instrument] = spread_val
+                                self._last_known_times[instrument] = time.monotonic()
                                 return spread_val
 
                 # Single-leg option quote
@@ -83,9 +111,46 @@ class LivePriceFeed:
                 if sym and strike and opt_type:
                     q = _fetch_prem(sym, strike, opt_type, exp)
                     if q and "ltp" in q and q["ltp"] is not None:
-                        return float(q["ltp"])
+                        p = float(q["ltp"])
+                        self._last_known_prices[instrument] = p
+                        self._last_known_times[instrument] = time.monotonic()
+                        if "token" in q:
+                            self._last_known_tokens[instrument] = str(q["token"])
+                        return p
             except Exception as e:
                 logger.debug(f"LivePriceFeed option fallback error for {instrument}: {e}")
+
+        # Non-hallucinatory fallback: log [STALE_DATA_ALERT], freeze trailing ratchets, preserve SL
+        try:
+            from prometheus.data.price_micro_cache import FallbackPolicy, get_shared_micro_cache
+            now = time.monotonic()
+            last_known = self._last_known_prices.get(instrument, 0.0)
+            last_time = self._last_known_times.get(instrument, 0.0)
+            age_sec = (now - last_time) if last_time > 0.0 else 5.0
+            token = self._last_known_tokens.get(instrument, "") or tok_cached
+
+            # Check expired micro-cache entry if local memory is blank
+            if last_known <= 0.0:
+                try:
+                    c = cache or get_shared_micro_cache()
+                    if not token:
+                        token = c._by_symbol.get(instrument, "")
+                    if token and token in c._cache:
+                        stale_entry = c._cache[token]
+                        if stale_entry.price > 0.0:
+                            last_known = float(stale_entry.price)
+                            age_sec = stale_entry.age(now)
+                except Exception:
+                    pass
+
+            FallbackPolicy.handle_option_stale(
+                symbol=instrument,
+                token=token,
+                last_known_price=last_known,
+                age_seconds=age_sec,
+            )
+        except Exception:
+            pass
 
         return 0.0
 

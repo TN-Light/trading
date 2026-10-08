@@ -81,6 +81,8 @@ class TrailingState:
     atr: float = 0.0
     tier: str = "B"
     quantity: int = 0
+    token: str = ""
+    last_ltp: float = 0.0
     _last_heartbeat_milestone: int = 0
     _last_heartbeat_ts: float = 0.0
 
@@ -167,6 +169,7 @@ class PositionMonitor:
         self._ltp_fail_counts: Dict[str, int] = {}
         self._ltp_alert_sent: Dict[str, bool] = {}
         self._heartbeat_milestones: Dict[str, int] = {}
+        self._last_successful_ltp_time: Dict[str, float] = {}
 
         # 8-Pillar Microstructure Trade Health Engine
         self.health_engine = None
@@ -199,6 +202,7 @@ class PositionMonitor:
         self._ltp_fail_counts.pop(position_id, None)
         self._ltp_alert_sent.pop(position_id, None)
         self._heartbeat_milestones.pop(position_id, None)
+        self._last_successful_ltp_time.pop(position_id, None)
 
     def restore_positions(self, states: List[TrailingState]):
         """Restore positions from SQLite persistence (crash recovery)."""
@@ -269,6 +273,28 @@ class PositionMonitor:
                         if ltp <= 0:
                             # Track consecutive LTP failures per position
                             self._ltp_fail_counts[pid] = self._ltp_fail_counts.get(pid, 0) + 1
+                            now = time.monotonic()
+                            last_ok = self._last_successful_ltp_time.get(pid, 0.0)
+                            age = (now - last_ok) if last_ok > 0.0 else float(self._ltp_fail_counts[pid] * self.poll_interval)
+                            last_price = getattr(state, "last_ltp", 0.0) or getattr(state, "premium_hwm", 0.0) or getattr(state, "entry_premium", 0.0)
+                            token = getattr(state, "token", "") or ""
+                            if not token:
+                                try:
+                                    from prometheus.data.price_micro_cache import get_shared_micro_cache
+                                    token = get_shared_micro_cache()._by_symbol.get(state.tradingsymbol, "")
+                                except Exception:
+                                    pass
+                            try:
+                                from prometheus.data.price_micro_cache import FallbackPolicy
+                                FallbackPolicy.handle_option_stale(
+                                    symbol=state.tradingsymbol or state.symbol or str(pid),
+                                    token=token,
+                                    last_known_price=float(last_price),
+                                    age_seconds=float(age),
+                                )
+                            except Exception:
+                                pass
+
                             if self._ltp_fail_counts[pid] >= 20 and not self._ltp_alert_sent.get(pid, False):
                                 logger.warning(
                                     f"PositionMonitor: LTP unavailable for {pid} "
@@ -279,6 +305,8 @@ class PositionMonitor:
                             continue
                         # Reset failure counter on success
                         self._ltp_fail_counts[pid] = 0
+                        self._last_successful_ltp_time[pid] = time.monotonic()
+                        state.last_ltp = float(ltp)
                         self._ltp_alert_sent.pop(pid, None)
                         self._process_tick(state, ltp)
                     except Exception as e:
@@ -300,6 +328,27 @@ class PositionMonitor:
         Run the 5-stage trailing stop on a single position.
         Uses real LTP (current_price) instead of backtest's modeled premium.
         """
+        if current_price <= 0.0:
+            try:
+                from prometheus.data.price_micro_cache import FallbackPolicy
+                last_price = getattr(state, "last_ltp", 0.0) or getattr(state, "premium_hwm", 0.0) or getattr(state, "entry_premium", 0.0)
+                token = getattr(state, "token", "") or ""
+                if not token:
+                    try:
+                        from prometheus.data.price_micro_cache import get_shared_micro_cache
+                        token = get_shared_micro_cache()._by_symbol.get(state.tradingsymbol, "")
+                    except Exception:
+                        pass
+                FallbackPolicy.handle_option_stale(
+                    symbol=state.tradingsymbol or state.symbol,
+                    token=token,
+                    last_known_price=float(last_price),
+                    age_seconds=5.0,
+                )
+            except Exception:
+                pass
+            return
+
         entry = state.entry_premium
         old_sl = state.current_sl
         stage_changed = False
@@ -613,6 +662,8 @@ class PositionMonitor:
         # For bearish, we're buying PUTs so premium INCREASES when underlying drops.
         # The trailing logic is the same: premium goes up = profit.
         price_for_trail = current_price
+        if price_for_trail > state.premium_hwm:
+            state.premium_hwm = price_for_trail
 
         # ── Compulsive 8-Pillar Trade Health & Heartbeat Evaluation before trailing advancement ──
         health_report = report if ('report' in locals() and report is not None) else None

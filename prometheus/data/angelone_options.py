@@ -20,7 +20,8 @@ import threading
 from dataclasses import dataclass
 import pandas as pd
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+from prometheus.data.rate_limiter import PriorityTier, EndpointCategory
 
 from prometheus.utils.logger import logger
 
@@ -129,14 +130,16 @@ class AngelOneOptionChain:
         have to update the map."""
         return cls.OPTIONS_EXCHANGE_SEGMENTS.get(underlying, "NFO")
 
-    def __init__(self, fetcher):
+    def __init__(self, fetcher, batch_engine: Optional[Any] = None):
         """
         Reuses existing AngelOneFetcher's SmartConnect session.
 
         Args:
             fetcher: AngelOneFetcher instance (already has _obj, _ensure_connected)
+            batch_engine: Optional BatchMarketDataEngine instance.
         """
         self._fetcher = fetcher
+        self._batch_engine = batch_engine
         self._token_cache: Dict[str, List[Dict]] = {}  # keyed by "NIFTY"
         self._cache_date: str = ""  # invalidate daily
         self._last_call: float = 0.0
@@ -145,6 +148,29 @@ class AngelOneOptionChain:
         self._auth_cooldown_sec: int = 300
         self._oi_snapshots: Dict[str, ContractOISnapshot] = {}
         self._oi_lock = threading.Lock()
+
+    def _get_batch_engine(self):
+        """Lazily initialize or return BatchMarketDataEngine instance."""
+        if getattr(self, "_batch_engine", None) is not None:
+            return self._batch_engine
+
+        obj = self._get_obj()
+        if not obj:
+            return None
+
+        rl = getattr(self._fetcher, "rate_limiter", None) or getattr(self._fetcher, "_rate_limiter", None)
+        if hasattr(rl, "_limiter") and rl._limiter is not None:
+            rl = rl._limiter
+
+        try:
+            from prometheus.data.batch_engine import BatchMarketDataEngine
+            from prometheus.data.price_micro_cache import get_shared_micro_cache
+            mc = get_shared_micro_cache()
+            self._batch_engine = BatchMarketDataEngine(client=obj, limiter=rl, micro_cache=mc)
+            return self._batch_engine
+        except Exception as e:
+            logger.debug(f"Could not initialize BatchMarketDataEngine: {e}")
+            return None
 
     def _ensure_oi_cache_initialized(self) -> None:
         """Defensive initialization for instances created via __new__."""
@@ -377,38 +403,58 @@ class AngelOneOptionChain:
             )
         return is_rl
 
-    def _rate_limit(self):
+    def _rate_limit(
+        self,
+        priority: PriorityTier = PriorityTier.P3_HEALTH_EVALUATION,
+        timeout: float = 10.0,
+    ) -> bool:
         """Gate every option-chain API call through the shared
-        SmartAPIRateLimiter (1.0s minimum gap + global cooldown).
+        PrioritizedTokenBucketLimiter (or legacy SmartAPIRateLimiter).
 
-        Bug (2026-08-17 audit): the option-chain path had its own
-        independent 0.35s pacer, separate from the historical fetcher's
-        SmartAPIRateLimiter added in commit fbd9ddd.  With max_workers=3
-        concurrent scan threads + 7 intraday instruments (Session 30
-        expansion), the option-chain alone fired at ~3 calls/sec/worker
-        = ~9 calls/sec across workers, vs Angel One's ~3 req/sec
-        limit. The two limiters were totally uncoordinated — a 429 on
-        searchScrip set no cooldown visible to ``fetch_historical``,
-        and vice-versa.  Unifying the gate on the fetcher's existing
-        ``SmartAPIRateLimiter`` means ALL Angel One callers
-        (historical fetcher, VIX fetch, searchScrip, getMarketData,
-        ltpData, optionGreek) respect a single global rate and
-        cooldown.
+        All option-chain requests (searchScrip, getMarketData, ltpData, optionGreek)
+        map to EndpointCategory.QUOTES (Angel One 10.0 req/s quota capped at 8.5 req/s).
 
-        Backward-compat: if the fetcher doesn't expose
-        ``_rate_limiter`` (e.g. legacy callers or test fixtures via
-        ``__new__``), fall back to the original 0.35s pacer so unit
-        tests like ``test_angelone_options_searchScrip_uses_resolved_segment_per_underlying``
-        keep working unchanged.
+        Args:
+            priority: PriorityTier (P1 to P4). Default P3_HEALTH_EVALUATION.
+            timeout: Maximum wait time in seconds. Default 10.0s.
+
+        Returns:
+            bool: True if rate limit token acquired; False on timeout.
         """
-        rl = getattr(self._fetcher, "_rate_limiter", None)
+        rl = getattr(self._fetcher, "_rate_limiter", None) or getattr(self._fetcher, "rate_limiter", None)
         if rl is not None:
-            rl.wait()
-            return
-        elapsed = time.time() - self._last_call
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_call = time.time()
+            if hasattr(rl, "acquire"):
+                return bool(rl.acquire(EndpointCategory.QUOTES, priority=priority, timeout=timeout))
+            elif hasattr(rl, "wait"):
+                rl.wait()
+                return True
+
+        # Standalone fallback pacer for test fixtures without _rate_limiter
+        sleep_dur = 0.0
+        lock = getattr(self, "_oi_lock", None)
+        if lock is not None:
+            with lock:
+                now = time.time()
+                elapsed = now - self._last_call
+                if elapsed < self._min_interval:
+                    sleep_dur = self._min_interval - elapsed
+                    self._last_call = now + sleep_dur
+                else:
+                    self._last_call = now
+        else:
+            now = time.time()
+            elapsed = now - self._last_call
+            if elapsed < self._min_interval:
+                sleep_dur = self._min_interval - elapsed
+                self._last_call = now + sleep_dur
+            else:
+                self._last_call = now
+
+        if sleep_dur > 0:
+            if sleep_dur > timeout:
+                return False
+            time.sleep(sleep_dur)
+        return True
 
     def _get_obj(self):
         """Get authenticated SmartConnect object."""
@@ -428,6 +474,7 @@ class AngelOneOptionChain:
         expiry_date: str = None,
         strikes_around_atm: int = 10,
         spot_price: float = None,
+        priority: PriorityTier = PriorityTier.P3_HEALTH_EVALUATION,
     ) -> List[Dict]:
         """
         Discover NFO option contracts via searchScrip.
@@ -457,7 +504,8 @@ class AngelOneOptionChain:
             if not obj:
                 return []
 
-            self._rate_limit()
+            if not self._rate_limit(priority=priority):
+                return []
             try:
                 # Bug (2026-07-28 audit): use the per-underlying exchange
                 # segment (NFO vs BFO) instead of hardcoded "NFO" — SENSEX
@@ -527,11 +575,15 @@ class AngelOneOptionChain:
                     # If BFO weekly failed, try BFO monthly before bare underlying.
                     if seg == "BFO" and search_query != f"{underlying}{yy}{mon}":
                         monthly_query = f"{underlying}{yy}{mon}"
+                        if not self._rate_limit(priority=priority):
+                            return []
                         result = obj.searchScrip(seg, monthly_query)
                         if self._mark_rate_limited(result, f"searchScrip_bfo_monthly('{seg}', '{monthly_query}')"):
                             return []
 
                     if (not result or not result.get("data")) and search_query != underlying:
+                        if not self._rate_limit(priority=priority):
+                            return []
                         result = obj.searchScrip(seg, underlying)
                         if self._mark_rate_limited(result, f"searchScrip_fallback('{seg}', '{underlying}')"):
                             return []
@@ -980,16 +1032,19 @@ class AngelOneOptionChain:
         option_type: str,
         expiry: str = None,
         spot_price: float = None,
+        priority: PriorityTier = PriorityTier.P2_POSITION_MONITOR,
+        include_greeks: bool = True,
     ) -> Optional[Dict]:
         """
-        Get real premium for a single option contract.
+        Get real premium for a single option contract via BatchMarketDataEngine.
 
-        Returns: {"ltp", "bid", "ask", "spread", "delta", "gamma", "theta", "iv"}
-        or None if unavailable.
+        Coalesces market data queries into <=50 token getMarketData("FULL") batches,
+        extracting LTP, bid, ask, spread, OI, and volume in a single network call.
+        Eliminates the legacy redundant ltpData round-trip.
         """
         # Find the contract token
         contracts = self.discover_contracts(
-            symbol, expiry_date=expiry, strikes_around_atm=20, spot_price=spot_price
+            symbol, expiry_date=expiry, strikes_around_atm=20, spot_price=spot_price, priority=priority
         )
 
         # If expiry is None, filter to the nearest available expiry to avoid matching longer-dated contracts
@@ -1018,134 +1073,151 @@ class AngelOneOptionChain:
         if not target:
             return None
 
-        # Fetch market data for this one contract
-        obj = self._get_obj()
-        if not obj:
+        underlying = self.UNDERLYING_MAP.get(symbol, "NIFTY")
+        seg = self._exchange_for(underlying)
+        token = str(target.get("symboltoken", ""))
+        tradingsymbol = str(target.get("tradingsymbol", ""))
+
+        # 1. Primary path: Query market data via BatchMarketDataEngine
+        batch_engine = self._get_batch_engine()
+        quote = None
+        if batch_engine is not None:
+            batch_req = [{"exchange": seg, "tradingsymbol": tradingsymbol, "symboltoken": token}]
+            batch_results = batch_engine.get_quotes_batch(batch_req, priority=priority)
+            quote = batch_results.get(token)
+
+        # 2. Defensive extraction with legacy fallback for test fixture backward compatibility
+        ltp = float(quote.get("ltp", 0.0)) if quote else 0.0
+        bid = float(quote.get("bid", 0.0)) if quote else 0.0
+        ask = float(quote.get("ask", 0.0)) if quote else 0.0
+        raw_oi = int(quote.get("open_interest", 0)) if quote else 0
+        volume = int(quote.get("volume", 0)) if quote else 0
+
+        # If batch quote returned zero LTP (e.g. mock test fixture that only implements ltpData or omits ltp from market_data_responses),
+        # fall back to direct ltpData to preserve 100% test compatibility.
+        if ltp <= 0.0:
+            obj = self._get_obj()
+            if not obj or not self._rate_limit(priority=priority):
+                return None
+            try:
+                res = obj.ltpData(seg, tradingsymbol, token)
+                if self._mark_rate_limited(res, f"ltpData({seg}, {tradingsymbol})"):
+                    return None
+                if res and res.get("status") and res.get("data"):
+                    ltp = float(res["data"].get("ltp", 0.0) or 0.0)
+            except Exception:
+                pass
+
+        if ltp <= 0.0:
             return None
 
-        self._rate_limit()
-        try:
-            # Bug (2026-07-28 audit): resolve segment (NFO vs BFO) from
-            # the symbol's underlying so SENSEX contracts route on BFO.
-            underlying = self.UNDERLYING_MAP.get(symbol, "NIFTY")
-            seg = self._exchange_for(underlying)
-            result = obj.ltpData(seg, target["tradingsymbol"], target["symboltoken"])
-            # Bug (2026-08-17 audit): AB1021 on ltpData previously passed
-            # through silently as None — the next getMarketData / optionGreek
-            # retried in the same call. Bail immediately on rate-limit so
-            # the shared cooldown governs all pending Angel One callers.
-            if self._mark_rate_limited(result, f"ltpData({seg}, {target['tradingsymbol']})"):
-                return None
-            if result and result.get("status") and result.get("data"):
-                data = result["data"]
-                ltp = float(data.get("ltp", 0) or 0)
-                if ltp <= 0:
-                    return None
-
-                premium = {
-                    "ltp": ltp,
-                    "bid": 0.0,
-                    "ask": 0.0,
-                    "spread": 0.0,
-                    "tradingsymbol": target["tradingsymbol"],
-                    "symboltoken": target["symboltoken"],
-                    "oi": 0,
-                    "oi_change": 0,
-                    "delta_oi": 0,
-                    "volume": 0,
-                }
-
-                # Try to get bid/ask via full market data
-                self._rate_limit()
+        # If batch_engine was not available and raw_oi/volume/bid/ask are still 0,
+        # try getMarketData directly (legacy fallback)
+        if batch_engine is None or (bid == 0.0 and ask == 0.0 and raw_oi == 0):
+            obj = self._get_obj()
+            if obj and self._rate_limit(priority=priority):
                 try:
-                    # Bug (2026-07-28 audit): same segment routing as the
-                    # ltpData call above — SENSEX ships on BFO.
-                    full = obj.getMarketData("FULL", {seg: [target["symboltoken"]]})
-                    if not self._mark_rate_limited(full, f"getMarketData({seg}, {target['tradingsymbol']})"):
+                    full = obj.getMarketData("FULL", {seg: [token]})
+                    if not self._mark_rate_limited(full, f"getMarketData({seg}, {tradingsymbol})"):
                         if full and full.get("data", {}).get("fetched"):
                             f = full["data"]["fetched"][0]
-                            premium["bid"] = float(f.get("bestBidPrice", 0) or 0)
-                            premium["ask"] = float(f.get("bestAskPrice", 0) or 0)
-                            premium["spread"] = premium["ask"] - premium["bid"]
+                            bid = float(f.get("bestBidPrice", 0) or 0)
+                            ask = float(f.get("bestAskPrice", 0) or 0)
                             raw_oi = int(f.get("opnInterest", 0) or 0)
-                            premium["oi"] = raw_oi
-                            premium["volume"] = int(f.get("tradeVolume", 0) or 0)
-                            token = str(target.get("symboltoken", ""))
-                            tsym = str(target.get("tradingsymbol", ""))
-                            snap = self._update_oi_snapshot(
-                                token=token,
-                                tradingsymbol=tsym,
-                                current_oi=raw_oi,
-                                volume=premium["volume"],
-                            )
-                            premium["oi_change"] = snap.delta_oi_session
-                            premium["delta_oi"] = snap.delta_oi_poll
-                            premium["delta_volume"] = snap.delta_volume_poll
+                            volume = int(f.get("tradeVolume", 0) or 0)
                 except Exception:
                     pass
 
-                # Try Greeks
-                self._rate_limit()
+        # 3. Update in-memory Open Interest snapshot & deltas
+        snap = self._update_oi_snapshot(
+            token=token,
+            tradingsymbol=tradingsymbol,
+            current_oi=raw_oi,
+            volume=volume,
+        )
+
+        premium = {
+            "ltp": ltp,
+            "bid": bid,
+            "ask": ask,
+            "spread": max(0.0, ask - bid) if (ask > 0 and bid > 0) else 0.0,
+            "tradingsymbol": tradingsymbol,
+            "symboltoken": token,
+            "oi": raw_oi,
+            "oi_change": snap.delta_oi_session,
+            "delta_oi": snap.delta_oi_poll,
+            "delta_volume": snap.delta_volume_poll,
+            "volume": volume,
+            "delta": 0.0,
+            "gamma": 0.0,
+            "theta": 0.0,
+            "vega": 0.0,
+            "iv": 0.0,
+        }
+
+        # 4. Optional Greek evaluation (only when explicitly requested)
+        if include_greeks:
+            obj = self._get_obj()
+            if obj and self._rate_limit(priority=priority):
                 try:
                     g_result = obj.optionGreek({
-                        "name": target["tradingsymbol"],
+                        "name": tradingsymbol,
                         "expirydate": expiry or target.get("expiry", ""),
                         "strikeprice": str(strike),
                         "optiontype": option_type,
                     })
-                    if not self._mark_rate_limited(g_result, f"optionGreek({target['tradingsymbol']})"):
+                    if not self._mark_rate_limited(g_result, f"optionGreek({tradingsymbol})"):
                         if g_result and g_result.get("data"):
                             gd = g_result["data"]
-                            premium["delta"] = float(gd.get("delta", 0) or 0)
-                            premium["gamma"] = float(gd.get("gamma", 0) or 0)
-                            premium["theta"] = float(gd.get("theta", 0) or 0)
-                            premium["vega"] = float(gd.get("vega", 0) or 0)
-                            premium["iv"] = float(gd.get("impliedVolatility", 0) or 0)
+                            premium["delta"] = float(gd.get("delta", 0.0) or 0.0)
+                            premium["gamma"] = float(gd.get("gamma", 0.0) or 0.0)
+                            premium["theta"] = float(gd.get("theta", 0.0) or 0.0)
+                            premium["vega"] = float(gd.get("vega", 0.0) or 0.0)
+                            premium["iv"] = float(gd.get("impliedVolatility", 0.0) or 0.0)
                 except Exception as e:
-                    logger.warning(f"optionGreek failed for {target.get('tradingsymbol', '?')}: {e}")
+                    logger.warning(f"optionGreek failed for {tradingsymbol}: {e}")
 
-                return premium
-        except Exception as e:
-            logger.debug(f"Angel One get_real_premium error: {e}")
-            return None
+        return premium
 
-    def get_ltp_by_token(self, tradingsymbol: str) -> Optional[float]:
-        """Quick LTP lookup for position monitoring.
+    def get_ltp_by_token(
+        self,
+        tradingsymbol: str,
+        priority: PriorityTier = PriorityTier.P2_POSITION_MONITOR,
+    ) -> Optional[float]:
+        """Quick LTP lookup for position monitoring leveraging BatchMarketDataEngine.
 
-        Bug (2026-07-28 audit): the ``ltpData`` call below hardcoded
-        ``"NFO"``. Since ``_token_cache`` is keyed by underlying root
-        (e.g. ``"NIFTY"``, ``"SENSEX"``), iterating ``items()`` lets
-        us resolve the correct exchange segment per cache bucket —
-        so SENSEX contracts route on BFO and NIFTY routes on NFO.
+        Coalesces with any concurrent position checks within the 25ms debounce window.
         """
-        # Search all cached contracts for this tradingsymbol
         for underlying, contracts in self._token_cache.items():
             for c in contracts:
                 if c.get("tradingsymbol") == tradingsymbol:
-                    token = c.get("symboltoken", "")
-                    if token:
-                        obj = self._get_obj()
-                        if not obj:
+                    token = str(c.get("symboltoken", ""))
+                    if not token:
+                        return None
+                    seg = self._exchange_for(underlying)
+
+                    # 1. Primary path: Batch Market Data Engine
+                    batch_engine = self._get_batch_engine()
+                    if batch_engine is not None:
+                        quotes = batch_engine.get_quotes_batch(
+                            [{"exchange": seg, "tradingsymbol": tradingsymbol, "symboltoken": token}],
+                            priority=priority,
+                        )
+                        if token in quotes and quotes[token].get("ltp", 0.0) > 0.0:
+                            return float(quotes[token]["ltp"])
+
+                    # 2. Defensive fallback for test fixtures without BatchMarketDataEngine
+                    obj = self._get_obj()
+                    if not obj or not self._rate_limit(priority=priority):
+                        return None
+                    try:
+                        result = obj.ltpData(seg, tradingsymbol, token)
+                        if self._mark_rate_limited(result, f"ltpData({seg}, {tradingsymbol})"):
                             return None
-                        self._rate_limit()
-                        try:
-                            # Bug (2026-07-28 audit): route via the
-                            # correct segment (NFO vs BFO) keyed by the
-                            # underlying cache key.
-                            seg = self._exchange_for(underlying)
-                            result = obj.ltpData(seg, tradingsymbol, token)
-                            # Bug (2026-08-17 audit): AB1021 on the
-                            # position-monitor LTP poll previously
-                            # silently returned None — but the next bar
-                            # cycle re-fired immediately, extending the
-                            # rate-limit window. Propagate cooldown so
-                            # subsequent bars respect it too.
-                            if self._mark_rate_limited(result, f"ltpData({seg}, {tradingsymbol})"):
-                                return None
-                            if result and result.get("data"):
-                                return float(result["data"].get("ltp", 0) or 0)
-                        except Exception:
-                            pass
+                        if result and result.get("data"):
+                            return float(result["data"].get("ltp", 0.0) or 0.0)
+                    except Exception:
+                        pass
                     return None
         return None
 

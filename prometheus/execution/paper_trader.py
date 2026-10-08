@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import uuid
 import copy
+import time
 
 from prometheus.execution.broker import (
     BrokerBase, Order, Position, OrderType, OrderSide,
@@ -44,6 +45,8 @@ class PaperTrader(BrokerBase):
         self._connected = True
         self._price_feed: Dict[str, float] = {}  # simulated price feed
         self._real_premiums: Dict[str, Dict] = {}  # real bid/ask from Angel One
+        self._last_known_prices: Dict[str, float] = {}
+        self._last_known_times: Dict[str, float] = {}
         self.cost_model = ZerodhaCostModel()  # Realistic Zerodha fees
         self.total_costs = 0.0  # Running total of all fees paid
 
@@ -303,6 +306,8 @@ class PaperTrader(BrokerBase):
         val = self._price_feed.get(tradingsymbol, 0.0)
         price = float(val.get("ltp", 0.0) if isinstance(val, dict) else (val or 0.0))
         if price > 0:
+            self._last_known_prices[tradingsymbol] = price
+            self._last_known_times[tradingsymbol] = time.monotonic()
             return price
 
         # Try translation if it looks like a Zerodha symbol
@@ -311,7 +316,56 @@ class PaperTrader(BrokerBase):
             val = self._price_feed.get(translated, 0.0)
             price = float(val.get("ltp", 0.0) if isinstance(val, dict) else (val or 0.0))
             if price > 0:
+                self._last_known_prices[tradingsymbol] = price
+                self._last_known_times[tradingsymbol] = time.monotonic()
                 return price
+
+        # Check SharedPriceMicroCache
+        try:
+            from prometheus.data.price_micro_cache import get_shared_micro_cache
+            cached = get_shared_micro_cache().get_by_symbol(tradingsymbol)
+            if cached and cached.price > 0:
+                p = float(cached.price)
+                self._last_known_prices[tradingsymbol] = p
+                self._last_known_times[tradingsymbol] = time.monotonic()
+                return p
+            if translated:
+                cached_tr = get_shared_micro_cache().get_by_symbol(translated)
+                if cached_tr and cached_tr.price > 0:
+                    p = float(cached_tr.price)
+                    self._last_known_prices[tradingsymbol] = p
+                    self._last_known_times[tradingsymbol] = time.monotonic()
+                    return p
+        except Exception:
+            pass
+
+        # Non-hallucinatory fallback: log [STALE_DATA_ALERT], freeze trailing ratchets, preserve SL
+        try:
+            from prometheus.data.price_micro_cache import FallbackPolicy, get_shared_micro_cache
+            now = time.monotonic()
+            last_price = self._last_known_prices.get(tradingsymbol, 0.0)
+            last_time = self._last_known_times.get(tradingsymbol, 0.0)
+            age_sec = (now - last_time) if last_time > 0.0 else 5.0
+            token = ""
+            try:
+                cache = get_shared_micro_cache()
+                token = cache._by_symbol.get(tradingsymbol) or (cache._by_symbol.get(translated) if translated else "")
+                if last_price <= 0.0 and token and token in cache._cache:
+                    stale_entry = cache._cache[token]
+                    if stale_entry.price > 0.0:
+                        last_price = float(stale_entry.price)
+                        age_sec = stale_entry.age(now)
+            except Exception:
+                pass
+
+            FallbackPolicy.handle_option_stale(
+                symbol=tradingsymbol,
+                token=token or "",
+                last_known_price=last_price,
+                age_seconds=age_sec,
+            )
+        except Exception:
+            pass
 
         return 0.0
 
