@@ -599,14 +599,13 @@ class PositionMonitor:
                                                     f"({health_report.health_score:+.0f}, threats={health_report.threat_reasons}). Killing."
                                                 )
                                                 trend_intact = False
-                                            elif health_report.health_score >= -5.0 and not health_report.real_threat:
+                                            elif trend_intact and health_report.health_score >= -5.0 and not health_report.real_threat:
                                                 health_is_ok = True
-                                                trend_intact = True
                                     except Exception as he_err:
                                         logger.debug(f"Health engine check in inactivity kill-switch: {he_err}")
 
                                 max_stagnation_bars = 6  # 90m max hold for intact trends
-                                if (trend_intact or health_is_ok) and state.entry_bar_count < max_stagnation_bars:
+                                if trend_intact and state.entry_bar_count < max_stagnation_bars:
                                     is_stagnant = False
                                     health_str = f" Health={health_report.health_score:+.0f}" if health_report else ""
                                     logger.info(
@@ -617,7 +616,7 @@ class PositionMonitor:
                                     )
                                 else:
                                     is_stagnant = True
-                                    if (trend_intact or health_is_ok) and state.entry_bar_count >= max_stagnation_bars:
+                                    if trend_intact and state.entry_bar_count >= max_stagnation_bars:
                                         stagnation_detail = (
                                             f"reached max trend extension ({state.entry_bar_count} bars / 90m) without 0.5*ATR advance; "
                                             f"liquidating to stop theta decay"
