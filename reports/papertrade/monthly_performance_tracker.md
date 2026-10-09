@@ -3,7 +3,7 @@
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
 **Current Realized Net P&L:** **🔴 -Rs 23,453.99 (-156.36%)**  
-**Last Updated:** 2026-10-07 16:00:13 IST  
+**Last Updated:** 2026-10-08 16:00:23 IST  
 
 ---
 
@@ -13,10 +13,10 @@
 | :--- | :---: | :---: | :---: |
 | **Net Realized P&L** | **-Rs 23,453.99** | +Rs 5,000 / month | 🔴 |
 | **Month Return %** | **-156.36%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **27** | 20–22 days | In Progress |
-| **Green / Red Days** | **8 Green / 11 Red / 8 BE** | > 65% Green | 29.6% |
+| **Total Trading Days** | **28** | 20–22 days | In Progress |
+| **Green / Red Days** | **8 Green / 11 Red / 9 BE** | > 65% Green | 28.6% |
 | **Total Trades** | **85** | ~3–5 / day | Tracked |
-| **Win Rate** | **44.7%** (38W / 52L) | > 55.0% | ⚠️ Under Review |
+| **Win Rate** | **47.1%** (40W / 52L) | > 55.0% | ⚠️ Under Review |
 | **Profit Factor** | **0.62** | > 1.50 | ⚠️ Under Review |
 | **Gross Profit** | +Rs 33,280.64 | — | Winning Trades |
 | **Gross Loss** | -Rs 53,664.43 | — | Losing Trades |
@@ -54,6 +54,7 @@
 | **2026-10-05** | 2 | 2W / 0L | 100% | +Rs 925 | -Rs 0 | **🟢 +Rs 683.0** | +0.7% | **-Rs 23,404.1** | Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread decayed from 59.29 to 42.35 (+Rs 217.42 net); NIFTY 22800/22950CE spread decayed from 14.67 to 5.65 (+Rs 465.58 net). Note: Host PC network down from 10:41 to 20:54 IST; positions squared off at 15:15 and reconciled via verified exchange Kite closing quotes. |
 | **2026-10-06** | 7 | 2W / 5L | 29% | +Rs 1,510 | -Rs 756 | **🔴 -Rs 49.9** | -0.1% | **-Rs 23,454.0** | Day 11: 7 trades executed (2 Net Green / 5 Losses, 28.6% Net WR). Gross +Rs 754.77 (Wins Rs 1510.33, Losses -Rs 755.56), Net -Rs 49.88 (Breakeven session after Rs 804.65 costs). 1 Target Win (SENSEX 72600CE +Rs 1099.87), 1 Trailed Cost-Lock (BN 55000CE +Rs 43.56), 2 Inactivity Kill Exits (FINNIFTY -Rs 553.67, NIFTY -Rs 67.23), 1 Cost-Lock Scratch (FINNIFTY -Rs 77.44 net), 2 Bear Spreads (SENSEX -Rs 461.88, -Rs 33.09 net). |
 | **2026-10-07** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 23,454.0** | Intraday paper trading session |
+| **2026-10-08** | 0 | 2W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 23,454.0** | Intraday paper trading session |
 
 ---
 

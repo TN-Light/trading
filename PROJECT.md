@@ -56,10 +56,10 @@ Prometheus quantitative execution and telemetry architecture fortified against A
 | # | Name | Scope | Dependencies | Status |
 |---|---|---|---|---|
 | M1 | Prioritized Token-Bucket Rate Limiter | Implement `PrioritizedTokenBucketLimiter` with 3 endpoint buckets (Historical, Quotes, Orders) capped at 85%, 4 priority tiers, lock-free sleeping outside mutex, and integrate into `angelone_fetcher.py` and `angelone_options.py`. | None | DONE |
-| M2 | Unified 50-Token Batch Engine | Implement `BatchMarketDataEngine` with 25ms debounce coalescer, up to 50 tokens per `getMarketData("FULL")` call, multi-segment NFO/BFO partitioning, and refactor `get_real_premium` to use batch data. | M1 | IN_PROGRESS |
-| M3 | Shared Non-Blocking Price Micro-Cache & Non-Hallucinatory Fallback | Implement `SharedPriceMicroCache` (750ms TTL) thread-safe read-optimized cache, wire into `PositionMonitor`, `LiveBridge`, and `PositionHealthEngine`; enforce spot secondary feed and option trailing freeze with `[STALE_DATA_ALERT]`. | M2 | PLANNED |
+| M2 | Unified 50-Token Batch Engine | Implement `BatchMarketDataEngine` with 25ms debounce coalescer, up to 50 tokens per `getMarketData("FULL")` call, multi-segment NFO/BFO partitioning, and refactor `get_real_premium` to use batch data. | M1 | DONE |
+| M3 | Shared Non-Blocking Price Micro-Cache & Non-Hallucinatory Fallback | Implement `SharedPriceMicroCache` (750ms TTL) thread-safe read-optimized cache, wire into `PositionMonitor`, `LiveBridge`, and `PositionHealthEngine`; enforce spot secondary feed and option trailing freeze with `[STALE_DATA_ALERT]`. | M2 | DONE |
 | M4 | SmartStream WebSocket Hybrid Streamer & Hardened Failover | Implement `SmartStreamHybridClient` fixing SDK bugs (inverted depth, ping_timeout, reconnect loop, dynamic JWT), streaming active positions to micro-cache with 1,500ms automatic REST failover. | M3 | PLANNED |
-| M5 | Final Milestone: 100% E2E Test Suite Pass & Adversarial Hardening | Phase 1: Pass 100% of E2E test suite (Tiers 1-4) published by E2E Testing Track. Phase 2: Tier 5 white-box adversarial coverage hardening and full repository test verification (510+ tests). | M1, M2, M3, M4, E2E Track | PLANNED |
+| M5 | Final Milestone: 100% E2E Test Suite Pass & Adversarial Hardening | Phase 1: Pass 100% of E2E test suite (Tiers 1-4) published by E2E Testing Track. Phase 2: Tier 5 white-box adversarial coverage hardening and full repository test verification (644/644 unit + 84/84 pipeline passed, 0 failures, 0 regressions). | M1, M2, M3, M4, E2E Track | DONE |
 
 ## E2E Testing Track Scope
 Independent parallel track deriving tests from requirements:
