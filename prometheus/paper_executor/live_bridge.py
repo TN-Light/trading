@@ -296,6 +296,7 @@ class LivePaperCapture:
         # The wrapped process_bar (below) emits a callback per close.
         self._on_close_listeners = []
         self._today_closed_instruments = set()
+        self._today_stopped_out_symbol_directions = set()
 
         # Construct the recorder (CSV+SQLite) directory-safe.
         Path(config.csv_path).parent.mkdir(parents=True, exist_ok=True)
@@ -387,6 +388,14 @@ class LivePaperCapture:
             return closed
         self._engine.process_bar = _wrapped_process_bar
 
+        # Post-Exit Signal Tracking (Shadow Post-Exit Observer)
+        try:
+            from prometheus.papertrade.post_exit_tracker import PostExitTracker
+            self.post_exit_tracker = PostExitTracker(recorder=self._engine.recorder)
+        except Exception as pe_init_err:
+            logger.debug(f"[PaperCapture] PostExitTracker init failed: {pe_init_err}")
+            self.post_exit_tracker = None
+
         logger.info(
             f"[PaperCapture] initialized "
             f"enabled={self.enabled} csv={config.csv_path} "
@@ -424,6 +433,15 @@ class LivePaperCapture:
             notif = self._build_signal_notification(refined_signal)
         except Exception as e:
             logger.warning(f"[PaperCapture] signal convert failed: {e}")
+            return None
+
+        # Symbol-Level Lockout on Stop-Outs to Eliminate Martingale Ladders
+        sig_symbol = notif.symbol or refined_signal.get("symbol", "")
+        sig_direction = self._get_signal_trade_type(refined_signal, notif)
+        if (sig_symbol, sig_direction) in self._today_stopped_out_symbol_directions:
+            logger.info(
+                f"Skipping re-entry on {sig_symbol} ({sig_direction}): already suffered an intraday stop-out today"
+            )
             return None
 
         # Anti-Overtrading Guard: Never open concurrent duplicate positions on the same symbol
@@ -743,13 +761,78 @@ class LivePaperCapture:
         except Exception as e:
             logger.warning(f"[PaperCapture] _alert_position_closed failed: {e}")
 
+    def _get_trade_type(self, trade) -> str:
+        if hasattr(trade, "trade_type") and trade.trade_type:
+            return str(trade.trade_type)
+        is_spread = "/" in (trade.instrument or "") or "SPREAD" in getattr(trade, "strategy", "").upper()
+        if is_spread:
+            inst_u = (trade.instrument or "").upper()
+            strat_u = str(getattr(trade, "strategy", "")).upper()
+            if "PE" in inst_u or "PUT" in strat_u:
+                return "BULL_PUT_SPREAD"
+            if "CE" in inst_u or "CALL" in strat_u:
+                return "BEAR_CALL_SPREAD"
+            return "BEAR_CALL_SPREAD" if getattr(trade.direction, "value", str(trade.direction)).upper() == "SHORT" else "BULL_PUT_SPREAD"
+        opt = "CE" if (trade.instrument and trade.instrument.endswith("CE")) else ("PE" if (trade.instrument and trade.instrument.endswith("PE")) else None)
+        if opt:
+            return f"BUY_{opt}"
+        return "BUY_CE" if getattr(trade.direction, "value", str(trade.direction)).upper() == "LONG" else "BUY_PE"
+
+    def _get_signal_trade_type(self, refined_signal: dict, notif=None) -> str:
+        if refined_signal and refined_signal.get("trade_type"):
+            return str(refined_signal["trade_type"])
+        spread_type = refined_signal.get("spread_type") if refined_signal else None
+        if spread_type:
+            return str(spread_type)
+        action = str(refined_signal.get("action", "") if refined_signal else "").upper()
+        if ("BEAR" in action and "SPREAD" in action) or action == "SELL_CALL_SPREAD":
+            return "BEAR_CALL_SPREAD"
+        if ("BULL" in action and "SPREAD" in action) or action == "SELL_PUT_SPREAD":
+            return "BULL_PUT_SPREAD"
+        if "SPREAD" in str(refined_signal.get("strategy", "") if refined_signal else "").upper() or (notif and "/" in (notif.instrument or "")):
+            inst = ((notif.instrument if notif else "") or (refined_signal.get("instrument", "") if refined_signal else "")).upper()
+            if "PE" in inst or "PUT" in action:
+                return "BULL_PUT_SPREAD"
+            if "CE" in inst or "CALL" in action:
+                return "BEAR_CALL_SPREAD"
+            if notif and getattr(notif.direction, "value", str(notif.direction)).upper() == "SHORT":
+                return "BEAR_CALL_SPREAD"
+            return "BULL_PUT_SPREAD"
+        if action in ("BUY_CE", "BUY_PE"):
+            return action
+        opt_type = (refined_signal.get("option_type") if refined_signal else None) or (notif.option_type if notif else None)
+        if opt_type:
+            return f"BUY_{opt_type.upper()}"
+        if notif and notif.instrument:
+            if notif.instrument.endswith("CE"):
+                return "BUY_CE"
+            if notif.instrument.endswith("PE"):
+                return "BUY_PE"
+        if notif:
+            return "BUY_CE" if getattr(notif.direction, "value", str(notif.direction)).upper() == "LONG" else "BUY_PE"
+        return "BUY_CE"
+
     def _on_trade_closed(self, trade) -> None:
         """Single chokepoint invoked by the wrapped process_bar on every
         closed PaperTrade. Updates in-memory listeners and pushes telegram.
         """
         if trade.instrument:
             self._today_closed_instruments.add(trade.instrument)
+
+        raw_reason = trade.exit_reason.value if hasattr(trade.exit_reason, "value") else str(trade.exit_reason)
+        if str(raw_reason).lower() == "stop_loss":
+            trade_type = getattr(trade, "trade_type", None) or self._get_trade_type(trade)
+            self._today_stopped_out_symbol_directions.add((trade.symbol, trade_type))
+            logger.info(
+                f"[PaperCapture] Stop-out recorded for {trade.symbol} ({trade_type}) - locked out from re-entry today"
+            )
+
         self._alert_position_closed(trade)
+        if getattr(self, "post_exit_tracker", None):
+            try:
+                self.post_exit_tracker.register_closed_trade(trade)
+            except Exception as pe_err:
+                logger.debug(f"[PaperCapture] post_exit_tracker register failed: {pe_err}")
         for listener in self._on_close_listeners:
             try:
                 listener(trade)
@@ -760,13 +843,51 @@ class LivePaperCapture:
         """Register an additional callback invoked after every close."""
         self._on_close_listeners.append(callback)
 
-    def on_bar(self, symbol: str, bar: Dict[str, Any],
+    def poll_open_positions(self) -> None:
+        """Fast periodic poll (e.g. every 15-30s) to update LTPs, advance real-time trailing stops,
+        and trigger 5-minute heartbeat status alerts for all open paper positions."""
+        if not self.enabled or not self._tracker:
+            return
+        for tid, pos in list(self._tracker.open_positions.items()):
+            try:
+                ltp = 0.0
+                if "/" in (pos.instrument or ""):
+                    parts = pos.instrument.split("/")
+                    if len(parts) == 2:
+                        try:
+                            s_ltp = float(self._feed.get_ltp(parts[0].strip()) or 0.0)
+                            l_ltp = float(self._feed.get_ltp(parts[1].strip()) or 0.0)
+                            if s_ltp > 0 or l_ltp > 0:
+                                ltp = round(max(0.0, s_ltp - l_ltp), 2)
+                        except Exception:
+                            ltp = 0.0
+                    if ltp <= 0.0:
+                        try:
+                            ltp = float(self._feed.get_ltp(pos.instrument) or 0.0)
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        ltp = float(self._feed.get_ltp(pos.instrument) or 0.0)
+                    except Exception:
+                        ltp = 0.0
+
+                if ltp > 0:
+                    pos.current_price = ltp
+                    if self._tracker.enable_trailing:
+                        self._tracker._maybe_advance_trailing_stop(pos, ltp)
+
+                self._tracker.check_heartbeat(pos, current_price=ltp if ltp > 0 else pos.entry_price)
+            except Exception as e:
+                logger.debug(f"[PaperCapture] poll_open_positions error for {tid}: {e}")
+
+    def on_bar(self, symbol: str, bar: Any,
                is_session_end: bool = False, is_square_off: bool = False):
         """Feed a closed OHLC bar to the engine for exit evaluation.
 
         Args:
             symbol: display symbol ("NIFTY 50" etc).
-            bar: dict with at least {timestamp, open, high, low, close, volume?}.
+            bar: dict or TradeSnapshot with {timestamp, open, high, low, close, volume?}.
             is_session_end: True if this is the last bar of the trading day.
             is_square_off: True if intraday square-off window (>= 15:15 IST)
                 has been reached. Caller decides this (prometheus.main drives
@@ -792,27 +913,63 @@ class LivePaperCapture:
         if not self.enabled:
             return
         try:
-            ts = bar.get("timestamp")
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts)
-            elif ts is None:
-                ts = datetime.now(IST)
-            snap = TradeSnapshot(
-                timestamp=ts.replace(tzinfo=None) if ts.tzinfo else ts,
-                symbol=symbol,
-                instrument=bar.get("instrument", ""),
-                open=float(bar.get("open", 0.0)),
-                high=float(bar.get("high", 0.0)),
-                low=float(bar.get("low", 0.0)),
-                close=float(bar.get("close", 0.0)),
-                volume=float(bar.get("volume", 0.0) or 0.0),
-                bar_interval=str(bar.get("interval", "15minute")),
-            )
+            if isinstance(bar, TradeSnapshot):
+                snap = bar
+            elif isinstance(bar, dict):
+                ts = bar.get("timestamp")
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    except Exception:
+                        ts = pd.to_datetime(ts).to_pydatetime()
+                elif hasattr(ts, "to_pydatetime"):
+                    ts = ts.to_pydatetime()
+                elif ts is None:
+                    ts = datetime.now(IST)
+                snap = TradeSnapshot(
+                    timestamp=ts,
+                    symbol=symbol,
+                    instrument=bar.get("instrument", ""),
+                    open=float(bar.get("open", 0.0)),
+                    high=float(bar.get("high", 0.0)),
+                    low=float(bar.get("low", 0.0)),
+                    close=float(bar.get("close", 0.0)),
+                    volume=float(bar.get("volume", 0.0) or 0.0),
+                    bar_interval=str(bar.get("interval", "15minute")),
+                )
+            else:
+                ts = getattr(bar, "timestamp", None)
+                if isinstance(ts, str):
+                    try:
+                        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    except Exception:
+                        ts = pd.to_datetime(ts).to_pydatetime()
+                elif hasattr(ts, "to_pydatetime"):
+                    ts = ts.to_pydatetime()
+                elif ts is None:
+                    ts = datetime.now(IST)
+                snap = TradeSnapshot(
+                    timestamp=ts,
+                    symbol=symbol,
+                    instrument=getattr(bar, "instrument", ""),
+                    open=float(getattr(bar, "open", 0.0) or 0.0),
+                    high=float(getattr(bar, "high", 0.0) or 0.0),
+                    low=float(getattr(bar, "low", 0.0) or 0.0),
+                    close=float(getattr(bar, "close", 0.0) or 0.0),
+                    volume=float(getattr(bar, "volume", 0.0) or 0.0),
+                    bar_interval=str(getattr(bar, "interval", "15minute")),
+                )
             self._engine.process_bar(
                 snap,
                 is_session_end=is_session_end,
                 is_square_off=is_square_off,
             )
+            if getattr(self, "post_exit_tracker", None):
+                try:
+                    self.post_exit_tracker.on_bar(snap)
+                    self.post_exit_tracker.poll_micro_cache()
+                except Exception:
+                    pass
         except Exception as e:
             logger.error(f"[PaperCapture] on_bar error for {symbol}: {e}")
 

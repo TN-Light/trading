@@ -65,12 +65,13 @@ class MicroCacheEntry:
 class FallbackPolicy:
     """Contract 4 Implementation.
     Non-hallucinatory fallback policy enforcing the Zero-Hallucination Mandate:
-      - Emits structured [STALE_DATA_ALERT] warnings.
+      - Emits structured [STALE_DATA_ALERT] warnings (throttled to 60s cooldown per symbol).
       - Freezes option trailing stop ratchets at last authenticated price.
       - Resolves verified secondary spot feeds without price fabrication.
     """
 
     stale_alerts: List[Dict[str, Any]] = []
+    _last_logged_time: Dict[str, float] = {}
     _lock = threading.Lock()
 
     @classmethod
@@ -78,6 +79,7 @@ class FallbackPolicy:
         """Reset historical alert records."""
         with cls._lock:
             cls.stale_alerts.clear()
+            cls._last_logged_time.clear()
 
     @classmethod
     def handle_option_stale(
@@ -90,22 +92,29 @@ class FallbackPolicy:
         """
         Log [STALE_DATA_ALERT], freeze trailing ratchets, and preserve hard exchange SL.
         Zero synthetic prices permitted.
+        Logs warning at most once per 60 seconds per symbol to prevent console flooding.
         """
+        now_mono = time.monotonic()
         alert = {
             "symbol": symbol,
             "token": token,
             "last_known_price": float(last_known_price),
             "age_seconds": float(age_seconds),
-            "timestamp": time.monotonic(),
+            "timestamp": now_mono,
         }
         with cls._lock:
             cls.stale_alerts.append(alert)
+            last_logged = cls._last_logged_time.get(symbol, 0.0)
+            should_log = (now_mono - last_logged) >= 60.0
+            if should_log:
+                cls._last_logged_time[symbol] = now_mono
 
-        logger.warning(
-            f"[STALE_DATA_ALERT] Quote stale for {symbol} (token {token}, age {age_seconds:.1f}s). "
-            f"Freezing trailing ratchet at last known LTP {last_known_price:.2f}. "
-            f"Zero synthetic prices permitted."
-        )
+        if should_log:
+            logger.warning(
+                f"[STALE_DATA_ALERT] Quote stale for {symbol} (token {token}, age {age_seconds:.1f}s). "
+                f"Freezing trailing ratchet at last known LTP {last_known_price:.2f}. "
+                f"Zero synthetic prices permitted."
+            )
 
     _secondary_spot_feed: Optional[Callable[[str], Optional[float]]] = None
 
@@ -136,21 +145,28 @@ class FallbackPolicy:
             err_msg = "no secondary feed registered"
 
         # Non-hallucinatory fallback: emit [STALE_DATA_ALERT] and return None
+        now_mono = time.monotonic()
         alert = {
             "symbol": symbol,
             "token": "SPOT",
             "last_known_price": 0.0,
             "age_seconds": 0.0,
             "type": alert_type,
-            "timestamp": time.monotonic(),
+            "timestamp": now_mono,
         }
+        spot_log_key = f"spot_{symbol}"
         with cls._lock:
             cls.stale_alerts.append(alert)
+            last_logged = cls._last_logged_time.get(spot_log_key, 0.0)
+            should_log = (now_mono - last_logged) >= 60.0
+            if should_log:
+                cls._last_logged_time[spot_log_key] = now_mono
 
-        logger.warning(
-            f"[STALE_DATA_ALERT] Secondary spot price unavailable for {symbol} ({err_msg}). "
-            f"Zero synthetic prices permitted."
-        )
+        if should_log:
+            logger.warning(
+                f"[STALE_DATA_ALERT] Secondary spot price unavailable for {symbol} ({err_msg}). "
+                f"Zero synthetic prices permitted."
+            )
         return None
 
 

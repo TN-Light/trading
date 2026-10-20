@@ -47,6 +47,7 @@ class TrailingState:
     # 5-stage flags (exactly match backtest engine.py:939-989)
     breakeven_set: bool = False
     half_risk_set: bool = False
+    trailing_stage0_5: bool = False     # Stage 0.5 (+0.35R profit lock at >=0.65R)
     trailing_activated: bool = False    # Stage 1
     trailing_stage2: bool = False       # Stage 2
     trailing_stage3: bool = False       # Stage 3
@@ -112,12 +113,25 @@ class TrailingState:
 
     def current_stage(self) -> str:
         """Human-readable current trailing stage."""
+        is_credit = (
+            getattr(self, "strategy_type", "") == "credit_spread"
+            or "credit_spread" in getattr(self, "strategy", "").lower()
+            or "spread" in getattr(self, "strategy", "").lower()
+        )
+        if is_credit:
+            if self.trailing_stage2:
+                return "SPREAD LOCK 50%"
+            elif self.breakeven_set:
+                return "SPREAD BREAKEVEN"
+            return "INITIAL"
         if self.trailing_stage3:
-            return "RUNNER (70%+)"
+            return "RUNNER (75%+)"
         elif self.trailing_stage2:
-            return "LOCK 50%"
+            return "LOCK 65%"
         elif self.trailing_activated:
-            return "LOCK 20%"
+            return "LOCK 50%"
+        elif getattr(self, "trailing_stage0_5", False):
+            return "LOCK 35%"
         elif self.breakeven_set:
             return "BREAKEVEN"
         return "INITIAL"
@@ -218,6 +232,10 @@ class PositionMonitor:
     def active_count(self) -> int:
         return len(self._positions)
 
+    @property
+    def positions(self) -> Dict[str, TrailingState]:
+        return self._positions
+
     def get_positions(self) -> Dict[str, TrailingState]:
         with self._lock:
             return self._positions.copy()
@@ -271,38 +289,53 @@ class PositionMonitor:
                             state.tradingsymbol, exchange=pos_exchange
                         )
                         if ltp <= 0:
-                            # Track consecutive LTP failures per position
-                            self._ltp_fail_counts[pid] = self._ltp_fail_counts.get(pid, 0) + 1
-                            now = time.monotonic()
-                            last_ok = self._last_successful_ltp_time.get(pid, 0.0)
-                            age = (now - last_ok) if last_ok > 0.0 else float(self._ltp_fail_counts[pid] * self.poll_interval)
-                            last_price = getattr(state, "last_ltp", 0.0) or getattr(state, "premium_hwm", 0.0) or getattr(state, "entry_premium", 0.0)
-                            token = getattr(state, "token", "") or ""
-                            if not token:
-                                try:
-                                    from prometheus.data.price_micro_cache import get_shared_micro_cache
-                                    token = get_shared_micro_cache()._by_symbol.get(state.tradingsymbol, "")
-                                except Exception:
-                                    pass
+                            # Non-Blocking Fallback: Check SharedPriceMicroCache before skipping tick
+                            cached_price = 0.0
                             try:
-                                from prometheus.data.price_micro_cache import FallbackPolicy
-                                FallbackPolicy.handle_option_stale(
-                                    symbol=state.tradingsymbol or state.symbol or str(pid),
-                                    token=token,
-                                    last_known_price=float(last_price),
-                                    age_seconds=float(age),
-                                )
+                                from prometheus.data.price_micro_cache import get_shared_micro_cache
+                                cache = get_shared_micro_cache()
+                                c_entry = cache.get(state.tradingsymbol) or cache.get_by_symbol(state.tradingsymbol)
+                                if c_entry and c_entry.price > 0 and c_entry.age() < 5.0:
+                                    cached_price = float(c_entry.price)
                             except Exception:
                                 pass
 
-                            if self._ltp_fail_counts[pid] >= 20 and not self._ltp_alert_sent.get(pid, False):
-                                logger.warning(
-                                    f"PositionMonitor: LTP unavailable for {pid} "
-                                    f"({self._ltp_fail_counts[pid]} consecutive failures) — "
-                                    f"trailing stops NOT updating"
-                                )
-                                self._ltp_alert_sent[pid] = True
-                            continue
+                            if cached_price > 0:
+                                # Safe fallback: evaluate tick with authenticated cached quote
+                                ltp = cached_price
+                            else:
+                                # Track consecutive LTP failures per position
+                                self._ltp_fail_counts[pid] = self._ltp_fail_counts.get(pid, 0) + 1
+                                now = time.monotonic()
+                                last_ok = self._last_successful_ltp_time.get(pid, 0.0)
+                                age = (now - last_ok) if last_ok > 0.0 else float(self._ltp_fail_counts[pid] * self.poll_interval)
+                                last_price = getattr(state, "last_ltp", 0.0) or getattr(state, "premium_hwm", 0.0) or getattr(state, "entry_premium", 0.0)
+                                token = getattr(state, "token", "") or ""
+                                if not token:
+                                    try:
+                                        from prometheus.data.price_micro_cache import get_shared_micro_cache
+                                        token = get_shared_micro_cache()._by_symbol.get(state.tradingsymbol, "")
+                                    except Exception:
+                                        pass
+                                try:
+                                    from prometheus.data.price_micro_cache import FallbackPolicy
+                                    FallbackPolicy.handle_option_stale(
+                                        symbol=state.tradingsymbol or state.symbol or str(pid),
+                                        token=token,
+                                        last_known_price=float(last_price),
+                                        age_seconds=float(age),
+                                    )
+                                except Exception:
+                                    pass
+
+                                if self._ltp_fail_counts[pid] >= 20 and not self._ltp_alert_sent.get(pid, False):
+                                    logger.warning(
+                                        f"PositionMonitor: LTP unavailable for {pid} "
+                                        f"({self._ltp_fail_counts[pid]} consecutive failures) — "
+                                        f"trailing stops NOT updating"
+                                    )
+                                    self._ltp_alert_sent[pid] = True
+                                continue
                         # Reset failure counter on success
                         self._ltp_fail_counts[pid] = 0
                         self._last_successful_ltp_time[pid] = time.monotonic()
@@ -362,14 +395,14 @@ class PositionMonitor:
         if is_credit:
             net_credit = state.entry_premium
             target_decay = getattr(state, "target_decay_price", 0.0) or (state.target if 0 < state.target < net_credit else net_credit * 0.30)
-            breakeven_decay = getattr(state, "breakeven_decay_price", 0.0) or (net_credit * 0.50)
             hard_sl = getattr(state, "hard_sl_price", 0.0) or (state.initial_sl if state.initial_sl > net_credit else net_credit * 1.50)
 
-            # 1. Hard Stop Loss: spread jumped above 1.5x initial credit
-            if current_price >= hard_sl:
+            # 1. Hard Stop Loss: spread jumped above initial credit or hard SL
+            effective_sl = state.current_sl if state.current_sl > 0 else hard_sl
+            if current_price >= effective_sl and not state.breakeven_set:
                 logger.warning(
                     f"[MONITOR] Credit Spread Hard SL: {state.position_id} "
-                    f"Spread LTP={current_price:.2f} >= Hard SL={hard_sl:.2f} (Credit={net_credit:.2f})"
+                    f"Spread LTP={current_price:.2f} >= Hard SL={effective_sl:.2f} (Credit={net_credit:.2f})"
                 )
                 if self._on_exit:
                     self._on_exit(state.position_id, current_price, "stop_loss_credit_spread")
@@ -378,29 +411,76 @@ class PositionMonitor:
             # 2. Target Decay: 70% of credit decayed (e.g. spread dropped to 30% of entry)
             if current_price <= target_decay and target_decay > 0:
                 logger.info(
-                    f"[MONITOR] Credit Spread Target Hit (70% Decay): {state.position_id} "
+                    f"[MONITOR] Credit Spread Target Hit (Decay Target): {state.position_id} "
                     f"Spread LTP={current_price:.2f} <= Target={target_decay:.2f} (Credit={net_credit:.2f})"
                 )
                 if self._on_exit:
                     self._on_exit(state.position_id, current_price, "target_decay_credit_spread")
                 return
 
-            # 3. Breakeven Lock: 50% of credit decayed -> ratchet SL down to protect gain
-            if current_price <= breakeven_decay and not state.breakeven_set:
-                new_sl = net_credit * 0.85  # guaranteed 15% profit floor
-                state.current_sl = new_sl
-                state.breakeven_set = True
-                logger.info(
-                    f"[TRAIL] Credit Spread Breakeven Lock: {state.position_id} "
-                    f"SL {old_sl:.2f} -> {new_sl:.2f} (Spread LTP={current_price:.2f})"
-                )
-                if self._on_trailing_update:
-                    self._on_trailing_update(state, old_sl, current_price)
+            # Multi-leg spreads execute 2 legs, paying double brokerage and statutory fees
+            sym_root = (getattr(state, "symbol", "") or "").upper()
+            qty = int(getattr(state, "quantity", 0) or 0)
+            is_fin = ("FIN" in sym_root) or ("FINNIFTY" in sym_root)
+            if "SENSEX" in sym_root or "BSX" in sym_root:
+                cost_buffer_pts = 8.50 if (qty <= 20 or qty in (10, 1)) else 6.50
+            elif "BANK" in sym_root:
+                cost_buffer_pts = 8.50 if (qty <= 30 or qty in (15, 1)) else 5.50
+            elif is_fin:
+                cost_buffer_pts = 4.20 if (qty <= 65 or qty in (40, 1)) else 3.20
+            else:
+                cost_buffer_pts = 2.80 if (qty <= 75 or qty in (25, 1)) else 2.20
 
-            # 4. If current price crosses above ratcheted SL
+            decay_pts = net_credit - current_price
+            decay_pct = decay_pts / max(net_credit, 1e-4)
+
+            # 3. Stage 2 Profit Lock: >= 45% credit decayed -> ratchet SL down to 50% of credit (locks 50% profit!)
+            if decay_pct >= 0.45 and not state.trailing_stage2:
+                new_sl = round(net_credit * 0.50, 2)
+                if new_sl < state.current_sl or state.current_sl <= 0.0 or not state.breakeven_set:
+                    old_sl = state.current_sl
+                    state.current_sl = new_sl
+                    state.breakeven_set = True
+                    state.trailing_stage2 = True
+                    logger.info(
+                        f"[TRAIL] Credit Spread Lock 50% Profit: {state.position_id} "
+                        f"SL {old_sl:.2f} -> {new_sl:.2f} (Spread LTP={current_price:.2f}, Decay={decay_pct*100:.1f}%)"
+                    )
+                    self._modify_broker_sl(state)
+                    if self._on_trailing_update:
+                        try:
+                            self._on_trailing_update(state, old_sl, current_price)
+                        except TypeError:
+                            self._on_trailing_update(state, old_sl)
+                    if self._on_state_changed:
+                        self._on_state_changed(state)
+
+            # 4. Stage 1 Breakeven Lock: >= 30% credit decayed -> ratchet SL down to Entry - Cost Buffer
+            elif decay_pct >= 0.30 and not state.breakeven_set:
+                be_sl = round(net_credit - cost_buffer_pts, 2)
+                new_sl = round(min(be_sl, net_credit * 0.85), 2)
+                new_sl = max(0.05, new_sl)
+                if new_sl < state.current_sl or state.current_sl <= 0.0:
+                    old_sl = state.current_sl
+                    state.current_sl = new_sl
+                    state.breakeven_set = True
+                    logger.info(
+                        f"[TRAIL] Credit Spread Breakeven Lock: {state.position_id} "
+                        f"SL {old_sl:.2f} -> {new_sl:.2f} (Spread LTP={current_price:.2f}, Decay={decay_pct*100:.1f}%)"
+                    )
+                    self._modify_broker_sl(state)
+                    if self._on_trailing_update:
+                        try:
+                            self._on_trailing_update(state, old_sl, current_price)
+                        except TypeError:
+                            self._on_trailing_update(state, old_sl)
+                    if self._on_state_changed:
+                        self._on_state_changed(state)
+
+            # 5. If current price crosses above ratcheted SL
             if state.breakeven_set and current_price >= state.current_sl:
                 logger.info(
-                    f"[MONITOR] Credit Spread Breakeven SL Hit: {state.position_id} "
+                    f"[MONITOR] Credit Spread Ratcheted SL Hit: {state.position_id} "
                     f"Spread LTP={current_price:.2f} >= SL={state.current_sl:.2f}"
                 )
                 if self._on_exit:
@@ -541,7 +621,15 @@ class PositionMonitor:
         # Intelligent Trend-Aware Guard: If the underlying trend remains intact (consolidation flag),
         # position hold is extended up to 6 bars (90 min) to let runners develop, while adverse reversals
         # are killed immediately at 3 bars to eliminate theta decay.
-        if state.trade_mode == "intraday" and state.entry_bar_count >= 3 and not state.breakeven_set:
+        is_credit = (
+            getattr(state, "is_credit", False)
+            or getattr(state, "is_spread", False)
+            or getattr(state, "strategy_type", "") == "credit_spread"
+            or "credit_spread" in getattr(state, "strategy", "").lower()
+            or "spread" in getattr(state, "strategy", "").lower()
+            or "/" in getattr(state, "instrument", "")
+        )
+        if not is_credit and state.trade_mode == "intraday" and state.entry_bar_count >= 3 and not state.breakeven_set:
             is_stagnant = False
             stagnation_detail = ""
             spot_checked = False
@@ -690,15 +778,16 @@ class PositionMonitor:
         zgl_adverse = bool(zgl is not None and zgl > 0 and spot > 0 and ((spot < zgl) if is_bullish else (spot > zgl)))
         zgl_favorable = bool(zgl is not None and zgl > 0 and spot > 0 and ((spot > zgl) if is_bullish else (spot < zgl)))
 
+        # Adhere to GEMINI.md Rule 1: do not treat commitment_ratio == 0.0 or net_gex == 0.0 as weak edge if keys are missing from feed
         is_weak_edge = bool(
             health_report is not None
             and (
                 health_score <= -10.0
                 or getattr(health_report, "suggested_action", "") in ("TIGHTEN_SL", "PRE_SL_BAILOUT")
                 or getattr(health_report, "real_threat", False)
-                or (health_score < 0.0 and comm_ratio < 0.15)
+                or (health_score < 0.0 and 0.0 < comm_ratio < 0.15)
                 or (zgl_adverse and health_score <= 0.0)
-                or (is_bullish and net_gex_cr > 2.0 and health_score <= 0.0)
+                or (is_bullish and net_gex != 0.0 and net_gex_cr > 2.0 and health_score <= 0.0)
             )
         )
         is_strong_edge = bool(
@@ -716,17 +805,17 @@ class PositionMonitor:
             # Stage 0: Progressive Ratchet (Tier C Micro-Lock / Tier S/B Noise Floor Breakeven / Half-Risk Cut)
             sym_root = (getattr(state, "symbol", "") or "").upper()
             qty = int(getattr(state, "quantity", 0) or 0)
-            if "SENSEX" in sym_root:
-                cost_buffer_pts = 3.0 if qty == 20 else (5.0 if (qty in (10, 1) or qty > 0) else 3.0)
+            if "SENSEX" in sym_root or "BSX" in sym_root:
+                cost_buffer_pts = 3.0 if qty > 20 else (5.0 if qty in (10, 1) else 4.50)
                 min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
             elif "BANK" in sym_root:
-                cost_buffer_pts = 1.9 if qty == 30 else (4.50 if (qty in (15, 1) or qty > 0) else 1.9)
+                cost_buffer_pts = 5.20 if (qty <= 30 or qty in (15, 1)) else 3.50
                 min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
             elif "FINNIFTY" in sym_root:
-                cost_buffer_pts = 1.8
+                cost_buffer_pts = 2.20 if (qty <= 65 or qty in (40, 1)) else 1.80
                 min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
             else:
-                cost_buffer_pts = 0.9 if qty in (50, 65, 75) else (1.5 if (qty in (25, 1) or qty > 0) else 0.9)
+                cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
                 min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
 
             if getattr(state, "low_vix_mode", False):
@@ -797,50 +886,68 @@ class PositionMonitor:
                         f"SL {old_sl:.2f} -> {half_risk_sl:.2f} (LTP={price_for_trail:.2f}, Entry={entry:.2f})"
                     )
 
-        elif not state.trailing_activated:
-            # Stage 1: Lock +8% profit at +18% gain (+14% in Low-VIX mode)
-            s1_pct = 1.14 if state.low_vix_mode else 1.18
-            s1_trigger = min(entry + rd * 1.0, entry * s1_pct)
-            if price_for_trail >= s1_trigger:
-                new_sl = round(max(entry * 1.08, entry + rd * 0.20), 2)
-                if new_sl > state.current_sl:
-                    state.current_sl = new_sl
-                    state.trailing_activated = True
-                    stage_changed = True
-                    logger.info(
-                        f"[TRAIL] {state.position_id} Stage 1 LOCK +8%: "
-                        f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
-                    )
+        elif not state.trailing_activated and price_for_trail >= (min(entry + rd * 1.0, entry * 1.14) if state.low_vix_mode else (entry + rd * 1.0)):
+            # Stage 1: Lock +0.50R profit at >= 1.0R gain (+14% in Low-VIX mode locks +8%)
+            lock_pct = 1.08
+            lock_r = 0.20 if state.low_vix_mode else 0.50
+            new_sl = round(max(entry * lock_pct if state.low_vix_mode else 0.0, entry + rd * lock_r), 2)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                state.trailing_stage0_5 = True
+                state.trailing_activated = True
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 1 LOCK: "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
+                )
+
+        elif not getattr(state, "trailing_stage0_5", False) and not state.trailing_activated and not state.trailing_stage2 and not state.trailing_stage3 and price_for_trail >= (entry + rd * 0.65):
+            # Stage 0.5: Lock +0.35R profit at >= 0.65R gain (bridge dead-zone)
+            s05_trigger = entry + rd * 0.65
+            new_sl = round(entry + rd * 0.35, 2)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                state.trailing_stage0_5 = True
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 0.5 LOCK +0.35R: "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f}, gain=+{price_for_trail - entry:.2f} pts >= 0.65R)"
+                )
 
         elif not state.trailing_stage2:
-            # Stage 2: Lock +16% profit at +25% gain (+18% in Low-VIX mode locks +14%)
+            # Stage 2: Lock +0.65R profit at >= 1.5R gain (+18% in Low-VIX mode)
             s2_pct = 1.18 if state.low_vix_mode else 1.25
             lock_pct = 1.14 if state.low_vix_mode else 1.16
             s2_trigger = min(entry + rd * 1.5, entry * s2_pct)
             if price_for_trail >= s2_trigger:
-                new_sl = round(max(entry * lock_pct, entry + rd * 0.50), 2)
+                new_sl = round(max(entry * lock_pct, entry + rd * 0.65), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
+                    state.trailing_stage0_5 = True
+                    state.trailing_activated = True
                     state.trailing_stage2 = True
                     stage_changed = True
                     logger.info(
-                        f"[TRAIL] {state.position_id} Stage 2 LOCK +{int((lock_pct-1)*100)}%: "
+                        f"[TRAIL] {state.position_id} Stage 2 LOCK +0.65R: "
                         f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
                     )
 
         elif not state.trailing_stage3:
-            # Stage 3: Lock +24% profit at +32% gain, begin runner (+22% in Low-VIX mode)
+            # Stage 3: Lock +0.75R profit at >= 2.0R gain, begin runner (+22% in Low-VIX mode)
             s3_pct = 1.22 if state.low_vix_mode else 1.32
             lock_pct = 1.18 if state.low_vix_mode else 1.24
             s3_trigger = min(entry + rd * 2.0, entry * s3_pct)
             if price_for_trail >= s3_trigger:
-                new_sl = round(max(entry * lock_pct, entry + rd * 0.70), 2)
+                new_sl = round(max(entry * lock_pct, entry + rd * 0.75), 2)
                 if new_sl > state.current_sl:
                     state.current_sl = new_sl
+                    state.trailing_stage0_5 = True
+                    state.trailing_activated = True
+                    state.trailing_stage2 = True
                     state.trailing_stage3 = True
                     stage_changed = True
                     logger.info(
-                        f"[TRAIL] {state.position_id} Stage 3 RUNNER (+{int((lock_pct-1)*100)}% Lock): "
+                        f"[TRAIL] {state.position_id} Stage 3 RUNNER (+0.75R Lock): "
                         f"SL {old_sl:.2f} -> {new_sl:.2f}, HWM={price_for_trail:.2f}"
                     )
 

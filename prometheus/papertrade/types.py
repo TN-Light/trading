@@ -93,6 +93,26 @@ class PaperTrade:
     tier: str = ""
     entry_spot: float = 0.0
     target_gain_pts: float = 0.0
+    trade_type: str = ""
+
+    def __post_init__(self):
+        if not self.trade_type:
+            is_spread = "/" in (self.instrument or "") or "SPREAD" in getattr(self, "strategy", "").upper()
+            if is_spread:
+                inst_u = (self.instrument or "").upper()
+                strat_u = str(getattr(self, "strategy", "")).upper()
+                if "PE" in inst_u or "PUT" in strat_u:
+                    self.trade_type = "BULL_PUT_SPREAD"
+                elif "CE" in inst_u or "CALL" in strat_u:
+                    self.trade_type = "BEAR_CALL_SPREAD"
+                else:
+                    self.trade_type = "BEAR_CALL_SPREAD" if (self.direction == Direction.SHORT or str(self.direction).upper() == "SHORT") else "BULL_PUT_SPREAD"
+            else:
+                opt = "CE" if (self.instrument and self.instrument.endswith("CE")) else ("PE" if (self.instrument and self.instrument.endswith("PE")) else None)
+                if opt:
+                    self.trade_type = f"BUY_{opt}"
+                else:
+                    self.trade_type = "BUY_CE" if (self.direction == Direction.LONG or str(self.direction).upper() == "LONG") else "BUY_PE"
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -159,10 +179,14 @@ class Position:
 
         NB: Both LONG (bullish CE) and SHORT (bearish PE) positions here are
         LONG the option premium — we always BUY options. PnL is symmetric:
-        positive when premium rallies, negative when it falls. The SHORT
-        sign-flip removed 2026-07-18 (SHORT in this subsystem = underlying
-        view, not position side).
+        positive when premium rallies, negative when it falls.
+        For Credit Spreads (Option Selling), entry_price is credit received,
+        current_price is current spread price to buy back. PnL is positive
+        when spread decays (current_price < entry_price).
         """
+        is_spread = "/" in (self.instrument or "") or "SPREAD" in getattr(self, "strategy", "").upper()
+        if is_spread:
+            return (self.entry_price - current_price) * self.quantity
         return (current_price - self.entry_price) * self.quantity
 
     def to_dict(self) -> Dict[str, Any]:

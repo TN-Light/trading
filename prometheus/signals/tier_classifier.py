@@ -14,12 +14,17 @@ from datetime import datetime, time as dtime
 import pandas as pd
 
 
-def classify_signal_tier(signal: Dict[str, Any]) -> Dict[str, Any]:
+def classify_signal_tier(
+    signal: Dict[str, Any],
+    enforce_instrument_allocation: Optional[bool] = None,
+) -> Dict[str, Any]:
     """
     Classify a refined signal into one of five distinct tiers (S, A, B, C, D).
 
     Args:
         signal: Dictionary containing signal metadata, scores, reasons, and strategy.
+        enforce_instrument_allocation: If True, enforces Team A capital policy
+            (de-allocates Bank Nifty & FinNifty directional buying to Paper Only).
 
     Returns:
         Dict with:
@@ -31,6 +36,9 @@ def classify_signal_tier(signal: Dict[str, Any]) -> Dict[str, Any]:
             - classification_reasons: List of reasons justifying the tier assignment
             - commitment_ratio: Optional shadow telemetry metric (|ΔOI|/Volume)
     """
+    if enforce_instrument_allocation is not None and isinstance(signal, dict):
+        signal = dict(signal)
+        signal["enforce_instrument_allocation"] = enforce_instrument_allocation
     res = _classify_signal_tier_core(signal)
     if signal and isinstance(signal, dict):
         comm_ratio = signal.get("commitment_ratio")
@@ -137,9 +145,9 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         if not is_0dte:
             cls_reasons.append("Non-0DTE Spread (Multi-day gamma/vega exposure)")
         if otm_sigma < 1.95:
-            cls_reasons.append(f"OTM distance is {otm_sigma:.1f}σ (< 2.0σ requirement)")
+            cls_reasons.append(f"OTM distance is {otm_sigma:.1f}σ (below 2.0σ requirement)")
         if score < 9.0:
-            cls_reasons.append(f"Conviction score is {score:.1f}/10 (< 9.0)")
+            cls_reasons.append(f"Conviction score is {score:.1f}/10 (below 9.0)")
 
         return _build_tier_result(
             tier="C",
@@ -166,11 +174,35 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         
         is_golden = bool(signal.get("is_golden_setup", False)) or "golden_setup" in strat_name
 
+        # Team A Capital Allocation Mandate:
+        # Bank Nifty and FinNifty directional option buying carry heavy spread friction and statutory ticket drag
+        # (-Rs 5,760.78 net BN, -Rs 3,143.86 net FN on single lots).
+        # Directional buying capital is de-allocated from BN/FN and focused exclusively on SENSEX, NIFTY 50,
+        # and defined-risk credit spreads (+Rs 1,524.62 decay capture, 69% win rate).
+        sym_upper = str(signal.get("symbol", "") or signal.get("underlying", "")).upper()
+        enforce_alloc = bool(signal.get("enforce_instrument_allocation", False))
+        if enforce_alloc and ("BANK" in sym_upper or "FIN" in sym_upper):
+            return _build_tier_result(
+                tier="C",
+                tier_name="DEALLOCATED_ASSET_PAPER_ONLY",
+                is_live_eligible=False,
+                reasons=[
+                    f"Team A Capital Mandate: Directional option buying de-allocated for {signal.get('symbol', 'BN/FN')} due to statutory fee drag & spread friction (-Rs 5,760 BN / -Rs 3,143 FN empirical loss). Live capital focused on SENSEX, NIFTY 50, and credit spreads.",
+                    f"Confluence Edge Score: {score:.1f}/10 (Statistical Paper Tracking Only)"
+                ],
+                badge="📊 <b>[TIER C: DE-ALLOCATED ASSET — PAPER ONLY]</b>",
+                instruction="📝 <b>ACTION:</b> Paper Trading Engine Only (BN/FN Directional Buying De-Allocated to Paper)"
+            )
+
         # Dealer Gamma Regime Invariant (Option Buying vs Selling):
         # In Long Gamma (net_gex > +1.5 Cr), dealers supply counter-trend liquidity and dampen range.
         # Directional breakout expansion is suppressed. Option buying is capped to Tier C (Paper Only).
         net_gex_val = float(signal.get("net_gex", 0.0) or signal.get("gex", 0.0) or 0.0)
-        net_gex_cr = float(signal.get("net_gex_cr", 0.0) or (net_gex_val / 1e7 if abs(net_gex_val) > 1000 else net_gex_val))
+        net_gex_cr = float(
+            signal.get("net_gex_cr", 0.0) or
+            signal.get("net_gex_crores", 0.0) or
+            (net_gex_val / 1e7 if abs(net_gex_val) >= 1e6 else net_gex_val)
+        )
         gamma_reg = str(signal.get("gamma_regime", "")).upper()
         is_dealer_long_gamma = (net_gex_cr > 1.5) or (gamma_reg == "LONG_GAMMA" and net_gex_cr > 0.5)
 
@@ -277,37 +309,44 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         if not is_0dte_buying and bool(signal.get("is_0dte", False)):
             is_0dte_buying = True
 
-        # TIER B ("Golden Setup" — Primary High-Probability Option Buying):
+        # TIER B ("Golden Setup" / "Regime Scalp in Long Gamma"):
         # Requirements:
         #   1. 15M ORB + Session VWAP alignment
         #   2. STRICT 1H HTF Trend Alignment (BULLISH for CE, BEARISH for PE; NEUTRAL is banned)
-        #   3. Edge score >= 6.5 (non-0DTE) OR >= 8.0 (0-DTE Golden Setup)
+        #   3. Edge score >= 6.5 (Standard non-0DTE) OR >= 8.0 (0-DTE Golden Setup or Long Gamma Regime Scalp)
         #   4. Valid Trading Window: 09:30-11:30 AM OR 13:15-14:15 PM
-        #   5. Dealer Net GEX NOT Long Gamma (net_gex_cr <= 1.5 Cr)
-        min_tier_b_score = 8.0 if is_0dte_buying else 6.5
-        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= min_tier_b_score and is_valid_entry_window and not is_dealer_long_gamma:
+        min_tier_b_score = 8.0 if (is_0dte_buying or is_dealer_long_gamma) else 6.5
+        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= min_tier_b_score and is_valid_entry_window:
             window_desc = "Morning Window (09:30-11:30)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Window (13:15-14:15)"
             reasons_b = [
                 "15M Opening Range Breakout (with ATR Buffer)",
                 "Session VWAP Clearance >= 0.10%",
                 "1-Hour HTF Trend Strictly Aligned (BULLISH for CE / BEARISH for PE)",
                 f"Valid Trading Window ({window_desc})",
-                f"Short/Neutral Gamma Regime ({net_gex_cr:+.1f}Cr)",
             ]
-            if is_0dte_buying:
+            if is_dealer_long_gamma:
+                reasons_b.append(f"Dealer Long Gamma Active ({net_gex_cr:+.1f}Cr): Compressed Scalp Boundaries Active (GEMINI.md Rule 3)")
+                reasons_b.append(f"High Conviction Setup ({score:.1f}/10 >= 8.0)")
+                badge_text = "🎯 <b>[TIER B: REGIME SCALP — LONG GAMMA COMPRESSED TARGET]</b>"
+                instruction_text = "🎯 <b>ACTION:</b> Live Trade — Compressed Scalp Target (Dealer Long Gamma Active: Take Profit at Scalp Boundary)"
+            elif is_0dte_buying:
+                reasons_b.append(f"Short/Neutral Gamma Regime ({net_gex_cr:+.1f}Cr)")
                 reasons_b.append(f"0-DTE Golden Setup High Conviction ({score:.1f}/10 >= 8.0)")
                 badge_text = "🌟 <b>[TIER B: 0-DTE HIGH CONVICTION GOLDEN SETUP]</b>"
+                instruction_text = "🎯 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution (Half-Risk Cut & Breakeven Trail at +18/+20 pts outside noise floor)"
             else:
+                reasons_b.append(f"Short/Neutral Gamma Regime ({net_gex_cr:+.1f}Cr)")
                 reasons_b.append(f"Confluence Edge Score: {score:.1f}/10")
                 badge_text = "🌟 <b>[TIER B: GOLDEN SETUP — 1 LOT CONSERVATIVE]</b>"
+                instruction_text = "🎯 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution (Half-Risk Cut & Breakeven Trail at +18/+20 pts outside noise floor)"
 
             return _build_tier_result(
                 tier="B",
-                tier_name="GOLDEN_SETUP",
+                tier_name="REGIME_SCALP_LONG_GAMMA" if is_dealer_long_gamma else "GOLDEN_SETUP",
                 is_live_eligible=True,
                 reasons=reasons_b,
                 badge=badge_text,
-                instruction="🎯 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution (Half-Risk Cut & Breakeven Trail at +18/+20 pts outside noise floor)"
+                instruction=instruction_text
             )
 
         # TIER C (Standard Momentum / Partial Confluences):
@@ -324,8 +363,8 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 missing.append(f"0-DTE Expiry Option Buying gated (Requires score >= 8.0 for Tier B, got {score:.1f}/10)")
             elif score < 6.5:
                 missing.append(f"Score {score:.1f}/10 is below Tier B requirement (6.5+)")
-            if is_dealer_long_gamma:
-                missing.append(f"Dealer Long Gamma Regime (Net GEX {net_gex_cr:+.1f}Cr > +1.5Cr: Volatility dampening caps breakout expansion; routed to Paper)")
+            if is_dealer_long_gamma and score < 8.0:
+                missing.append(f"Dealer Long Gamma Regime (Net GEX {net_gex_cr:+.1f}Cr > +1.5Cr: Requires Score >= 8.0 for Tier B Scalp, got {score:.1f}/10; routed to Paper)")
             if not is_valid_entry_window:
                 if bar_time and bar_time > dtime(14, 15):
                     missing.append("Post-Cutoff Window (After 14:15 IST)")
@@ -347,7 +386,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         tier="D",
         tier_name="OBSERVE_ONLY",
         is_live_eligible=False,
-        reasons=[f"Insufficient Confluence (Score {score:.1f}/10 < 3.5 threshold)"],
+        reasons=[f"Insufficient Confluence (Score {score:.1f}/10 below 3.5 threshold)"],
         badge="📋 <b>[TIER D: LOW CONFLUENCE — OBSERVE]</b>",
         instruction="🚫 <b>ACTION:</b> Filtered / Data Collection Only (Do Not Execute)"
     )

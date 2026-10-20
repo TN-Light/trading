@@ -758,19 +758,26 @@ class AngelOneOptionChain:
 
             # ── Kite monthly format (fallback): YY + 3-letter MON + strike ──
             # e.g. "26JUL56900" → YY=26, MON=JUL, strike=56900
+            # Also supports DD + 3-letter MON + strike (e.g. "27OCT54200" where 27 is the monthly expiry day)
             m = re.match(r'^(\d{2})([A-Z]{3})(\d+)$', suffix)
             if m:
                 yy_str, mon_str, strike_str = m.groups()
                 strike = float(strike_str)
                 expiry_str = ""
                 try:
-                    year = 2000 + int(yy_str)
+                    val_2digit = int(yy_str)
+                    now_year = datetime.now().year
                     month = datetime.strptime(mon_str, "%b").month
                     expiry_weekday = _resolve_weekly_expiry_day_name(
-                        underlying, on_date=date(year, month, 15),
+                        underlying, on_date=date(now_year, month, 15),
                     )
-                    monthly_dt = get_monthly_expiry(year, month, expiry_weekday)
-                    expiry_str = monthly_dt.strftime("%Y-%m-%d")
+                    monthly_curr = get_monthly_expiry(now_year, month, expiry_weekday)
+                    if monthly_curr.day == val_2digit:
+                        expiry_dt = monthly_curr
+                    else:
+                        year = 2000 + val_2digit
+                        expiry_dt = get_monthly_expiry(year, month, expiry_weekday)
+                    expiry_str = expiry_dt.strftime("%Y-%m-%d")
                 except Exception:
                     pass
                 return {"strike": strike, "option_type": option_type,
@@ -912,13 +919,19 @@ class AngelOneOptionChain:
             self._rate_limit()
             try:
                 # Format expirydate to uppercase DDMMMYYYY (e.g. 10SEP2026) for Angel One SmartAPI
-                raw_exp = str(c.get("expiry", ""))
-                formatted_exp = raw_exp
-                if "-" in raw_exp and len(raw_exp) == 10:
-                    try:
-                        formatted_exp = datetime.strptime(raw_exp, "%Y-%m-%d").strftime("%d%b%Y").upper()
-                    except Exception:
-                        pass
+                raw_c_exp = c.get("expiry")
+                if isinstance(raw_c_exp, (date, datetime)):
+                    formatted_exp = raw_c_exp.strftime("%d%b%Y").upper()
+                else:
+                    raw_exp = str(raw_c_exp or "")
+                    formatted_exp = raw_exp
+                    if "-" in raw_exp:
+                        try:
+                            formatted_exp = datetime.strptime(raw_exp[:10], "%Y-%m-%d").strftime("%d%b%Y").upper()
+                        except Exception:
+                            pass
+                    else:
+                        formatted_exp = raw_exp.upper()
 
                 # Resolve underlying root name (e.g. NIFTY, BANKNIFTY, SENSEX)
                 underlying_name = c.get("underlying") or c.get("name") or ""
@@ -938,15 +951,20 @@ class AngelOneOptionChain:
                     "optiontype": c.get("option_type", ""),
                 }
                 result = obj.optionGreek(params)
-                if result and result.get("status") and result.get("data"):
+                if isinstance(result, list) and len(result) > 0:
+                    result = result[0]
+                if isinstance(result, dict) and result.get("status") and result.get("data"):
                     data = result["data"]
-                    greeks_map[c["tradingsymbol"]] = {
-                        "delta": float(data.get("delta", 0) or 0),
-                        "gamma": float(data.get("gamma", 0) or 0),
-                        "theta": float(data.get("theta", 0) or 0),
-                        "vega": float(data.get("vega", 0) or 0),
-                        "iv": float(data.get("impliedVolatility", 0) or 0),
-                    }
+                    if isinstance(data, list) and len(data) > 0:
+                        data = data[0]
+                    if isinstance(data, dict):
+                        greeks_map[c["tradingsymbol"]] = {
+                            "delta": float(data.get("delta", 0) or 0),
+                            "gamma": float(data.get("gamma", 0) or 0),
+                            "theta": float(data.get("theta", 0) or 0),
+                            "vega": float(data.get("vega", 0) or 0),
+                            "iv": float(data.get("impliedVolatility", 0) or 0),
+                        }
             except Exception as e:
                 logger.debug(f"Angel One optionGreek error for {c.get('tradingsymbol')}: {e}")
 
@@ -1033,7 +1051,7 @@ class AngelOneOptionChain:
         expiry: str = None,
         spot_price: float = None,
         priority: PriorityTier = PriorityTier.P2_POSITION_MONITOR,
-        include_greeks: bool = True,
+        include_greeks: bool = False,
     ) -> Optional[Dict]:
         """
         Get real premium for a single option contract via BatchMarketDataEngine.
@@ -1157,25 +1175,58 @@ class AngelOneOptionChain:
 
         # 4. Optional Greek evaluation (only when explicitly requested)
         if include_greeks:
-            obj = self._get_obj()
-            if obj and self._rate_limit(priority=priority):
-                try:
-                    g_result = obj.optionGreek({
-                        "name": tradingsymbol,
-                        "expirydate": expiry or target.get("expiry", ""),
-                        "strikeprice": str(strike),
-                        "optiontype": option_type,
-                    })
-                    if not self._mark_rate_limited(g_result, f"optionGreek({tradingsymbol})"):
-                        if g_result and g_result.get("data"):
-                            gd = g_result["data"]
-                            premium["delta"] = float(gd.get("delta", 0.0) or 0.0)
-                            premium["gamma"] = float(gd.get("gamma", 0.0) or 0.0)
-                            premium["theta"] = float(gd.get("theta", 0.0) or 0.0)
-                            premium["vega"] = float(gd.get("vega", 0.0) or 0.0)
-                            premium["iv"] = float(gd.get("impliedVolatility", 0.0) or 0.0)
-                except Exception as e:
-                    logger.warning(f"optionGreek failed for {tradingsymbol}: {e}")
+            if seg == "BFO" or underlying == "SENSEX" or symbol == "SENSEX":
+                logger.debug(f"Angel One: optionGreek skipped for BSE/BFO contract {tradingsymbol} (unsupported by SmartAPI)")
+            else:
+                obj = self._get_obj()
+                if obj and self._rate_limit(priority=priority):
+                    try:
+                        # Format expirydate to uppercase DDMMMYYYY (e.g. 13OCT2026) for Angel One SmartAPI
+                        raw_target_exp = expiry if expiry is not None else target.get("expiry", "")
+                        if isinstance(raw_target_exp, (date, datetime)):
+                            formatted_exp = raw_target_exp.strftime("%d%b%Y").upper()
+                        else:
+                            raw_exp = str(raw_target_exp or "")
+                            formatted_exp = raw_exp
+                            if "-" in raw_exp:
+                                try:
+                                    formatted_exp = datetime.strptime(raw_exp[:10], "%Y-%m-%d").strftime("%d%b%Y").upper()
+                                except Exception:
+                                    pass
+                            else:
+                                formatted_exp = raw_exp.upper()
+
+                        # Resolve underlying root name (e.g. NIFTY, BANKNIFTY, SENSEX)
+                        underlying_name = target.get("underlying") or target.get("name") or underlying or ""
+                        if not underlying_name and tradingsymbol:
+                            for prefix in ["MIDCPNIFTY", "FINNIFTY", "BANKNIFTY", "NIFTY", "SENSEX"]:
+                                if tradingsymbol.startswith(prefix):
+                                    underlying_name = prefix
+                                    break
+                        if underlying_name in self.UNDERLYING_MAP:
+                            underlying_name = self.UNDERLYING_MAP[underlying_name]
+
+                        g_result = obj.optionGreek({
+                            "name": underlying_name or "NIFTY",
+                            "expirydate": formatted_exp,
+                            "strikeprice": str(strike),
+                            "optiontype": option_type,
+                        })
+                        if isinstance(g_result, list) and len(g_result) > 0:
+                            g_result = g_result[0]
+                        if not self._mark_rate_limited(g_result, f"optionGreek({tradingsymbol})"):
+                            if isinstance(g_result, dict) and g_result.get("data"):
+                                gd = g_result["data"]
+                                if isinstance(gd, list) and len(gd) > 0:
+                                    gd = gd[0]
+                                if isinstance(gd, dict):
+                                    premium["delta"] = float(gd.get("delta", 0.0) or 0.0)
+                                    premium["gamma"] = float(gd.get("gamma", 0.0) or 0.0)
+                                    premium["theta"] = float(gd.get("theta", 0.0) or 0.0)
+                                    premium["vega"] = float(gd.get("vega", 0.0) or 0.0)
+                                    premium["iv"] = float(gd.get("impliedVolatility", 0.0) or 0.0)
+                    except Exception as e:
+                        logger.warning(f"optionGreek failed for {tradingsymbol}: {e}")
 
         return premium
 

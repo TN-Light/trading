@@ -127,6 +127,8 @@ def calibrate_target_and_sl(
     orb_low: Optional[float] = None,
     direction: str = "bullish",
     atm_delta: float = 0.50,
+    vix: Optional[float] = None,
+    is_high_vix: bool = False,
 ) -> TargetCalibrationResult:
     """
     Calibrate option target gain and stop-loss boundaries.
@@ -144,6 +146,8 @@ def calibrate_target_and_sl(
           - is_compressed = True
         - If tier in ("S", "B"):
           - Uncompressed multi-ATR target calculation with full retest expansion retained.
+          - High-VIX (>18.0) applies a 1.25x expansion multiplier to prevent exits inside noise.
+          - Enforces minimum 1.3:1 Risk:Reward floor.
           - is_compressed = False
     """
     sym_u = symbol.upper()
@@ -169,6 +173,8 @@ def calibrate_target_and_sl(
 
     if is_low_vix:
         quality_mult *= 0.80
+    elif (vix is not None and vix > 18.0) or is_high_vix:
+        quality_mult *= 1.25  # High-VIX (> 18.0) runner expansion multiplier
 
     # Default Instrument Noise Floors & Min Targets
     if "BANK" in sym_u:
@@ -251,13 +257,15 @@ def calibrate_target_and_sl(
             if opt_ltp > 0:
                 target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.50, 1))
 
-    # Hard Safety Ceiling: never risk > 35% total option premium
+    # Hard Safety Ceiling: risk cap should never compress sl_pts below the minimum noise floor
     if opt_ltp > 0:
         max_risk_pts = round(opt_ltp * 0.35, 1)
+        # Preserve noise envelope: do not compress stop inside instrument noise floor (GEMINI.md Rule 2)
+        effective_max_risk = max(max_risk_pts, actual_noise_floor)
         if math.isnan(sl_pts):
-            sl_pts = max_risk_pts
+            sl_pts = effective_max_risk
         else:
-            sl_pts = min(sl_pts, max_risk_pts)
+            sl_pts = min(sl_pts, effective_max_risk)
 
     if opt_ltp > 0:
         tgt_price = round(opt_ltp + target_gain_pts, 2)

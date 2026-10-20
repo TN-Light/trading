@@ -438,3 +438,34 @@ Comprehensive codebase audit and hardening addressing all 7 Critical (P0) bugs a
 - Unit test suite: `pytest prometheus/tests/test_audit_bug_fixes.py prometheus/tests/test_credit_spread.py prometheus/tests/test_price_action_momentum.py prometheus/tests/test_credit_spread_live_pricing.py` $\rightarrow$ **33 passed**.
 - System running cleanly in paper trading mode with full live telemetry.
 
+## Session 34 Updates (October 19, 2026) — Comprehensive 52-Defect Forensic Audit Remediation & System Integrity Hardening
+
+Completed exhaustive adversarial audit (`COMPREHENSIVE_FORENSIC_AUDIT.md`) and production remediation across code, simulation scripts, and configurations:
+
+### 1. Critical Execution & Telemetry Remediations
+- **Bank Nifty Cost Buffer Inversion (CRITICAL)**: `position_tracker.py` & `position_monitor.py` — Recalibrated single-leg buffer to $\ge 5.20$ pts (30 qty) and spread buffer to $\ge 8.50$ pts, clearing statutory transaction hurdles (₹80–₹115).
+- **Purged Replay Script Trade Manipulation (CRITICAL)**: `scripts/replay_trailing_stop_models.py` — Purged all hardcoded trade overrides (`2BDB15`, `CA6DAF`, `672290`) that previously inflated Model C metrics.
+- **Gross Profit Factor Calculation (CRITICAL)**: `scripts/replay_trailing_stop_models.py` — Corrected `gross_wins` formula to sum `gross_pnl` rather than `net_pnl`. True baseline gross PF across crucible ledger ($N=74$) is 0.75.
+- **Inverted Post-Exit Shakeout Formula**: `papertrade/post_exit_tracker.py` — Replaced flawed threshold comparison with universal invariant `is_long_premium = (target > entry_price)`.
+- **Credit Spread Kill-Switch Leak Guard**: `execution/position_monitor.py` — Enforced explicit `not is_credit` and spread guards to protect defined-risk credit spreads from candle-count inactivity kills.
+- **Target Calibrator Noise Floor Enforcement**: `signals/target_calibrator.py` — Clamped `effective_max_risk = max(max_risk_pts, actual_noise_floor)`.
+- **Hedge Strike Liquidity Validation**: `strategies/credit_spread.py` — Enforced order book and quote depth validation (`oi > 0 or volume > 0 or fill_val >= 0.5`).
+- **Configuration Reconciliation**: `config/settings.yaml` — Purged duplicate slippage configs, aligned risk limits to 3.0% daily / 6.0% weekly, added `NIFTY FIN SERVICE: 65` lot size, disabled dead expiry strategy, and updated golden setup defaults.
+
+### 2. Full-Population Ledger Accounting ($N=74$ Crucible)
+- **Closed Trades**: 74 trades (Sep 21 – Oct 19, 2026)
+- **Win / Loss**: 25W / 49L (33.8% Net Win Rate)
+- **Gross P&L**: -₹6,842.15 (+₹20,445.17 gross wins / -₹27,287.32 gross losses)
+- **Statutory Costs**: ₹7,634.92 (Avg ₹103.17 / trade)
+- **Net Realized P&L**: -₹14,477.07
+- **Current Account Equity**: ₹85,522.93 (from ₹100,000 baseline)
+- **Tier B**: 30 trades, Net P&L: +₹2,375.39 (Net Green)
+- **Tier C**: 44 trades, Net P&L: -₹16,852.46 (Paper Shadow Only)
+
+### 3. Automated Verification Suites
+- `prometheus/tests/test_audit_remediation_fixes.py` (5 passed)
+- `prometheus/tests/test_ledger_synchronization.py` (3 passed)
+- `prometheus/tests/test_telegram_formatting_and_cost_buffers.py` (13 passed)
+- Full suite: 21/21 passing in 0.99s.
+
+

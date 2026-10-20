@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, List
 
@@ -167,6 +168,7 @@ class TradeRecorder:
         # Mirrored by a separate method so it can be re-run idempotently
         # (e.g. when ``load_open_positions`` is called on an old DB).
         self._create_open_positions_schema()
+        self._create_post_exit_schema()
         self._db.commit()
 
     # ------------------------------------------------------------------
@@ -459,4 +461,117 @@ class TradeRecorder:
         except Exception as e:
             logger.error(f"TradeRecorder: load_open_positions failed: {e}")
             return []
+
+    # ------------------------------------------------------------------
+    # Post-Exit Signal Tracking Attribution Persistence
+    # ------------------------------------------------------------------
+
+    def _create_post_exit_schema(self) -> None:
+        """Create the post_exit_attribution table if it does not exist."""
+        if self._db is None:
+            return
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS post_exit_attribution (
+                trade_id TEXT PRIMARY KEY,
+                symbol TEXT,
+                instrument TEXT,
+                underlying TEXT,
+                direction TEXT,
+                tier TEXT,
+                entry_price REAL,
+                exit_price REAL,
+                exit_reason TEXT,
+                exit_time TEXT,
+                target REAL,
+                stop_loss REAL,
+                entry_spot REAL,
+                price_t5m REAL,
+                price_t15m REAL,
+                price_t30m REAL,
+                price_t60m REAL,
+                price_eod REAL,
+                post_exit_mfe REAL,
+                post_exit_mae REAL,
+                target_reclaimed INTEGER DEFAULT 0,
+                entry_reclaimed INTEGER DEFAULT 0,
+                is_premature_shakeout INTEGER DEFAULT 0,
+                alpha_left_pts REAL DEFAULT 0.0,
+                drawdown_saved_pts REAL DEFAULT 0.0,
+                holding_duration_seconds INTEGER,
+                status TEXT DEFAULT 'WATCHING',
+                recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+    def record_post_exit_observation(self, data: dict) -> None:
+        """Insert or update post-exit attribution record in SQLite."""
+        if self._db is None:
+            return
+        try:
+            self._create_post_exit_schema()
+            cols = [
+                "trade_id", "symbol", "instrument", "underlying", "direction", "tier",
+                "entry_price", "exit_price", "exit_reason", "exit_time", "target", "stop_loss",
+                "entry_spot", "price_t5m", "price_t15m", "price_t30m", "price_t60m", "price_eod",
+                "post_exit_mfe", "post_exit_mae", "target_reclaimed", "entry_reclaimed",
+                "is_premature_shakeout", "alpha_left_pts", "drawdown_saved_pts",
+                "holding_duration_seconds", "status", "updated_at"
+            ]
+            placeholders = ",".join(["?"] * len(cols))
+            col_str = ",".join(cols)
+            now_iso = datetime.now().isoformat()
+            vals = [
+                data.get("trade_id"),
+                data.get("symbol"),
+                data.get("instrument"),
+                data.get("underlying"),
+                data.get("direction"),
+                data.get("tier"),
+                data.get("entry_price"),
+                data.get("exit_price"),
+                data.get("exit_reason"),
+                data.get("exit_time"),
+                data.get("target"),
+                data.get("stop_loss"),
+                data.get("entry_spot", 0.0),
+                data.get("price_t5m"),
+                data.get("price_t15m"),
+                data.get("price_t30m"),
+                data.get("price_t60m"),
+                data.get("price_eod"),
+                data.get("post_exit_mfe"),
+                data.get("post_exit_mae"),
+                1 if data.get("target_reclaimed") else 0,
+                1 if data.get("entry_reclaimed") else 0,
+                1 if data.get("is_premature_shakeout") else 0,
+                data.get("alpha_left_pts", 0.0),
+                data.get("drawdown_saved_pts", 0.0),
+                data.get("holding_duration_seconds", 0),
+                data.get("status", "WATCHING"),
+                now_iso,
+            ]
+            self._db.execute(
+                f"INSERT OR REPLACE INTO post_exit_attribution ({col_str}) VALUES ({placeholders})",
+                vals
+            )
+            self._db.commit()
+        except Exception as e:
+            logger.error(f"TradeRecorder: record_post_exit_observation failed for {data.get('trade_id')}: {e}")
+
+    def get_post_exit_observations(self, limit: int = 100) -> List[dict]:
+        """Fetch historical post-exit observations from SQLite."""
+        if self._db is None:
+            return []
+        try:
+            self._create_post_exit_schema()
+            rows = self._db.execute(
+                "SELECT * FROM post_exit_attribution ORDER BY recorded_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"TradeRecorder: get_post_exit_observations failed: {e}")
+            return []
+
 

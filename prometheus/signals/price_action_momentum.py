@@ -135,6 +135,30 @@ class PriceActionMomentumScanner:
 
         # ── 3. Institutional Trend Day Detection & Session Time Gate ──
         has_inst_volume = False
+        bar_range = high - low
+        body_displacement = abs(close - open_p)
+
+        # Directional range expansion proxy on spot indices lacking volume (current bar & session bars)
+        current_bull_expansion = (bar_range >= 2.0 * atr) and ((close - open_p) >= 0.5 * bar_range)
+        current_bear_expansion = (bar_range >= 2.0 * atr) and ((open_p - close) >= 0.5 * bar_range)
+
+        has_session_bull_expansion = current_bull_expansion
+        has_session_bear_expansion = current_bear_expansion
+
+        if len(today_bars) > 0 and not (has_session_bull_expansion and has_session_bear_expansion):
+            for _, r in today_bars.iterrows():
+                b_range = float(r["high"]) - float(r["low"])
+                b_open = float(r["open"])
+                b_close = float(r["close"])
+                if b_range >= 2.0 * atr:
+                    if (b_close - b_open) >= 0.5 * b_range:
+                        has_session_bull_expansion = True
+                    if (b_open - b_close) >= 0.5 * b_range:
+                        has_session_bear_expansion = True
+
+        has_session_range_expansion = has_session_bull_expansion or has_session_bear_expansion
+        is_spot_proxy = has_session_range_expansion
+
         if "volume" in df.columns and len(df) >= 15:
             vol_hist = df["volume"].iloc[-21:-1]
             vol_sma20 = float(vol_hist.mean()) if len(vol_hist) > 0 else 0.0
@@ -142,12 +166,19 @@ class PriceActionMomentumScanner:
             if vol_sma20 > 0 and curr_vol >= (vol_sma20 * 1.5):
                 has_inst_volume = True
             elif vol_sma20 == 0 and curr_vol == 0:
-                # Do NOT spoof institutional volume on spot index data lacking real volume.
-                # A wide price plunge without real volume is exhaustion, not institutional buying.
-                has_inst_volume = False
+                # Spot index feeds carry zero volume: evaluate using price action / range expansion proxy
+                has_inst_volume = is_spot_proxy
+        elif is_spot_proxy:
+            has_inst_volume = True
 
-        is_orb_breakout = (orb_high is not None and close > orb_high) or (orb_low is not None and close < orb_low)
-        is_institutional_trend_day = bool(is_orb_breakout and (adx_val >= 25.0) and has_inst_volume)
+        is_orb_bull_breakout = (orb_high is not None and close > orb_high)
+        is_orb_bear_breakout = (orb_low is not None and close < orb_low)
+        is_orb_breakout = is_orb_bull_breakout or is_orb_bear_breakout
+
+        # Institutional trend day requires ORB breakout, ADX >= 25, and volume or aligned directional range expansion
+        is_trend_day_bull = is_orb_bull_breakout and (adx_val >= 25.0) and (has_inst_volume or has_session_bull_expansion)
+        is_trend_day_bear = is_orb_bear_breakout and (adx_val >= 25.0) and (has_inst_volume or has_session_bear_expansion)
+        is_institutional_trend_day = bool(is_trend_day_bull or is_trend_day_bear)
 
         # Session Time Gate:
         # Golden Setup: Active 09:35 to 11:45; hard cutoff at 12:00 for normal days.
@@ -254,7 +285,7 @@ class PriceActionMomentumScanner:
                     bear_score += 1.5
                     bear_reasons.append("Consolidation_Breakdown_Down")
 
-        # Check F: Volume Surge Expansion
+        # Check F: Volume Surge Expansion (or Directional Range Expansion Proxy on spot feeds)
         has_volume_surge = False
         if "volume" in df.columns and len(df) >= 10:
             avg_vol = float(df["volume"].iloc[-11:-1].mean())
@@ -267,6 +298,24 @@ class PriceActionMomentumScanner:
                 if is_orb_bear or is_vwap_bear:
                     bear_score += 1.0
                     bear_reasons.append("Volume_Surge_Confirmed")
+            elif avg_vol == 0 and curr_vol == 0:
+                if (is_orb_bull or is_vwap_bull) and has_session_bull_expansion:
+                    has_volume_surge = True
+                    bull_score += 1.0
+                    bull_reasons.append("Range_Expansion_Proxy_Confirmed")
+                if (is_orb_bear or is_vwap_bear) and has_session_bear_expansion:
+                    has_volume_surge = True
+                    bear_score += 1.0
+                    bear_reasons.append("Range_Expansion_Proxy_Confirmed")
+        else:
+            if (is_orb_bull or is_vwap_bull) and has_session_bull_expansion:
+                has_volume_surge = True
+                bull_score += 1.0
+                bull_reasons.append("Range_Expansion_Proxy_Confirmed")
+            if (is_orb_bear or is_vwap_bear) and has_session_bear_expansion:
+                has_volume_surge = True
+                bear_score += 1.0
+                bear_reasons.append("Range_Expansion_Proxy_Confirmed")
 
         # ── 5. Decision & Trade Structuring ──
         # Strict Golden Setup requires TRUE 1-Hour Trend Alignment when 1H data is available
@@ -344,7 +393,10 @@ class PriceActionMomentumScanner:
                 "orb_high": round(orb_high, 2) if orb_high else None,
                 "orb_low": round(orb_low, 2) if orb_low else None,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
-                "is_institutional_trend_day": is_institutional_trend_day,
+                "is_institutional_trend_day": is_trend_day_bull,
+                "bar_range": round(bar_range, 2),
+                "body_displacement": round(body_displacement, 2),
+                "has_range_expansion": bool(has_session_bull_expansion),
                 "adx": round(adx_val, 1),
             }
 
@@ -400,7 +452,10 @@ class PriceActionMomentumScanner:
                 "orb_high": round(orb_high, 2) if orb_high else None,
                 "orb_low": round(orb_low, 2) if orb_low else None,
                 "bar_timestamp": current_ts.isoformat() if hasattr(current_ts, "isoformat") else str(current_ts),
-                "is_institutional_trend_day": is_institutional_trend_day,
+                "is_institutional_trend_day": is_trend_day_bear,
+                "bar_range": round(bar_range, 2),
+                "body_displacement": round(body_displacement, 2),
+                "has_range_expansion": bool(has_session_bear_expansion),
                 "adx": round(adx_val, 1),
             }
 

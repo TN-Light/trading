@@ -56,12 +56,12 @@ def test_trailing_stop_breakeven_alert_with_brokerage():
     )
     tracker.open_position(pos)
 
-    # Current price moves to 73.50 (+11.0 pts, >= 10.0 + 0.9 cost buffer)
+    # Current price moves to 73.50 (+11.0 pts, >= 10.0 + 1.20 cost buffer)
     tracker._maybe_advance_trailing_stop(pos, 73.50)
 
-    # Verify SL moved to Entry + 0.9 cost buffer
+    # Verify SL moved to Entry + 1.20 cost buffer (recalibrated for statutory fees)
     assert pos.breakeven_set is True
-    assert pos.stop_loss == pytest.approx(63.40, 0.01)
+    assert pos.stop_loss == pytest.approx(63.70, 0.01)
 
     # Verify Telegram alert was emitted
     assert len(mock_tg.alerts) == 1
@@ -69,10 +69,10 @@ def test_trailing_stop_breakeven_alert_with_brokerage():
     assert alert["symbol"] == "NIFTY 50"
     assert alert["instrument"] == "NIFTY08SEP2623800PE"
     assert alert["old_sl"] == 53.12
-    assert alert["new_sl"] == pytest.approx(63.40, 0.01)
+    assert alert["new_sl"] == pytest.approx(63.70, 0.01)
     assert alert["stage"] == "breakeven"
     assert alert["gain_pts"] == 11.0
-    assert alert["cost_pts"] == 0.9
+    assert alert["cost_pts"] == 1.20
 
 
 def test_progressive_half_risk_ratchet_survives_noise():

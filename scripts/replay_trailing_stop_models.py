@@ -267,31 +267,6 @@ def simulate_model_a(trade: TradeRecord, cost_model: CostModel, preserve_runner_
             alpha_captured=0.0,
             notes="Credit Spread: Exempt from trailing ratchets",
         )
-
-    # Special Case Analysis for 2BDB15:
-    # If preserve_runner_cushion is True, 2BDB15 preserves defensive cushion outside 15 pt spread noise
-    if trade.short_id == "2BDB15" and preserve_runner_cushion:
-        exit_price = trade.target
-        gross = (exit_price - trade.entry_price) * trade.quantity
-        costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
-        net = round(gross - costs, 2)
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model A (Baseline)",
-            sim_exit_price=exit_price,
-            sim_exit_reason="target",
-            gross_pnl=round(gross, 2),
-            costs=costs,
-            net_pnl=net,
-            is_win=net > 0,
-            premature_shakeout=False,
-            alpha_captured=round(net - trade.net_pnl, 2),
-            notes="Defensive Runner Cushion: Held outside 15pt noise, hit Target 217.80",
-        )
-
     # Standard Model A execution matches the live ledger baseline
     return SimulationResult(
         trade_id=trade.trade_id,
@@ -336,85 +311,7 @@ def simulate_model_b(trade: TradeRecord, cost_model: CostModel, noise_shakeout: 
             notes="Credit Spread: Exempt from trailing ratchets",
         )
 
-    # Case 1: CA6DAF (Chop setup)
-    # Reached +14.38 pts gain, then reversed.
-    # Model B locks at entry + 3.0 pts = 1017.72. Exits at 1017.72.
-    if trade.short_id == "CA6DAF":
-        exit_price = round(trade.entry_price + 3.0, 2)
-        gross = round((exit_price - trade.entry_price) * trade.quantity, 2)
-        costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
-        net = round(gross - costs, 2)
-        alpha = round(net - trade.net_pnl, 2)  # -56.06 - (-806.33) = +750.27
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model B (Offensive Micro-Lock)",
-            sim_exit_price=exit_price,
-            sim_exit_reason="micro_lock_stop_loss",
-            gross_pnl=gross,
-            costs=costs,
-            net_pnl=net,
-            is_win=net > 0,
-            premature_shakeout=False,
-            alpha_captured=alpha,
-            notes="Chop Alpha Lock: Saved Rs 750.27 vs Baseline Half-Risk SL (-806.33)",
-        )
-
-    # Case 2: 2BDB15 (Runner setup)
-    # Gained +17.50 pts, micro-lock moved SL to 157.70.
-    # Retraced to 157.70 in 15pt noise envelope -> Shaken out at 157.70!
-    if trade.short_id == "2BDB15":
-        exit_price = round(trade.entry_price + 3.0, 2)
-        gross = round((exit_price - trade.entry_price) * trade.quantity, 2)
-        costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
-        net = round(gross - costs, 2)
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model B (Offensive Micro-Lock)",
-            sim_exit_price=exit_price,
-            sim_exit_reason="micro_lock_shakeout",
-            gross_pnl=gross,
-            costs=costs,
-            net_pnl=net,
-            is_win=net > 0,
-            premature_shakeout=True,
-            alpha_captured=0.0,
-            notes="Premature Shakeout: Shaken out at 157.70 by 15pt noise; forfeited +63pt runner (+Rs 1,188)",
-        )
-
-    # Case 3: 672290 (Bank Nifty Runner setup)
-    # Gained +26.43 pts, then ran to Target 1110.50 (+43.98 pts).
-    # If noise_shakeout is enabled: at +12 pts, SL was moved to 1069.52 (entry + 3.0).
-    # Bank Nifty's 10-15 pt noise envelope triggers premature shakeout at 1069.52.
-    if trade.short_id == "672290" and noise_shakeout:
-        exit_price = round(trade.entry_price + 3.0, 2)
-        gross = round((exit_price - trade.entry_price) * trade.quantity, 2)
-        costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
-        net = round(gross - costs, 2)
-        alpha = round(net - trade.net_pnl, 2)  # -55.80 - 1166.54 = -1222.34
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model B (Offensive Micro-Lock)",
-            sim_exit_price=exit_price,
-            sim_exit_reason="micro_lock_shakeout",
-            gross_pnl=gross,
-            costs=costs,
-            net_pnl=net,
-            is_win=net > 0,
-            premature_shakeout=True,
-            alpha_captured=alpha,
-            notes="Premature Shakeout: Shaken out at 1069.52 by 12pt noise; forfeited +Rs 1,166.54 Target",
-        )
-
-    # Other single-leg trades:
+    # Single-leg trades:
     # If gain >= 12 pts, ratchet to entry + 3.0 pts if that improves SL
     if trade.mfe_gain >= 12.0:
         micro_sl = round(trade.entry_price + 3.0, 2)
@@ -488,75 +385,57 @@ def simulate_model_c(trade: TradeRecord, cost_model: CostModel, preserve_runner_
         )
 
     # 1. Tier C Setups (Capped Scalps):
-    # Trade CA6DAF: It is Tier C! Offensive micro-lock activates at +12 pts gain.
-    if trade.short_id == "CA6DAF":
-        exit_price = round(trade.entry_price + 3.0, 2)
-        gross = round((exit_price - trade.entry_price) * trade.quantity, 2)
-        costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
-        net = round(gross - costs, 2)
-        alpha = round(net - trade.net_pnl, 2)
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model C (Tier-Differentiated Policy)",
-            sim_exit_price=exit_price,
-            sim_exit_reason="micro_lock_stop_loss",
-            gross_pnl=gross,
-            costs=costs,
-            net_pnl=net,
-            is_win=net > 0,
-            premature_shakeout=False,
-            alpha_captured=alpha,
-            notes="Tier C Scalp Micro-Lock: Captured +Rs 750.27 alpha by cutting chop reversal at entry+3pt",
-        )
-
-    # Trade 672290: In Tier C, target is calibrated to 20-30 pts scalp.
-    # Reached +26.43 pts and 1110.50. Under Tier C compressed target (e.g. +25 pts = 1091.50):
-    # Captures target without premature shakeout!
-    if trade.short_id == "672290":
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model C (Tier-Differentiated Policy)",
-            sim_exit_price=trade.exit_price,
-            sim_exit_reason="target",
-            gross_pnl=trade.gross_pnl,
-            costs=trade.costs,
-            net_pnl=trade.net_pnl,
-            is_win=True,
-            premature_shakeout=False,
-            alpha_captured=0.0,
-            notes="Tier C Scalp Target: Reached full target (+Rs 1,166.54); not shaken out",
-        )
+    # Deploy Offensive Micro-Lock (+3.0 pts lock at >= 12.0 pts gain)
+    if trade.tier == "C":
+        if trade.mfe_gain >= 12.0:
+            micro_sl = round(trade.entry_price + 3.0, 2)
+            if trade.exit_price < micro_sl and trade.exit_reason in ("stop_loss", "inactivity_kill_switch"):
+                exit_price = micro_sl
+                gross = round((exit_price - trade.entry_price) * trade.quantity, 2)
+                costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
+                net = round(gross - costs, 2)
+                alpha = round(net - trade.net_pnl, 2)
+                return SimulationResult(
+                    trade_id=trade.trade_id,
+                    short_id=trade.short_id,
+                    symbol=trade.symbol,
+                    tier=trade.tier,
+                    model_name="Model C (Tier-Differentiated Policy)",
+                    sim_exit_price=exit_price,
+                    sim_exit_reason="micro_lock_stop_loss",
+                    gross_pnl=gross,
+                    costs=costs,
+                    net_pnl=net,
+                    is_win=net > 0,
+                    premature_shakeout=False,
+                    alpha_captured=alpha,
+                    notes=f"Tier C Scalp Micro-Lock: Captured {alpha:+.2f} Rs alpha",
+                )
 
     # 2. Tier B / Tier S Setups (Trend Runners):
-    # Preserves runner breathing room outside 10-15 pt spread noise!
-    # Trade 2BDB15: Trend setup. Preserving runner cushion allows trade to survive 157.70 noise dip and hit Target 217.80.
-    if trade.short_id == "2BDB15" and preserve_runner_cushion:
-        exit_price = trade.target
-        gross = (exit_price - trade.entry_price) * trade.quantity
-        costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
-        net = round(gross - costs, 2)
-        return SimulationResult(
-            trade_id=trade.trade_id,
-            short_id=trade.short_id,
-            symbol=trade.symbol,
-            tier=trade.tier,
-            model_name="Model C (Tier-Differentiated Policy)",
-            sim_exit_price=exit_price,
-            sim_exit_reason="target",
-            gross_pnl=round(gross, 2),
-            costs=costs,
-            net_pnl=net,
-            is_win=True,
-            premature_shakeout=False,
-            alpha_captured=round(net - trade.net_pnl, 2),
-            notes="Tier B/S Runner Room: Preserved 30pt cushion outside noise; hit Target 217.80 (+Rs 1,188)",
-        )
+    # Preserves runner breathing room outside 10-15 pt spread noise
+    if trade.tier in ("S", "B") and preserve_runner_cushion:
+        if trade.mfe >= trade.target:
+            exit_price = trade.target
+            gross = (exit_price - trade.entry_price) * trade.quantity
+            costs = cost_model.calculate_trade_cost(trade.entry_price * trade.quantity, exit_price * trade.quantity, False)
+            net = round(gross - costs, 2)
+            return SimulationResult(
+                trade_id=trade.trade_id,
+                short_id=trade.short_id,
+                symbol=trade.symbol,
+                tier=trade.tier,
+                model_name="Model C (Tier-Differentiated Policy)",
+                sim_exit_price=exit_price,
+                sim_exit_reason="target",
+                gross_pnl=round(gross, 2),
+                costs=costs,
+                net_pnl=net,
+                is_win=net > 0,
+                premature_shakeout=False,
+                alpha_captured=round(net - trade.net_pnl, 2),
+                notes="Tier B/S Runner Room: Preserved cushion outside noise; hit Target",
+            )
 
     # For other Tier B setups, follow Model A baseline
     return SimulationResult(
@@ -590,8 +469,8 @@ def compute_aggregate_metrics(model_name: str, results: List[SimulationResult]) 
     total_costs = sum(r.costs for r in results)
     total_net = sum(r.net_pnl for r in results)
 
-    gross_wins = sum(r.net_pnl for r in results if r.net_pnl > 0)
-    gross_losses = abs(sum(r.net_pnl for r in results if r.net_pnl < 0))
+    gross_wins = sum(r.gross_pnl for r in results if r.gross_pnl > 0)
+    gross_losses = abs(sum(r.gross_pnl for r in results if r.gross_pnl < 0))
 
     profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else float("inf")
     avg_trade = (total_net / total_trades) if total_trades > 0 else 0.0

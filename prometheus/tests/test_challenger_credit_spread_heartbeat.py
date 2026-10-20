@@ -204,8 +204,8 @@ def test_credit_spread_breakeven_sl_hit_no_heartbeat():
     state = _make_credit_spread_state(entry_seconds_ago=290, entry_premium=40.0)
     monitor.add_position(state)
 
-    # Step 1: price drops to 19.0 <= 20.0 (breakeven lock activates, SL ratchets to 40 * 0.85 = 34.0)
-    monitor._process_tick(state, current_price=19.0)
+    # Step 1: price drops to 26.0 <= 28.0 (35% decay >= 30% threshold, breakeven lock activates, SL ratchets to 40 * 0.85 = 34.0)
+    monitor._process_tick(state, current_price=26.0)
     assert state.breakeven_set is True
     assert state.current_sl == 34.0
     assert len(heartbeat_calls) == 0  # Still at 290s

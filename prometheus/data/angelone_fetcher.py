@@ -217,7 +217,22 @@ class AngelOneFetcher:
         days_per_chunk = min(days_per_chunk, 30)
 
         end_date = datetime.now()
+        # If today is weekend, clamp end_date to previous Friday at 15:30
+        if end_date.weekday() == 5:  # Saturday -> Friday
+            end_date = end_date.replace(hour=15, minute=30, second=0, microsecond=0) - timedelta(days=1)
+        elif end_date.weekday() == 6:  # Sunday -> Friday
+            end_date = end_date.replace(hour=15, minute=30, second=0, microsecond=0) - timedelta(days=2)
+
         start_date = end_date - timedelta(days=days)
+        # Skip weekend start dates: align start_date to Monday if it falls on Saturday/Sunday
+        if start_date.weekday() == 5:  # Saturday -> Monday
+            start_date = (start_date + timedelta(days=2)).replace(hour=9, minute=15, second=0, microsecond=0)
+        elif start_date.weekday() == 6:  # Sunday -> Monday
+            start_date = (start_date + timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+
+        # Safety: ensure start_date is strictly before end_date
+        if start_date >= end_date:
+            start_date = end_date - timedelta(days=max(1, days))
 
         all_candles = []
         chunk_start = start_date

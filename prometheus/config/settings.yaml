@@ -41,7 +41,6 @@ backtest:
     transaction_charges: 0.053
   end_date: '2025-12-31'
   initial_capital: 15000
-  slippage_pct: 0.05
   start_date: '2022-01-01'
 broker:
   access_token: ''
@@ -136,6 +135,23 @@ interface:
     enabled: true
     proxy: ''
 intraday:
+  credit_spread:
+    enabled: true
+    strike_otm_steps: 1
+    hedge_otm_steps: 3
+    target_decay_pct: 0.70
+    breakeven_decay_pct: 0.50
+    max_loss_multiplier: 1.5
+    min_credit_pct: 0.15
+    max_days_to_expiry: 1
+    max_days_to_expiry_monthly: 1
+    max_range_pct: 0.018
+    start_time: '12:30'
+    end_time: '15:00'
+    require_long_gamma: true
+    min_net_gex: 1.5
+    short_gamma_ban_threshold: -0.5
+    require_macro_trend: true
   adverse_exit:
     enabled: true
     vwap_exit: true
@@ -188,9 +204,9 @@ intraday:
     orb_end_time: '09:30'
     entry_cutoff_time: '11:45'
     hard_cutoff_time: '12:00'
-    target_pts: 14.0
-    trailing_be_pts: 10.0
-    partial_profit_pct: 0.60
+    target_pts: 35.0
+    trailing_be_pts: 20.0
+    partial_profit_pct: 0.0  # Physically disabled under single-lot constraint (GEMINI.md Rule 2)
   last_entry_time: '14:15'
   max_daily_trades: 4  # Up to 2 morning trades + 2 afternoon trades; strictly caps daily risk
   trading_windows:
@@ -412,6 +428,7 @@ market:
   lot_sizes:
     NIFTY 50: 65
     NIFTY BANK: 30
+    NIFTY FIN SERVICE: 65
     NIFTY MIDCAP SELECT: 120
     SENSEX: 20
   stocks: []  # Aug-17: removed 6 F&O stocks — zero backtest coverage,
@@ -455,14 +472,14 @@ risk:
   margin_buffer_pct: 30.0
   margin_utilization_max: 70.0
   max_correlated_pct: 50.0
-  max_daily_loss: 15000
-  max_daily_loss_pct: 30.0
-  max_daily_trades: 50
+  max_daily_loss: 3000
+  max_daily_loss_pct: 3.0
+  max_daily_trades: 6
   max_lots_per_trade: 1
-  max_open_positions: 6
-  max_single_position_pct: 30.0
-  max_stop_loss_pct: 50.0
-  max_weekly_loss: 30000
+  max_open_positions: 2
+  max_single_position_pct: 15.0
+  max_stop_loss_pct: 35.0
+  max_weekly_loss: 6000
   max_weekly_loss_pct: 6.0
   pause_duration_minutes: 60
   stop_loss_type: atr
@@ -485,7 +502,7 @@ signals:
 strategies:
   expiry:
     days_to_expiry_max: 2
-    enabled: true
+    enabled: false
     entry_type: debit_spread
     instruments:
     - NIFTY 50

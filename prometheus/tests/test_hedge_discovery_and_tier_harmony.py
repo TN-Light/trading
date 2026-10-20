@@ -9,14 +9,14 @@ from prometheus.signals.tier_classifier import classify_signal_tier
 
 
 class MockOptionChainWithMissingStrike:
-    """Mock option chain where a primary hedge strike (23150 PE) is missing/None, but fallback 23100 PE exists."""
+    """Mock option chain where a primary hedge strike (23200 PE) is missing/None, but fallback 23150 PE exists."""
     def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
-        if strike == 23300.0 and option_type == "PE":
-            return {"ltp": 25.0, "tradingsymbol": "NIFTY22SEP2623300PE"}
-        elif strike == 23150.0 and option_type == "PE":
+        if strike in (23300.0, 23350.0) and option_type == "PE":
+            return {"ltp": 25.0, "tradingsymbol": f"NIFTY22SEP26{int(strike)}PE"}
+        elif strike in (23150.0, 23200.0) and option_type == "PE" and strike == 23200.0:
             return None  # Simulates omitted strike in broker API
-        elif strike == 23100.0 and option_type == "PE":
-            return {"ltp": 3.0, "tradingsymbol": "NIFTY22SEP2623100PE"}
+        elif strike in (23100.0, 23150.0) and option_type == "PE":
+            return {"ltp": 3.0, "tradingsymbol": f"NIFTY22SEP26{int(strike)}PE"}
         return None
 
     def get_option_chain(self, symbol, spot_price=None, expiry_date=None):
@@ -100,18 +100,18 @@ def test_credit_spread_dynamic_hedge_discovery_fallback():
         option_chain=mock_chain,
     )
 
-    assert sig is not None, "Credit spread should NOT be None despite missing 23150 strike!"
+    assert sig is not None, "Credit spread should NOT be None despite missing 23200 strike!"
     assert sig["strategy_type"] == "credit_spread"
     assert sig["spread_type"] == "BULL_PUT_SPREAD"
-    # Long strike must be dynamically adjusted to the available fallback strike 23100
-    assert sig["short_strike"] == 23300.0
-    assert sig["long_strike"] == 23100.0
-    assert sig["strike_width"] == 200.0  # 23300 - 23100
+    # Long strike must be dynamically adjusted to the available fallback strike 23150
+    assert sig["short_strike"] == 23350.0
+    assert sig["long_strike"] == 23150.0
+    assert sig["strike_width"] == 200.0  # 23350 - 23150
     assert sig["net_credit"] == 22.0     # 25.0 - 3.0
-    assert sig["legs"][0]["strike"] == 23100.0
-    assert sig["legs"][0]["tradingsymbol"] == "NIFTY22SEP2623100PE"
-    assert sig["legs"][1]["strike"] == 23300.0
-    assert sig["legs"][1]["tradingsymbol"] == "NIFTY22SEP2623300PE"
+    assert sig["legs"][0]["strike"] == 23150.0
+    assert sig["legs"][0]["tradingsymbol"] == "NIFTY22SEP2623150PE"
+    assert sig["legs"][1]["strike"] == 23350.0
+    assert sig["legs"][1]["tradingsymbol"] == "NIFTY22SEP2623350PE"
 
 
 def test_price_action_momentum_neutral_1h_trend_passes_to_tier_c():

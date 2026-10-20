@@ -267,9 +267,8 @@ def test_telegram_card_formatting_all_required_fields():
     # 8-Pillar Health Score Summary
     assert "8-Pillar Health Score" in msg
     assert "Momentum healthy, moving toward target" in msg
-    # Action Command
-    assert "ACTION COMMAND" in msg
-    assert "HOLD IT" in msg
+    # Action Command removed in clean minimal card
+    assert "ACTION COMMAND" not in msg
     # Trade ID
     assert "POS-20261007-001" in msg
 

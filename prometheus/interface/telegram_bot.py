@@ -7,6 +7,8 @@ Sends signals, P&L updates, risk warnings to your phone.
 Receives commands: /scan, /status, /pnl, /regime, /help
 """
 
+import html
+import re
 import threading
 import time
 import queue
@@ -500,17 +502,21 @@ class TelegramBot:
 
                     if response.status_code == 400 and parse_mode == "HTML":
                         # Fallback: retry as plain text when HTML formatting is rejected.
+                        clean_text = html.unescape(re.sub(r'<[^>]+>', '', text))
                         fallback_payload = {
                             "chat_id": self.chat_id,
-                            "text": text,
+                            "text": clean_text,
                         }
-                        retry = self._session.post(url, json=fallback_payload, timeout=10)
-                        if retry.status_code == 200:
-                            logger.warning("Telegram HTML payload rejected (400); sent as plain text fallback")
-                            self._send_fail_streak = 0
-                            self._last_send_ok_ts = time.time()
-                            self._rate_limit_until = 0.0
-                            return True
+                        try:
+                            retry = self._session.post(url, json=fallback_payload, timeout=10)
+                            if retry.status_code == 200:
+                                logger.warning("Telegram HTML payload rejected (400); sent as plain text fallback")
+                                self._send_fail_streak = 0
+                                self._last_send_ok_ts = time.time()
+                                self._rate_limit_until = 0.0
+                                return True
+                        except Exception as retry_err:
+                            logger.warning(f"Telegram plain text fallback send error on {base_url}: {retry_err}")
 
                     if idx + 1 < len(base_candidates):
                         logger.warning(
@@ -852,9 +858,9 @@ class TelegramBot:
                     else:
                         kite_name = f"{clean_sym} {int(leg_stk)} {leg_opt}"
 
-                legs_text += f"• <b>{leg_act}</b> <code>{kite_name}</code> (~Rs {leg_prem:.1f}) {leg_tag}\n"
-                box_title = f"📋 LEG ({leg_act} HEDGE)" if is_hedge else f"📋 LEG ({leg_act} MAIN)"
-                copy_boxes += f"\n{box_title} (Tap to Copy):\n<code>{kite_name}</code>\n"
+                legs_text += f"• <b>{html.escape(str(leg_act))}</b> <code>{html.escape(str(kite_name))}</code> (~Rs {leg_prem:.1f}) {leg_tag}\n"
+                box_title = f"📋 LEG ({html.escape(str(leg_act))} HEDGE)" if is_hedge else f"📋 LEG ({html.escape(str(leg_act))} MAIN)"
+                copy_boxes += f"\n{box_title} (Tap to Copy):\n<code>{html.escape(str(kite_name))}</code>\n"
 
             # Source tag for alert segregation
             if source == "scan":
@@ -881,8 +887,8 @@ class TelegramBot:
                 spread_notice = "💡 <i>How to Execute on Kite: Open Basket Order ➔ Add BUY Hedge leg FIRST (to unlock margin discount) ➔ Add SELL leg.</i>\n"
             else:
                 action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
-                spread_execution_box = ""
-                reasons_str = "; ".join(tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
+                spread_execution_box = copy_boxes
+                reasons_str = "; ".join(html.escape(str(r)) for r in tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
                 spread_notice = (
                     f"📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy. Do NOT execute on Kite with real capital.</i>\n"
                     f"💡 <i>Spread Guideline (when live): Add BUY Hedge leg FIRST (to unlock margin benefit) ➔ Add SELL leg.</i>\n"
@@ -935,8 +941,8 @@ class TelegramBot:
                 f"{action_banner}"
                 f"{rank_header}"
                 f"{conviction_banner}"
-                f"🛡️ <b>STRATEGY: {spread_type}</b>{source_tag}\n"
-                f"<b>Underlying:</b> <code>{symbol}</code>\n"
+                f"🛡️ <b>STRATEGY: {html.escape(str(spread_type))}</b>{source_tag}\n"
+                f"<b>Underlying:</b> <code>{html.escape(str(symbol))}</code>\n"
                 f"{oi_wall_line}\n"
                 f"<b>Legs Breakdown:</b>\n{legs_text}"
                 f"{spread_execution_box}\n"
@@ -981,7 +987,7 @@ class TelegramBot:
         if account_label:
             capital_val = float(signal.get("account_capital", 0) or 0)
             cap_str = f" | Capital: Rs {capital_val:,.0f}" if capital_val > 0 else ""
-            account_header = f"📊 <b>ACCOUNT: {account_label.upper()}</b>{cap_str}\n"
+            account_header = f"📊 <b>ACCOUNT: {html.escape(str(account_label.upper()))}</b>{cap_str}\n"
 
         # Trade sizing details
         qty = int(signal.get("quantity", 0) or 0)
@@ -1050,17 +1056,19 @@ class TelegramBot:
             copy_box = (
                 f"\n📋 <b>Zerodha Kite Basket Orders (Tap to Copy):</b>\n"
                 f"1️⃣ <b>BUY Hedge First (Margin Relief):</b>\n"
-                f"<code>{leg2_clean}</code>\n"
+                f"<code>{html.escape(str(leg2_clean))}</code>\n"
                 f"2️⃣ <b>SELL Main Leg:</b>\n"
-                f"<code>{leg1_clean}</code>\n"
-                f"<i>Contracts: <code>{tradingsymbol}</code></i>\n"
+                f"<code>{html.escape(str(leg1_clean))}</code>\n"
+                f"<i>Contracts: <code>{html.escape(str(tradingsymbol))}</code></i>\n"
             )
         else:
+            search_box_val = kite_search or tradingsymbol or instrument
+            contract_box_val = tradingsymbol or instrument or kite_search
             copy_box = (
                 f"\n📋 <b>Zerodha Kite Search (Tap to Copy):</b>\n"
-                f"<code>{kite_search}</code>\n"
-                f"<i>Contract: <code>{tradingsymbol}</code></i>\n"
-                if kite_search else ""
+                f"<code>{html.escape(str(search_box_val))}</code>\n"
+                f"<i>Contract: <code>{html.escape(str(contract_box_val))}</code></i>\n"
+                if search_box_val else ""
             )
 
         contract_name = friendly_contract or kite_search or instrument or f"{symbol} {int(float(strike))}{option_type}"
@@ -1090,8 +1098,8 @@ class TelegramBot:
             execution_notice = ""
         else:
             action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
-            execution_copy_box = ""  # Strip Kite search copy box completely for paper signals!
-            reasons_str = "; ".join(tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
+            execution_copy_box = copy_box
+            reasons_str = "; ".join(html.escape(str(r)) for r in tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
             execution_notice = (
                 f"\n📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy & edge calibration. Do NOT trade live with real capital.</i>\n"
                 f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
@@ -1125,9 +1133,9 @@ class TelegramBot:
         edge_score = signal.get("edge_score") if signal.get("edge_score") is not None else signal.get("signal_score")
         score_str = f" ({float(edge_score):.1f}/10)" if edge_score is not None else ""
         reasons_list = signal.get("reasons") or []
-        confluence_str = ", ".join(reasons_list) if reasons_list else ""
+        confluence_str = ", ".join(html.escape(str(r)) for r in reasons_list) if reasons_list else ""
 
-        strategy_line = f"<b>Strategy:</b> <code>{strat_name}</code>{score_str}\n"
+        strategy_line = f"<b>Strategy:</b> <code>{html.escape(str(strat_name))}</code>{score_str}\n"
         confluence_line = f"<b>Confluences:</b> <i>{confluence_str}</i>\n" if confluence_str else ""
 
         rr_val = signal.get("risk_reward") or signal.get("rr")
@@ -1153,12 +1161,34 @@ class TelegramBot:
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
 
-        conviction_badge = (
-            f"{tier_badge}\n"
-            f"{action_line}{rr_detail}{comm_str}{vpr_str}{gex_str}{zgl_str}\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{squeeze_banner}"
-        )
+        if is_live_execution:
+            op_state_line = "🟢 <b>OPERATIONAL STATE: TREND INTACT</b> (Confluences Aligned)\n"
+            conviction_badge = (
+                f"{tier_badge}\n"
+                f"{op_state_line}"
+                f"{action_line}{rr_detail}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{squeeze_banner}"
+            )
+        else:
+            conviction_badge = (
+                f"{tier_badge}\n"
+                f"{action_line}{rr_detail}{comm_str}{vpr_str}{gex_str}{zgl_str}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{squeeze_banner}"
+            )
+
+        if sizing_line:
+            sizing_clean = sizing_line.replace('Sizing: ', 'Quantity: ')
+            sizing_fmt = f"<i>{sizing_clean}</i>"
+        else:
+            sizing_fmt = ""
+
+        if cost_line:
+            cost_clean = cost_line.replace('Margin Required: ', 'Est. Capital: ')
+            cost_fmt = f"<i>{cost_clean}</i>"
+        else:
+            cost_fmt = ""
 
         text = (
             f"{action_banner}"
@@ -1166,22 +1196,22 @@ class TelegramBot:
             f"{conviction_badge}"
             f"{header_title}{source_tag}\n"
             f"{account_header}\n"
-            f"<b>Symbol:</b> <code>{symbol}</code>\n"
-            f"<b>Action:</b> {action}\n"
-            f"<b>Contract:</b> {contract_name}\n"
+            f"<b>Symbol:</b> <code>{html.escape(str(symbol))}</code>\n"
+            f"<b>Action:</b> {html.escape(str(action))}\n"
+            f"<b>Contract:</b> {html.escape(str(contract_name))}\n"
             f"{strategy_line}"
             f"{confluence_line}"
             f"{execution_copy_box}\n"
             f"<b>Live Entry LTP (Angel One):</b> Rs {entry:,.1f}\n"
             f"<b>Stop Loss:</b> Rs {sl:,.1f}\n"
             f"<b>Target:</b> Rs {target:,.1f}\n\n"
-            f"<i>{sizing_line.replace('Sizing: ', 'Quantity: ')}</i>"
-            f"<i>{cost_line.replace('Margin Required: ', 'Est. Capital: ')}</i>"
+            f"{sizing_fmt}"
+            f"{cost_fmt}"
             f"{hold_line}\n"
             f"{execution_notice}"
         )
         if reasoning and reasoning != strat_name:
-            text += f"\n<i>Note: {reasoning[:150]}</i>"
+            text += f"\n<i>Note: {html.escape(str(reasoning)[:150])}</i>"
 
         self.send_message(text)
 
@@ -1262,7 +1292,7 @@ class TelegramBot:
             stale_tag = f" \u26a0\ufe0f STALE +{_age(r)}s" if _is_stale(r) else ""
 
             return (
-                f"{d_emoji} <b>{symbol} ({tf_clean})</b>{golden_tag}: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {regime.upper()}{sig_only}{stale_tag}"
+                f"{d_emoji} <b>{html.escape(str(symbol))} ({html.escape(str(tf_clean))})</b>{golden_tag}: {direction} | Conf {adj_conf:.0%} | {sig_count}/10 sigs | {html.escape(str(regime.upper()))}{sig_only}{stale_tag}"
             )
 
         if intraday_top:
@@ -1313,9 +1343,9 @@ class TelegramBot:
         """Alert when an order is placed."""
         text = (
             "\U0001f4cb <b>ORDER PLACED</b>\n"
-            f"{order_info.get('symbol', '')}\n"
-            f"{order_info.get('side', '')} {order_info.get('quantity', 0)}x | {order_info.get('order_type', '')}\n"
-            f"ID: <code>{order_info.get('order_id', '')}</code>"
+            f"{html.escape(str(order_info.get('symbol', '')))}\n"
+            f"{html.escape(str(order_info.get('side', '')))} {order_info.get('quantity', 0)}x | {html.escape(str(order_info.get('order_type', '')))}\n"
+            f"ID: <code>{html.escape(str(order_info.get('order_id', '')))}</code>"
         )
         self.send_message(text)
 
@@ -1323,10 +1353,10 @@ class TelegramBot:
         """Alert when an order is filled."""
         text = (
             "\u2705 <b>ORDER FILLED</b>\n"
-            f"{order_info.get('symbol', '')}\n"
-            f"{order_info.get('side', '')} {order_info.get('quantity', 0)}x\n"
+            f"{html.escape(str(order_info.get('symbol', '')))}\n"
+            f"{html.escape(str(order_info.get('side', '')))} {order_info.get('quantity', 0)}x\n"
             f"Price: <code>Rs {order_info.get('price', 0):,.2f}</code>\n"
-            f"ID: <code>{order_info.get('order_id', '')}</code>"
+            f"ID: <code>{html.escape(str(order_info.get('order_id', '')))}</code>"
         )
         self.send_message(text)
 
@@ -1335,7 +1365,7 @@ class TelegramBot:
         pnl = trade_info.get("pnl", 0)
         text = (
             "\U0001f6d1 <b>STOP LOSS HIT</b>\n"
-            f"{trade_info.get('symbol', '')}\n"
+            f"{html.escape(str(trade_info.get('symbol', '')))}\n"
             f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
             f"P&L: <code>Rs {pnl:+,.0f}</code>"
         )
@@ -1350,18 +1380,19 @@ class TelegramBot:
         profitable exit look like a SL hit.
         """
         pnl = trade_info.get("pnl", 0)
-        tag = f" ({phase})" if phase else ""
+        tag = f" ({html.escape(str(phase))})" if phase else ""
+        sym_str = html.escape(str(trade_info.get('symbol', '')))
         if pnl >= 0:
             text = (
                 "\U0001f4c8 <b>TRAILING LOCKED</b>" + tag + "\n"
-                f"{trade_info.get('symbol', '')}\n"
+                f"{sym_str}\n"
                 f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
                 f"P&L: <code>Rs {pnl:+,.0f}</code>"
             )
         else:
             text = (
                 "\U0001f6d1 <b>TRAILING EXIT</b>" + tag + "\n"
-                f"{trade_info.get('symbol', '')}\n"
+                f"{sym_str}\n"
                 f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
                 f"P&L: <code>Rs {pnl:+,.0f}</code>"
             )
@@ -1385,7 +1416,25 @@ class TelegramBot:
         entry_est = entry_price if entry_price > 0 else (new_sl - cost_pts)
         gain_pct = (gain_pts / entry_est * 100) if entry_est > 0 else 0.0
 
-        if "breakeven" in stage.lower():
+        if "spread_lock_50pct" in stage.lower():
+            headline = "🔒 <b>CREDIT SPREAD: 50% PROFIT LOCKED (+50% DECAY)</b>"
+            action_desc = (
+                f"Spread decayed >= 45%: Ratchet Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b> "
+                f"(Guarantees locking in 50% of credit collected)."
+            )
+        elif "spread_breakeven" in stage.lower():
+            headline = "🛡️ <b>CREDIT SPREAD: BREAKEVEN LOCKED (+30% DECAY)</b>"
+            action_desc = (
+                f"Spread decayed >= 30%: Ratchet Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b> "
+                f"(Covers Entry + all round-trip brokerage & taxes)."
+            )
+        elif "lock_35pct" in stage.lower():
+            headline = "🔒 <b>TRAILING STOP: +0.35R PROFIT LOCKED (0.65R MILESTONE)</b>"
+            action_desc = (
+                f"Ratcheting profit lock: Move Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b> "
+                f"(Guarantees +0.35R profit; runner protected against reversal)."
+            )
+        elif "breakeven" in stage.lower():
             headline = "🛡️ <b>TRAILING STOP: CAPITAL PROTECTED (BREAKEVEN)</b>"
             action_desc = (
                 f"Move Stop Loss order on Kite/Zerodha to <b>Rs {new_sl:.2f}</b> "
@@ -1399,7 +1448,8 @@ class TelegramBot:
                 f"(Cuts maximum risk by 50% while preserving breathing room outside market noise)."
             )
         else:
-            headline = f"📈 <b>TRAILING STOP ADVANCED ({stage.upper()})</b>"
+            stage_str = html.escape(str(stage.upper()))
+            headline = f"📈 <b>TRAILING STOP ADVANCED ({stage_str})</b>"
             action_desc = f"Ratcheting profit lock: Move Stop Loss order on Kite to <b>Rs {new_sl:.2f}</b>."
 
         entry_line = (
@@ -1410,9 +1460,9 @@ class TelegramBot:
 
         msg = (
             f"{headline}\n\n"
-            f"<b>Symbol:</b> <code>{symbol}</code>\n"
-            f"<b>Contract:</b> <code>{kite_name}</code>\n"
-            f"📋 <b>Search Name:</b> <code>{instrument}</code>\n\n"
+            f"<b>Symbol:</b> <code>{html.escape(str(symbol))}</code>\n"
+            f"<b>Contract:</b> <code>{html.escape(str(kite_name))}</code>\n"
+            f"📋 <b>Search Name:</b> <code>{html.escape(str(instrument))}</code>\n\n"
             f"{entry_line}"
             f"🛑 <b>Old SL:</b> Rs {old_sl:.2f} ➔ <b>New Trailing SL:</b> <b>Rs {new_sl:.2f}</b>\n"
             f"💼 <b>Brokerage & Taxes:</b> ~Rs {cost_pts:.2f} pts/share covered\n\n"
@@ -1430,15 +1480,15 @@ class TelegramBot:
 
         msg = (
             f"🚨 <b>ADVERSE STRUCTURAL EXIT</b>\n\n"
-            f"<b>Symbol:</b> <code>{symbol}</code>\n"
-            f"<b>Contract:</b> <code>{kite_name}</code>\n"
+            f"<b>Symbol:</b> <code>{html.escape(str(symbol))}</code>\n"
+            f"<b>Contract:</b> <code>{html.escape(str(kite_name))}</code>\n"
             f"📋 <b>Zerodha Kite Contract:</b>\n"
-            f"<code>{instrument}</code>\n\n"
+            f"<code>{html.escape(str(instrument))}</code>\n\n"
             f"<b>Entry:</b> Rs {entry:.2f} ➔ <b>Exit:</b> Rs {exit_price:.2f} ({ret_pct:+.1f}%)\n"
             f"{pnl_emoji} <b>P&L:</b> Rs {pnl:+,.0f}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"⚡ <b>Invalidation Trigger:</b>\n"
-            f"<b>{reason}</b>\n\n"
+            f"<b>{html.escape(str(reason))}</b>\n\n"
             f"👉 <b>ACTION FOR LIVE TRADERS:</b>\n"
             f"<b>Close Kite position & cancel open GTT to cap loss early.</b>\n"
             f"━━━━━━━━━━━━━━━━━━"
@@ -1450,7 +1500,7 @@ class TelegramBot:
         pnl = trade_info.get("pnl", 0)
         text = (
             "\U0001f3af <b>TARGET HIT</b>\n"
-            f"{trade_info.get('symbol', '')}\n"
+            f"{html.escape(str(trade_info.get('symbol', '')))}\n"
             f"Exit: <code>Rs {trade_info.get('exit_price', 0):,.2f}</code>\n"
             f"P&L: <code>Rs {pnl:+,.0f}</code>"
         )
@@ -1519,8 +1569,8 @@ class TelegramBot:
                 pnl_label = "PROFIT" if net_pnl >= 0 else "LOSS"
                 clean_reason = raw_reason.replace("exitreason.", "").replace("_", " ").title()
                 reason_title = f"📋 <b>POSITION CLOSED ({pnl_label})</b>"
-                reason_desc = f"Exit reason: {clean_reason}"
-                action_directive = "Ensure position is squared off on Kite."
+                reason_desc = reason_desc or f"Exit reason: {clean_reason}"
+                action_directive = action_directive or "Ensure position is squared off on Kite."
 
         pnl_emoji = "🟢" if net_pnl >= 0 else "🔴"
         duration_sec = trade_info.get("holding_duration_seconds", 0)
@@ -1537,9 +1587,9 @@ class TelegramBot:
             leg2_clean = human_search_name_from_api_symbol(leg2_raw)
             contract_box = (
                 f"📋 <b>Zerodha Kite Contracts (Tap to Copy):</b>\n"
-                f"• <b>Leg 1 (Short):</b> <code>{leg1_clean}</code> (BUY to close)\n"
-                f"• <b>Leg 2 (Hedge):</b> <code>{leg2_clean}</code> (SELL to close)\n"
-                f"<i>API: <code>{instrument}</code></i>\n"
+                f"• <b>Leg 1 (Short):</b> <code>{html.escape(str(leg1_clean))}</code> (BUY to close)\n"
+                f"• <b>Leg 2 (Hedge):</b> <code>{html.escape(str(leg2_clean))}</code> (SELL to close)\n"
+                f"<i>API: <code>{html.escape(str(instrument))}</code></i>\n"
             )
             action_directive = (
                 "<b>Exit Spread on Kite:</b>\n"
@@ -1547,11 +1597,12 @@ class TelegramBot:
                 "2. <b>BUY back Leg 1 (Short) first</b>, then <b>SELL Leg 2 (Hedge)</b> to avoid naked margin penalties."
             )
         else:
+            search_str = kite_search or instrument
             contract_box = (
                 f"📋 <b>Zerodha Kite Contract (Tap to Copy):</b>\n"
-                f"<code>{kite_search}</code>\n"
-                f"<i>API: <code>{instrument}</code></i>\n"
-                if kite_search else (f"<code>{instrument}</code>\n" if instrument else "")
+                f"<code>{html.escape(str(search_str))}</code>\n"
+                f"<i>API: <code>{html.escape(str(instrument))}</code></i>\n"
+                if search_str else ""
             )
 
         cost_line = ""
@@ -1562,12 +1613,12 @@ class TelegramBot:
         lines = [
             f"🚨 {reason_title}",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"<b>Symbol:</b> <code>{symbol}</code> ({side} {qty}x)",
+            f"<b>Symbol:</b> <code>{html.escape(str(symbol))}</code> ({html.escape(str(side))} {qty}x)",
             contract_box,
             f"<b>Entry:</b> Rs {entry_price:,.2f} ➔ <b>Exit:</b> Rs {exit_price:,.2f} (<b>{return_pct:+.2f}%</b>)",
             f"{pnl_emoji} <b>Gross P&L:</b> Rs {gross_pnl:+,.2f} | <b>Net P&L:</b> Rs {net_pnl:+,.2f}",
             cost_line + dur_line,
-            f"ℹ️ <b>Why Exit Triggered:</b>\n<i>{reason_desc}</i>\n",
+            f"ℹ️ <b>Why Exit Triggered:</b>\n<i>{html.escape(str(reason_desc))}</i>\n",
             "⚡ <b>ACTION REQUIRED ON KITE:</b>",
             f"👉 {action_directive}",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1651,16 +1702,17 @@ class TelegramBot:
 
             contract_box = (
                 f"📋 <b>Zerodha Kite Contracts (Tap to Copy):</b>\n"
-                f"• <b>Leg 1 (Short):</b> <code>{leg1_clean}</code> (BUY to close)\n"
-                f"• <b>Leg 2 (Hedge):</b> <code>{leg2_clean}</code> (SELL to close)\n"
-                f"<i>API: <code>{instrument}</code></i>"
+                f"• <b>Leg 1 (Short):</b> <code>{html.escape(str(leg1_clean))}</code> (BUY to close)\n"
+                f"• <b>Leg 2 (Hedge):</b> <code>{html.escape(str(leg2_clean))}</code> (SELL to close)\n"
+                f"<i>API: <code>{html.escape(str(instrument))}</code></i>"
             )
         else:
+            search_str = kite_search or instrument
             contract_box = (
                 f"📋 <b>Zerodha Kite Contract (Tap to Copy):</b>\n"
-                f"<code>{kite_search}</code>\n"
-                f"<i>API: <code>{instrument}</code></i>"
-                if kite_search else (f"<code>{instrument}</code>" if instrument else "")
+                f"<code>{html.escape(str(search_str))}</code>\n"
+                f"<i>API: <code>{html.escape(str(instrument))}</code></i>"
+                if search_str else ""
             )
 
         # Points and Return %
@@ -1732,22 +1784,18 @@ class TelegramBot:
             else:
                 health_summary = "Score: N/A | Telemetry neutral"
 
-        # Operator Action Command (e.g. HOLD IT, SELL, STRONG MOMENTUM EXPECTED)
-        action_cmd = str(info.get("operator_action", "") or info.get("action_cmd", "") or "")
-        action_detail = str(info.get("action_detail", "") or "")
-        if not action_cmd:
-            from prometheus.execution.position_health import get_operator_action_command
-            rep_source = health_report if health_report is not None else (health_score_val if health_score_val is not None else health_summary)
-            action_cmd, action_detail = get_operator_action_command(
-                report=rep_source,
-                gross_pts=gross_pts,
-                net_pts=net_pts,
-            )
+        # Operational State: highlight strong trend continuation or exit risk without redundant consolidation badge
+        if gross_pts >= 15.0 or (health_score_val is not None and health_score_val >= 15.0):
+            op_state = " | 🟢 <b>[STATUS: TREND INTACT]</b>"
+        elif gross_pts <= -15.0 or (health_score_val is not None and health_score_val <= -30.0):
+            op_state = " | 🔴 <b>[STATUS: EXIT]</b>"
+        else:
+            op_state = ""
 
         lines = [
             "⏱️ <b>TRADE UPDATE — LIVE STATUS</b>",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"<b>Symbol:</b> <code>{symbol}</code> ({direction}{qty_str})",
+            f"<b>Symbol:</b> <code>{html.escape(symbol)}</code> ({html.escape(direction)}{qty_str}){op_state}",
         ]
         if contract_box:
             lines.append(contract_box)
@@ -1759,20 +1807,20 @@ class TelegramBot:
             "",
             f"🛑 <b>Active Trailing SL:</b> Rs {stop_loss:,.2f}{stage_badge}",
             f"🎯 <b>Profit Target:</b> Rs {target:,.2f}",
-            f"⏱️ <b>Holding Duration:</b> <code>{dur_str}</code>",
-            "",
-            "⚡ <b>ACTION COMMAND:</b>",
-            f"👉 <b>{action_cmd}</b>",
-            f"<i>{action_detail}</i>",
-            "",
-            "🩺 <b>8-Pillar Health Score:</b>",
-            f"<i>{health_summary}</i>",
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"⏱️ <b>Holding Duration:</b> <code>{html.escape(dur_str)}</code>",
         ])
+
+        if health_summary and "N/A" not in health_summary:
+            lines.extend([
+                "",
+                "🩺 <b>8-Pillar Health Score:</b>",
+                f"<i>{html.escape(health_summary)}</i>",
+            ])
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         trade_id = info.get("trade_id")
         if trade_id:
-            lines.append(f"<code>ID: {trade_id}</code>")
+            lines.append(f"<code>ID: {html.escape(str(trade_id))}</code>")
 
         text = "\n".join(lines)
 
@@ -1787,9 +1835,9 @@ class TelegramBot:
         """Alert when a risk limit is breached."""
         text = (
             "\u26a0\ufe0f <b>RISK ALERT</b>\n"
-            f"<b>{risk_info.get('violation', '')}</b>\n"
-            f"{risk_info.get('details', '')}\n\n"
-            f"Action: <i>{risk_info.get('action', 'Review immediately')}</i>"
+            f"<b>{html.escape(str(risk_info.get('violation', '')))}</b>\n"
+            f"{html.escape(str(risk_info.get('details', '')))}\n\n"
+            f"Action: <i>{html.escape(str(risk_info.get('action', 'Review immediately')))}</i>"
         )
         self.send_message(text)
 
@@ -1818,7 +1866,7 @@ class TelegramBot:
             f"<b>Realized Profit Factor:</b> <code>{pf:.2f}</code> (Baseline: <code>{base_pf:.2f}</code> | Drift: <code>{pf_dev:+.1f}%</code>)",
             f"<b>Mathematical Expectancy:</b> <code>Rs {exp:+.2f}/trade</code>",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"ℹ️ <b>Regime Diagnosis:</b>\n<i>{reason}</i>\n",
+            f"ℹ️ <b>Regime Diagnosis:</b>\n<i>{html.escape(str(reason))}</i>\n",
             "🛡️ <b>AUTOMATED RISK ADAPTATION:</b>",
             f"👉 <b>Exposure Sizing Multiplier:</b> <code>{mult}x</code> ({'Halved to 0.5x lot size' if mult == 0.5 else 'Quarantined to Paper Capture (0 lots)'})",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1852,7 +1900,7 @@ class TelegramBot:
             f"{wr_line}"
         )
         if guardrail_audit:
-            text += f"Intraday Guardrail: <code>{guardrail_audit}</code>\n"
+            text += f"Intraday Guardrail: <code>{html.escape(str(guardrail_audit))}</code>\n"
         text += f"\n\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
         self.send_message(text)
 
@@ -1874,6 +1922,6 @@ class TelegramBot:
         """Alert on critical system error (non-blocking)."""
         text = (
             "\U0001f525 <b>SYSTEM ERROR</b>\n"
-            f"<code>{error[:300]}</code>"
+            f"<code>{html.escape(str(error)[:300])}</code>"
         )
         self.send_message_async(text)

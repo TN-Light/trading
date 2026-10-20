@@ -555,6 +555,11 @@ class Prometheus:
                     self._paper_capture.on_bar(sym, bar, is_session_end=False)
                 except Exception as e:
                     logger.debug(f"[PaperCapture] on_bar forward failed for {sym}: {e}")
+            if getattr(self._paper_capture, "post_exit_tracker", None):
+                try:
+                    self._paper_capture.post_exit_tracker.poll_micro_cache()
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"[PaperCapture] feed_bars outer error: {e}")
 
@@ -2226,6 +2231,7 @@ class Prometheus:
                         net_gex=net_gex,
                         structural_sl_pts=structural_sl_pts,
                         is_low_vix=is_low_vix,
+                        vix=current_vix,
                         orb_high=orb_high,
                         orb_low=orb_low,
                         direction=direction,
@@ -2315,6 +2321,9 @@ class Prometheus:
                                 execution_signal["atr"] = spot_atr
                                 execution_signal["spot_sl_level"] = pa_sig.get("spot_sl_level")
                                 execution_signal["is_institutional_trend_day"] = bool(pa_sig.get("is_institutional_trend_day"))
+                                execution_signal["bar_range"] = pa_sig.get("bar_range")
+                                execution_signal["body_displacement"] = pa_sig.get("body_displacement")
+                                execution_signal["has_range_expansion"] = bool(pa_sig.get("has_range_expansion"))
                                 execution_signal["adx"] = float(pa_sig.get("adx", 0.0) or 0.0)
                                 execution_signal["breakeven_trigger_pts"] = pa_sig.get("breakeven_trigger_pts", round(target_gain_pts * 0.5, 1))
                                 execution_signal["tier"] = pa_sig.get("tier", "C")
@@ -2343,33 +2352,97 @@ class Prometheus:
 
             if get("intraday.credit_spread.enabled", True):
                 if not hasattr(self, "_credit_spread_strategy"):
-                    max_dte = int(get("intraday.credit_spread.max_days_to_expiry", 3))
-                    self._credit_spread_strategy = CreditSpreadStrategy(max_days_to_expiry=max_dte)
+                    cs_cfg = get("intraday.credit_spread", {}) or {}
+                    max_dte = cs_cfg.get("max_days_to_expiry", 1)
+                    max_dte_monthly = cs_cfg.get("max_days_to_expiry_monthly", 1)
 
-                intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+                    st_val = cs_cfg.get("start_time")
+                    start_t = None
+                    if st_val:
+                        try:
+                            from datetime import time as dtime
+                            if isinstance(st_val, str) and ":" in st_val:
+                                h, m = map(int, st_val.split(":"))
+                                start_t = dtime(h, m)
+                            elif isinstance(st_val, dtime):
+                                start_t = st_val
+                        except Exception:
+                            start_t = None
+
+                    et_val = cs_cfg.get("end_time")
+                    end_t = None
+                    if et_val:
+                        try:
+                            from datetime import time as dtime
+                            if isinstance(et_val, str) and ":" in et_val:
+                                h, m = map(int, et_val.split(":"))
+                                end_t = dtime(h, m)
+                            elif isinstance(et_val, dtime):
+                                end_t = et_val
+                        except Exception:
+                            end_t = None
+
+                    self._credit_spread_strategy = CreditSpreadStrategy(
+                        strike_otm_steps=int(cs_cfg.get("strike_otm_steps", 1)),
+                        hedge_otm_steps=int(cs_cfg.get("hedge_otm_steps", 3)),
+                        target_decay_pct=float(cs_cfg.get("target_decay_pct", 0.70)),
+                        breakeven_decay_pct=float(cs_cfg.get("breakeven_decay_pct", 0.50)),
+                        max_loss_multiplier=float(cs_cfg.get("max_loss_multiplier", 1.5)),
+                        min_credit_pct=float(cs_cfg.get("min_credit_pct", 0.15)),
+                        max_days_to_expiry=int(max_dte) if max_dte is not None else None,
+                        max_days_to_expiry_monthly=int(max_dte_monthly) if max_dte_monthly is not None else None,
+                        max_range_pct=float(cs_cfg.get("max_range_pct", 0.018)),
+                        start_time=start_t,
+                        end_time=end_t,
+                        require_long_gamma=bool(cs_cfg.get("require_long_gamma", False)),
+                        min_net_gex=float(cs_cfg.get("min_net_gex", 1.5)),
+                        short_gamma_ban_threshold=float(cs_cfg.get("short_gamma_ban_threshold", -0.5)),
+                        require_macro_trend=bool(cs_cfg.get("require_macro_trend", False)),
+                    )
+
+                curr_net_gex = None
+                curr_zgl = None
+                curr_commitment = None
+                chain_data = None
+                try:
+                    chain_data = self.data.fetch_options_chain(symbol)
+                    spot_px = float(intra_df["close"].iloc[-1]) if intra_df is not None and not intra_df.empty else 0
+                    if chain_data is not None and not chain_data.empty and spot_px > 0:
+                        if hasattr(self, "gamma_engine"):
+                            gex_res = self.gamma_engine.calculate_gex(chain_data, spot_px, symbol)
+                            curr_net_gex = gex_res.get("net_gex")
+                            curr_zgl = gex_res.get("zgl")
+                        if hasattr(self, "oi_analyzer"):
+                            res_oi = self.oi_analyzer.analyze(chain_data, spot_px)
+                            curr_commitment = res_oi.get("metrics", {}).get("commitment_ratio")
+                except Exception as telemetry_err:
+                    logger.debug(f"Pre-spread GEX/OI telemetry check failed for {symbol}: {telemetry_err}")
+
+                stopped_set = set()
+                if hasattr(self, "_today_stopped_out_symbol_directions"):
+                    stopped_set.update(self._today_stopped_out_symbol_directions)
+                if self.paper_capture and hasattr(self.paper_capture, "_today_stopped_out_symbol_directions"):
+                    stopped_set.update(self.paper_capture._today_stopped_out_symbol_directions)
+
                 if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
                     cs_sig = self._credit_spread_strategy.evaluate_spread(
                         intra_df,
                         symbol=symbol,
                         capital=self.initial_capital,
                         option_chain=getattr(self.data, "angelone_options", None),
+                        df_1h=df_1h,
+                        net_gex=curr_net_gex,
+                        stopped_out_directions=stopped_set,
                     )
                     if cs_sig:
                         cs_sig["strategy_type"] = "credit_spread"
                         cs_sig["signal_score"] = float(cs_sig.get("signal_score") or cs_sig.get("signal_strength", 3.5) or 3.5)
-                        try:
-                            chain_data = self.data.fetch_options_chain(symbol)
-                            und_px = float(cs_sig.get("underlying_price", 0) or 0)
-                            if chain_data is not None and not chain_data.empty and und_px > 0:
-                                if hasattr(self, "oi_analyzer"):
-                                    res_oi = self.oi_analyzer.analyze(chain_data, und_px)
-                                    cs_sig["commitment_ratio"] = res_oi.get("metrics", {}).get("commitment_ratio")
-                                if hasattr(self, "gamma_engine"):
-                                    gex_res = self.gamma_engine.calculate_gex(chain_data, und_px, symbol)
-                                    cs_sig["net_gex"] = gex_res.get("net_gex")
-                                    cs_sig["zgl"] = gex_res.get("zgl")
-                        except Exception:
-                            pass
+                        if curr_net_gex is not None:
+                            cs_sig["net_gex"] = curr_net_gex
+                        if curr_zgl is not None:
+                            cs_sig["zgl"] = curr_zgl
+                        if curr_commitment is not None:
+                            cs_sig["commitment_ratio"] = curr_commitment
                         logger.info(
                             f"CreditSpread signal generated for {symbol}: "
                             f"{cs_sig.get('spread_type')} (Credit=Rs {cs_sig.get('net_credit', 0):.2f}) "
@@ -2393,6 +2466,29 @@ class Prometheus:
 
             # Strategy preference: "credit_spread" = seller-first, "option_buying" = buyer-first (legacy)
             pref = get("intraday.credit_spread.strategy_preference", "credit_spread")
+
+            # Directional Compatibility Check:
+            # A bullish Option Buy (BUY_CE) must ONLY be paired/prioritized with a bullish Credit Spread (BULL_PUT_SPREAD).
+            # It must NEVER be overwritten by an opposing BEAR_CALL_SPREAD. If directions conflict, do not override.
+            buy_action = str(execution_signal.get("action", "")).upper()
+            buy_opt = str(execution_signal.get("option_type", "")).upper()
+            buy_dir = str(execution_signal.get("direction", "")).lower()
+            is_buy_bullish = ("CE" in buy_action) or (buy_opt == "CE") or ("CALL" in buy_action) or (buy_dir in ("bullish", "long", "buy"))
+            is_buy_bearish = ("PE" in buy_action) or (buy_opt == "PE") or ("PUT" in buy_action) or (buy_dir in ("bearish", "short", "sell"))
+
+            spread_type = str(cs_sig.get("spread_type", "")).upper()
+            cs_act = str(cs_sig.get("action", "")).upper()
+            is_spread_bullish = ("BULL" in spread_type) or ("PUT_SPREAD" in spread_type) or ("BULL" in cs_act) or ("PUT_SPREAD" in cs_act)
+            is_spread_bearish = ("BEAR" in spread_type) or ("CALL_SPREAD" in spread_type) or ("BEAR" in cs_act) or ("CALL_SPREAD" in cs_act)
+
+            directions_conflict = (is_buy_bullish and is_spread_bearish) or (is_buy_bearish and is_spread_bullish)
+            if directions_conflict:
+                logger.warning(
+                    f"Signal Priority on {symbol}: Directional conflict detected between Option Buying "
+                    f"({execution_signal.get('action')}) and Credit Spread ({spread_type}). "
+                    f"Opposing spread will not override option buy; retaining directional Option Buying signal."
+                )
+                return execution_signal
 
             # EXPIRY REGIME (0-DTE):
             # Defined-risk credit spreads have an 85%+ theoretical win rate from terminal theta collapse.
@@ -3262,6 +3358,20 @@ class Prometheus:
             }
             self._feed_real_premium(signal)
 
+        # Poll PaperCapture open positions to advance real-time trailing stops and fire 5-minute Telegram heartbeats
+        pc = getattr(self, "paper_capture", None) or getattr(self, "_paper_capture", None)
+        if pc:
+            if hasattr(pc, "poll_open_positions"):
+                try:
+                    pc.poll_open_positions()
+                except Exception as pc_err:
+                    logger.debug(f"PaperCapture poll_open_positions error: {pc_err}")
+            if getattr(pc, "post_exit_tracker", None):
+                try:
+                    pc.post_exit_tracker.poll_micro_cache()
+                except Exception:
+                    pass
+
     # ─────────────────────────────────────────────────────────────────────
     # POSITION MONITOR HELPERS (shared by semi_auto, full_auto, dry_run)
     # ─────────────────────────────────────────────────────────────────────
@@ -3281,11 +3391,14 @@ class Prometheus:
         )
         self.position_monitor.start()
 
-        if isinstance(self.broker, PaperTrader):
+        if isinstance(self.broker, PaperTrader) or getattr(self, "paper_capture", None) or getattr(self, "_paper_capture", None):
             self._start_paper_price_refresher()
 
     def _start_paper_price_refresher(self):
         """Start a background thread that continuously updates open paper options prices."""
+        if getattr(self, "_paper_refresher_running", False):
+            return
+        self._paper_refresher_running = True
         import threading
         from prometheus.utils.indian_market import is_trading_day
 
@@ -3300,11 +3413,11 @@ class Prometheus:
                         self._refresh_open_paper_prices()
                 except Exception as e:
                     logger.error(f"Error in paper price refresher loop: {e}")
-                time.sleep(30)
+                time.sleep(15)
 
         t = threading.Thread(target=_loop, daemon=True, name="paper-price-refresher")
         t.start()
-        logger.info("Paper price refresher thread started (refreshes every 30s)")
+        logger.info("Paper price refresher thread started (refreshes every 15s)")
 
     def _lookup_spot_close_for_trade_date(self, symbol: str, trade_date: date) -> Optional[float]:
         """Resolve best available underlying close for a trade date.
@@ -4945,7 +5058,7 @@ class Prometheus:
             on_heartbeat=self._handle_position_heartbeat,
         )
         self.position_monitor.start()
-        if isinstance(self.broker, PaperTrader):
+        if isinstance(self.broker, PaperTrader) or getattr(self, "paper_capture", None) or getattr(self, "_paper_capture", None):
             self._start_paper_price_refresher()
         self._restore_equity_state()
         self._restore_persisted_positions()
@@ -5227,11 +5340,62 @@ class Prometheus:
                         # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Trend Day
                         if is_lunch_dead_zone and is_buying:
                             is_trend_day = bool(refined.get("is_institutional_trend_day"))
+                            # Spot-volume proxy fallback: if not confirmed via volume, evaluate via range expansion
+                            if not is_trend_day:
+                                adx_val = float(refined.get("adx", 0.0) or 0.0)
+                                spot_atr = float(refined.get("atr", 0.0) or 0.0)
+                                bar_range = float(refined.get("bar_range", 0.0) or 0.0)
+                                body_disp = float(refined.get("body_displacement", 0.0) or 0.0)
+                                has_expansion = bool(refined.get("has_range_expansion"))
+                                if adx_val >= 25.0 and spot_atr > 0 and (has_expansion or (bar_range >= 2.0 * spot_atr and body_disp >= 0.5 * bar_range)):
+                                    orb_h = refined.get("orb_high")
+                                    orb_l = refined.get("orb_low")
+                                    spot_p = float(refined.get("underlying_price", 0) or refined.get("spot_price", 0) or refined.get("entry_price", 0))
+                                    is_orb_ok = True
+                                    if orb_h is not None and "CE" in str(refined.get("action", "")):
+                                        is_orb_ok = (spot_p >= orb_h) if spot_p > 0 else True
+                                    elif orb_l is not None and "PE" in str(refined.get("action", "")):
+                                        is_orb_ok = (spot_p <= orb_l) if spot_p > 0 else True
+                                    if is_orb_ok:
+                                        is_trend_day = True
+                                        refined["is_institutional_trend_day"] = True
+
                             if is_trend_day:
+                                # Climax Exhaustion Check:
+                                # Even on a trend day, do NOT enter option buying during lunch if spot is already
+                                # >= 2.0x ATR extended from the ORB boundary, or >= 2.2x ATR from session VWAP.
+                                # Buying 2 hours into an exhausted trend right before lunch chop leads to severe
+                                # theta burn and false breakouts (e.g. Oct 16 Sensex CD1C76 / Nifty 6D748C).
+                                spot_atr = float(refined.get("atr", 0.0) or 0.0)
+                                spot_p = float(refined.get("underlying_price", 0) or refined.get("spot_price", 0) or refined.get("entry_price", 0))
+                                orb_h = refined.get("orb_high")
+                                orb_l = refined.get("orb_low")
+                                vwap_val = float(refined.get("vwap", 0.0) or 0.0)
+                                act_str = str(refined.get("action", ""))
+
+                                is_climax_exhausted = False
+                                if spot_atr > 0 and spot_p > 0:
+                                    if vwap_val > 0 and abs(spot_p - vwap_val) >= 2.2 * spot_atr:
+                                        is_climax_exhausted = True
+                                    if orb_h is not None and "CE" in act_str and (spot_p - orb_h) >= 2.0 * spot_atr:
+                                        is_climax_exhausted = True
+                                    elif orb_l is not None and "PE" in act_str and (orb_l - spot_p) >= 2.0 * spot_atr:
+                                        is_climax_exhausted = True
+
+                                if is_climax_exhausted:
+                                    is_trend_day = False
+                                    refined["is_institutional_trend_day"] = False
+                                    logger.info(
+                                        f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {symbol}: "
+                                        f"Climax exhaustion detected (spot is extended >= 2.0x ATR from ORB / VWAP). "
+                                        f"Bypassing lunch gate disallowed to prevent late-trend theta decay trap."
+                                    )
+                                    continue
+
                                 adx_val = refined.get("adx", 25.0)
                                 logger.info(
                                     f"{mode_label}: [Trend-Day Lunch Bypass] Allowing Option Buying on {symbol} "
-                                    f"(Institutional Trend Day confirmed: ADX={adx_val} >= 25, Vol Surge). Bypassing lunch gate."
+                                    f"(Institutional Trend Day confirmed: ADX={adx_val} >= 25, Vol Surge / Range Expansion). Bypassing lunch gate."
                                 )
                             else:
                                 logger.info(
@@ -5278,11 +5442,24 @@ class Prometheus:
                     # Live Execution Gating: Only Rank #1 signals that are LIVE ELIGIBLE (Tier S, A, B)
                     # execute on the primary live account. Tier C, Tier D, or Rank #2+ signals
                     # route strictly to the paper trading engine for shadow tracking.
-                    if is_rank_1 and tier_info["is_live_eligible"]:
+                    # Team A Mandate: De-allocate Bank Nifty & FinNifty directional option buying
+                    # from live capital; focus live capital on SENSEX, NIFTY 50, and credit spreads.
+                    sym_u = str(refined.get("symbol", "") or "").upper()
+                    is_spread_sig = refined.get("strategy_type") == "credit_spread" or "SPREAD" in str(refined.get("action", "")).upper()
+                    is_bn_fn_buying = (not is_spread_sig) and ("BANK" in sym_u or "FIN" in sym_u)
+
+                    if is_rank_1 and tier_info["is_live_eligible"] and not is_bn_fn_buying:
                         # Rank #1 Live Eligible: Dispatch to primary account
                         position = self._execute_signal_with_feedback(
                             refined, confirm=False, context=mode_label
                         )
+                    elif is_rank_1 and is_bn_fn_buying:
+                        logger.info(
+                            f"[CAPITAL-ALLOCATION] De-allocating live capital from {refined.get('symbol')} "
+                            f"directional option buying (-Rs 5,760 net empirical drag). Reserved for credit spreads. "
+                            f"Routing to Paper Engine for statistical tracking."
+                        )
+                        position = None
                         if position is None:
                             position = self._dispatch_multi_account(
                                 refined, is_intraday=True,
@@ -5351,6 +5528,15 @@ class Prometheus:
                     f"Trades: {_intraday_trades_today}/{max_trades} | "
                     f"Bar: {bar_interval}"
                 )
+
+                # Wire PostExitTracker micro cache polling into intraday monitoring loop
+                pc = getattr(self, "paper_capture", None) or getattr(self, "_paper_capture", None)
+                if pc and getattr(pc, "post_exit_tracker", None):
+                    try:
+                        pc.post_exit_tracker.poll_micro_cache()
+                    except Exception:
+                        pass
+
                 time.sleep(10)
 
             except KeyboardInterrupt:
@@ -5802,11 +5988,62 @@ class Prometheus:
                                     # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Trend Day
                                     if (lunch_start_time <= current_time < lunch_end_time) and is_buying:
                                         is_trend_day = bool(refined.get("is_institutional_trend_day"))
+                                        # Spot-volume proxy fallback: if not confirmed via volume, evaluate via range expansion
+                                        if not is_trend_day:
+                                            adx_val = float(refined.get("adx", 0.0) or 0.0)
+                                            spot_atr = float(refined.get("atr", 0.0) or 0.0)
+                                            bar_range = float(refined.get("bar_range", 0.0) or 0.0)
+                                            body_disp = float(refined.get("body_displacement", 0.0) or 0.0)
+                                            has_expansion = bool(refined.get("has_range_expansion"))
+                                            if adx_val >= 25.0 and spot_atr > 0 and (has_expansion or (bar_range >= 2.0 * spot_atr and body_disp >= 0.5 * bar_range)):
+                                                orb_h = refined.get("orb_high")
+                                                orb_l = refined.get("orb_low")
+                                                spot_p = float(refined.get("underlying_price", 0) or refined.get("spot_price", 0) or refined.get("entry_price", 0))
+                                                is_orb_ok = True
+                                                if orb_h is not None and "CE" in str(refined.get("action", "")):
+                                                    is_orb_ok = (spot_p >= orb_h) if spot_p > 0 else True
+                                                elif orb_l is not None and "PE" in str(refined.get("action", "")):
+                                                    is_orb_ok = (spot_p <= orb_l) if spot_p > 0 else True
+                                                if is_orb_ok:
+                                                    is_trend_day = True
+                                                    refined["is_institutional_trend_day"] = True
+
                                         if is_trend_day:
+                                            # Climax Exhaustion Check:
+                                            # Even on a trend day, do NOT enter option buying during lunch if spot is already
+                                            # >= 2.0x ATR extended from the ORB boundary, or >= 2.2x ATR from session VWAP.
+                                            # Buying 2 hours into an exhausted trend right before lunch chop leads to severe
+                                            # theta burn and false breakouts (e.g. Oct 16 Sensex CD1C76 / Nifty 6D748C).
+                                            spot_atr = float(refined.get("atr", 0.0) or 0.0)
+                                            spot_p = float(refined.get("underlying_price", 0) or refined.get("spot_price", 0) or refined.get("entry_price", 0))
+                                            orb_h = refined.get("orb_high")
+                                            orb_l = refined.get("orb_low")
+                                            vwap_val = float(refined.get("vwap", 0.0) or 0.0)
+                                            act_str = str(refined.get("action", ""))
+
+                                            is_climax_exhausted = False
+                                            if spot_atr > 0 and spot_p > 0:
+                                                if vwap_val > 0 and abs(spot_p - vwap_val) >= 2.2 * spot_atr:
+                                                    is_climax_exhausted = True
+                                                if orb_h is not None and "CE" in act_str and (spot_p - orb_h) >= 2.0 * spot_atr:
+                                                    is_climax_exhausted = True
+                                                elif orb_l is not None and "PE" in act_str and (orb_l - spot_p) >= 2.0 * spot_atr:
+                                                    is_climax_exhausted = True
+
+                                            if is_climax_exhausted:
+                                                is_trend_day = False
+                                                refined["is_institutional_trend_day"] = False
+                                                logger.info(
+                                                    f"{mode_label}: [Lunch Dead Zone Gate] Suppressed Option Buying on {isym}: "
+                                                    f"Climax exhaustion detected (spot is extended >= 2.0x ATR from ORB / VWAP). "
+                                                    f"Bypassing lunch gate disallowed to prevent late-trend theta decay trap."
+                                                )
+                                                continue
+
                                             adx_val = refined.get("adx", 25.0)
                                             logger.info(
                                                 f"{mode_label}: [Trend-Day Lunch Bypass] Allowing Option Buying on {isym} "
-                                                f"(Institutional Trend Day confirmed: ADX={adx_val} >= 25, Vol Surge). Bypassing lunch gate."
+                                                f"(Institutional Trend Day confirmed: ADX={adx_val} >= 25, Vol Surge / Range Expansion). Bypassing lunch gate."
                                             )
                                         else:
                                             logger.info(
@@ -9801,8 +10038,19 @@ class Prometheus:
         tg.register_command("reject", lambda a: tg.handle_reject())
         tg.register_command("positions", self._tg_cmd_positions)
         tg.register_command("set_price", self._tg_cmd_set_price)
+        tg.register_command("postexit", self._tg_cmd_postexit)
 
         tg.start_listening()
+
+    def _tg_cmd_postexit(self, args: str = "") -> str:
+        """Handle /postexit command: output post-exit drift & shakeout analytics."""
+        try:
+            from prometheus.analysis.post_exit_analytics import PostExitAnalytics
+            analytics = PostExitAnalytics()
+            return analytics.generate_telegram_summary()
+        except Exception as e:
+            logger.error(f"Error in /postexit: {e}")
+            return f"❌ Error computing post-exit analytics: {e}"
 
     def _tg_cmd_help(self, args: str = "") -> str:
         """Handle /help command."""
@@ -9823,6 +10071,7 @@ class Prometheus:
             f"/pnl            Today's P&amp;L\n"
             f"/positions   Open positions\n"
             f"/regime       Market regime\n"
+            f"/postexit     Post-exit drift & shakeouts\n"
             f"/help           This message\n\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
             f"<i>Signals sent automatically during market hours</i>"
@@ -10091,7 +10340,8 @@ class Prometheus:
                         adj_confidence = raw_confidence * regime_mult
                         
                         return {
-                            "symbol": f"{symbol} (intraday {bar_interval})",
+                            "symbol": symbol,
+                            "display_name": f"{symbol} (intraday {bar_interval})",
                             "action": exec_sig.get("action", "HOLD"),
                             "raw_confidence": raw_confidence,
                             "adj_confidence": adj_confidence,
@@ -10105,6 +10355,7 @@ class Prometheus:
                             "executable": symbol not in SIGNAL_ONLY,
                             "timeframe": "intraday",
                             "instrument": exec_sig.get("instrument", ""),
+                            "tradingsymbol": exec_sig.get("tradingsymbol", exec_sig.get("instrument", "")),
                             "strike": exec_sig.get("strike", 0),
                             "option_type": exec_sig.get("option_type", ""),
                             "expiry": exec_sig.get("expiry", ""),
@@ -10116,6 +10367,12 @@ class Prometheus:
                             "margin_required": exec_sig.get("margin_required", 0),
                             "legs": exec_sig.get("legs", []),
                             "lot_size": exec_sig.get("lot_size", 0),
+                            "edge_score": exec_sig.get("edge_score", 0.0),
+                            "signal_score": exec_sig.get("edge_score", 0.0),
+                            "reasons": exec_sig.get("reasons", []),
+                            "lots": exec_sig.get("lots", 1),
+                            "lot_cost": exec_sig.get("lot_cost", 0.0),
+                            "quantity": exec_sig.get("quantity", exec_sig.get("lots", 1) * exec_sig.get("lot_size", 0)),
                             # Freshness timestamp (Fix B) — see _scan_one_cmd.
                             "_signal_generated_at": time.time(),
                         }
@@ -10517,6 +10774,7 @@ class Prometheus:
             "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
             "",
         ]
+        import html
         for pid, state in self.position_monitor.get_positions().items():
             ltp = self.broker.get_ltp(state.tradingsymbol)
             if ltp and ltp > 0 and state.entry_premium > 0:
@@ -10535,8 +10793,8 @@ class Prometheus:
             display_name = kite_name if kite_name else state.tradingsymbol
             
             lines.append(
-                f"{pnl_emoji} <b>{display_name}</b>\n"
-                f"    <i>{acct_label}</i>\n"
+                f"{pnl_emoji} <b>{html.escape(str(display_name))}</b>\n"
+                f"    <i>{html.escape(str(acct_label))}</i>\n"
                 f"    Entry <code>{state.entry_premium:.2f}</code>  \u2502  SL <code>{state.current_sl:.2f}</code>{ltp_str}\n"
                 f"    Stage <code>{state.current_stage()}</code>  \u2502  "
                 f"Bars <code>{state.entry_bar_count}/{state.max_bars}</code>\n"

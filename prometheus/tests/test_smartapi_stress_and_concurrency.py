@@ -104,10 +104,10 @@ class TestTier1FeatureCoverageRateLimiter:
     def test_rate_limiter_independent_endpoint_buckets(self):
         """Feature 1.5: Depleting Historical bucket does not affect Quotes or Orders."""
         limiter = PrioritizedTokenBucketLimiter()
-        # Exhaust historical bucket (capacity 3)
+        # Exhaust historical bucket (capacity 3, accommodating >=400ms inter-call pacing)
         assert limiter.acquire(EndpointCategory.HISTORICAL, PriorityTier.P4_BACKGROUND_SCANNER, timeout=0.05) is True
-        assert limiter.acquire(EndpointCategory.HISTORICAL, PriorityTier.P4_BACKGROUND_SCANNER, timeout=0.05) is True
-        assert limiter.acquire(EndpointCategory.HISTORICAL, PriorityTier.P4_BACKGROUND_SCANNER, timeout=0.05) is True
+        assert limiter.acquire(EndpointCategory.HISTORICAL, PriorityTier.P4_BACKGROUND_SCANNER, timeout=1.0) is True
+        assert limiter.acquire(EndpointCategory.HISTORICAL, PriorityTier.P4_BACKGROUND_SCANNER, timeout=1.0) is True
         # Next immediate call should timeout quickly
         assert limiter.acquire(EndpointCategory.HISTORICAL, PriorityTier.P4_BACKGROUND_SCANNER, timeout=0.01) is False
 

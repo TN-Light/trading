@@ -130,13 +130,13 @@ def test_no_synthetic_volume_spoof_on_zero_volume_bars():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_dealer_long_gex_gates_option_buying_to_tier_c():
-    """In Dealer Long Gamma (net_gex > +1.5 Cr), directional option buying is routed to Tier C."""
+    """In Dealer Long Gamma (net_gex > +1.5 Cr), standard directional option buying (< 8.0 score) is routed to Tier C."""
     sig = {
         "action": "BUY_CE",
         "symbol": "NIFTY BANK",
         "strategy": "Golden_Setup (1H+VWAP+ORB)",
         "is_golden_setup": True,
-        "edge_score": 8.0,
+        "edge_score": 7.5,
         "bar_timestamp": "2026-10-08 10:15:00",
         "reasons": ["15M_ORB_High_Breakout", "Session_VWAP_Bullish", "1H_Trend_Bullish"],
         "net_gex_cr": 2.5,  # +2.5 Cr Long Gamma
@@ -145,7 +145,7 @@ def test_dealer_long_gex_gates_option_buying_to_tier_c():
     tier_info = classify_signal_tier(sig)
     assert tier_info["tier"] == "C"
     assert tier_info["is_live_eligible"] is False
-    assert any("Dealer Long Gamma Regime" in r for r in tier_info["classification_reasons"])
+    assert any("Dealer Long Gamma" in r for r in tier_info["classification_reasons"])
 
 
 def test_0dte_golden_setup_promoted_to_tier_b_when_score_8():
@@ -279,7 +279,7 @@ def test_weak_edge_uses_half_risk_cut_instead_of_entry_noise_sl():
         symbol="NIFTY BANK",
         tradingsymbol="BANKNIFTY26OCT55000CE",
         direction="bullish",
-        current_price=454.0,
+        current_price=457.0,
         entry_price=450.0,
         health_score=-12.0,  # Weak edge
         real_threat=False,
@@ -306,8 +306,8 @@ def test_weak_edge_uses_half_risk_cut_instead_of_entry_noise_sl():
         initial_risk_distance=40.0,
         tier="B",
     )
-    # Gain is +4.0 pts (above cost buffer + 1.0)
-    tracker._maybe_advance_trailing_stop(pos, current_price=454.0)
+    # Gain is +7.0 pts (above statutory cost buffer 5.20 + 1.0 = 6.20)
+    tracker._maybe_advance_trailing_stop(pos, current_price=457.0)
     assert pos.half_risk_set is True
     # Half-risk cut: entry (450) - 0.5 * 40 = 430.0. NOT 450 + 4.50 (which would be inside noise)
     assert pos.stop_loss == 430.0, f"Expected Half-Risk SL of 430.0, got {pos.stop_loss}"
@@ -350,8 +350,8 @@ def test_telegram_alert_live_tier_b_includes_green_banner_and_copy_box():
     assert "BANKNIFTY" in msg
 
 
-def test_telegram_alert_paper_tier_c_strips_copy_box_and_explains_routing():
-    """Paper Tier C signal must have paper action banner, stripped copy box, and explanation."""
+def test_telegram_alert_paper_tier_c_includes_copy_box_and_explains_routing():
+    """Paper Tier C signal must have paper action banner, Zerodha Kite copy box for shadow monitoring, and explanation."""
     messages = []
     bot = TelegramBot(bot_token="", chat_id="")
     bot.send_message = lambda text: messages.append(text)
@@ -377,6 +377,6 @@ def test_telegram_alert_paper_tier_c_strips_copy_box_and_explains_routing():
     msg = messages[0]
     assert "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝" in msg
     assert "🥇 <b>RANK #1 SIGNAL (PAPER ONLY)</b>" in msg
-    assert "Zerodha Kite Search (Tap to Copy)" not in msg, "Kite copy box must be stripped for paper signals"
+    assert "Zerodha Kite Search (Tap to Copy)" in msg, "Kite copy box must be restored for paper signals to allow operator monitoring"
     assert "Paper Engine Tracking" in msg
     assert "Why Paper Only" in msg

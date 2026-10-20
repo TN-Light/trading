@@ -262,21 +262,26 @@ def test_paper_trailing_stop_constant_denominator():
     # Step 1: Move price up to 109 (0.45R -> triggers Breakeven Stage 0 at 0.4R)
     tracker._maybe_advance_trailing_stop(pos, 109.0)
     assert pos.breakeven_set is True
-    # SL is moved to entry + cost_buffer (0.9 for NIFTY) = 100.9
-    assert pos.stop_loss == 100.9
+    # SL is moved to entry + cost_buffer (1.40 statutory floor for NIFTY) = 101.4
+    assert pos.stop_loss == 101.4
     # Crucially, denominator must remain 20.0, NOT (100 - 100.9 = -0.9 -> 1e-9)
     assert pos.initial_risk_distance == 20.0
 
     # Step 2: Next tick moves to 110 (10 pts profit = 0.5R, NOT 1.0R)
     # Under BUG-3, 10 / 1e-9 = 10 billion R, which triggered Stage 2, 3, 4, 5 instantly!
     tracker._maybe_advance_trailing_stop(pos, 110.0)
-    # Stage 2 requires 1.0R (120.0), so trailing_floor should NOT be activated yet
-    assert getattr(pos, "trailing_activated", False) is False
+    # Stage 0.5 requires 0.65R (113.0), so trailing_floor should NOT be activated yet
+    assert getattr(pos, "trailing_floor", 0.0) == 0.0
 
-    # Step 3: Now move to 121 (1.05R -> triggers Stage 2)
+    # Step 2.5: Move to 114 (0.70R -> triggers Stage 0.5 profit lock at 0.65R)
+    tracker._maybe_advance_trailing_stop(pos, 114.0)
+    assert pos.trailing_floor == 0.35
+    assert pos.stop_loss == 107.0  # 100 + 0.35 * 20 = 107.0
+
+    # Step 3: Now move to 121 (1.05R -> triggers Stage 1 profit lock at 1.0R)
     tracker._maybe_advance_trailing_stop(pos, 121.0)
-    assert pos.trailing_floor == 0.2
-    assert pos.stop_loss == 104.0
+    assert pos.trailing_floor == 0.50
+    assert pos.stop_loss == 110.0  # 100 + 0.50 * 20 = 110.0
 
 
 def test_paper_close_position_fallback_sl_vs_entry():

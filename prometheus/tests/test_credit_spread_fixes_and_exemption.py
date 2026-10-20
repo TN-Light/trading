@@ -150,7 +150,7 @@ def test_credit_spread_offline_evaluate_exit():
     assert px == 92.25
 
 
-def test_credit_spread_trailing_stop_strictly_excluded():
+def test_credit_spread_trailing_ratchet_protects_profit():
     feed = DummyFeed()
     fill_sim = FillSimulator(feed=feed)
     tracker = PositionTracker(fill_sim=fill_sim)
@@ -171,11 +171,17 @@ def test_credit_spread_trailing_stop_strictly_excluded():
         strategy='Hedged_Credit_Spread',
     )
     
-    # Simulate favorable spread price decay from 59.04 to 25.0
+    # 1. Adverse move to 75.0 (SL remains untouched at original hard SL 92.25)
     original_sl = pos.stop_loss
+    tracker._maybe_advance_trailing_stop(pos, current_price=75.0)
+    assert pos.stop_loss == original_sl
+    assert not pos.breakeven_set
+
+    # 2. Simulate favorable spread price decay from 59.04 to 25.0 (57.6% decay >= 45% -> locks 50% profit)
     tracker._maybe_advance_trailing_stop(pos, current_price=25.0)
-    assert pos.stop_loss == original_sl, "Trailing stop should NOT be modified for credit spreads"
-    assert not pos.breakeven_set, "Breakeven flag should not be set by trailing stop on credit spreads"
+    assert pos.stop_loss == round(59.04 * 0.50, 2)  # 29.52
+    assert pos.breakeven_set is True
+    assert pos.half_risk_set is True
 
 
 def test_telegram_2leg_spread_alerts(monkeypatch):

@@ -302,19 +302,20 @@ class PositionHealthEngine:
         # COMPOSITE HEALTH SCORE & SYNTHESIS
         # ─────────────────────────────────────────────────────────────────
         weights = {
-            "P1_VWAP": 1.5,
-            "P2_Volume": 1.2,
-            "P3_OI": 1.2,
-            "P4_GEX": 1.3,
-            "P5_Noise": 0.8,
-            "P6_Theta": 1.0,
-            "P7_IV": 0.8,
-            "P8_HTF": 1.2,
+            "P1_VWAP": 1.4,
+            "P2_Volume": 1.0,
+            "P3_OI": 1.4,
+            "P4_GEX": 1.4,
+            "P5_Noise": 1.0,
+            "P6_Theta": 1.2,
+            "P7_IV": 0.0,    # Disabled phantom IV stub (returns 0)
+            "P8_HTF": 1.6,
         }
         weighted_sum = sum(p_scores.get(k, 0.0) * weights[k] for k in weights)
         active_weight = sum(weights[k] for k in weights if abs(p_scores.get(k, 0.0)) > 0)
         inactive_weight = sum(weights[k] for k in weights if abs(p_scores.get(k, 0.0)) == 0)
-        effective_denominator = max(3.0, active_weight + (0.35 * inactive_weight))
+        # Bounded denominator: prevents denominator collapse below 5.5 while preventing artificial dilution
+        effective_denominator = max(5.5, active_weight + (0.45 * inactive_weight))
         raw_composite = weighted_sum / effective_denominator
         # Bound cleanly to [-100.0, +100.0] with NaN trap guard
         import math
@@ -334,14 +335,29 @@ class PositionHealthEngine:
         # REAL THREAT: Severe structural invalidation (Score <= -35.0 or 2+ threats with <= -25.0)
         gain_pts = current_premium - entry_premium
         sym_upper = symbol.upper()
-        noise_buffer = 14.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 6.0
+        # Microstructure noise preservation (GEMINI.md & Team C):
+        # Bank Nifty & Sensex carry 3-8 pt bid-ask spread and 10-15 pt 1-minute candle noise.
+        # Preserve technical SL outside noise envelope for Tier S/B setups.
+        noise_buffer = 15.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 6.0
         tier = (getattr(state, "tier", "B") or "B").upper()
         bars_held = getattr(state, "entry_bar_count", getattr(state, "bars_held", 0))
 
         if composite_score <= -35.0 or (composite_score <= -25.0 and len(threats) >= 2):
             report.real_threat = True
             is_tier_sb = tier in ("S", "B")
-            within_noise = gain_pts > -noise_buffer
+
+            # Check if underlying spot has structurally failed
+            spot_val = getattr(report, "spot_price", 0.0) or float(spot if ('spot' in locals() and spot is not None) else 0.0)
+            entry_spot_val = float(getattr(state, "entry_spot", 0.0) or 0.0)
+            spot_breakdown = False
+            if spot_val > 0 and entry_spot_val > 0:
+                trade_bull = (state.direction == "bullish")
+                adverse_spot = (entry_spot_val - spot_val) if trade_bull else (spot_val - entry_spot_val)
+                spot_noise = 35.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 15.0
+                if adverse_spot > spot_noise:
+                    spot_breakdown = True
+
+            within_noise = (gain_pts > -noise_buffer) or (is_tier_sb and bars_held < 2 and not spot_breakdown and gain_pts > -22.0)
 
             # Tier S/B high-conviction runners must never be bailed out within the noise envelope
             if is_tier_sb and within_noise:

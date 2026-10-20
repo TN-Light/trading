@@ -229,6 +229,18 @@ def test_position_monitor_heartbeat_callback():
 
 def test_angelone_lookup_previous_oi_baseline_from_sqlite():
     """Verify AngelOneOptionChain seeds session baseline from SQLite."""
+    import sqlite3
+    import os
+    db_paths = ["data/prometheus.db", "prometheus/data/prometheus.db"]
+    for db_path in db_paths:
+        if os.path.exists(db_path):
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO options_chain (timestamp, symbol, expiry, strike, option_type, oi) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("2026-10-07 15:25:00", "NIFTY BANK", "2026-10-27", 54200.0, "CE", 80670),
+                )
+                conn.commit()
+
     fetcher = MagicMock()
     chain = AngelOneOptionChain(fetcher)
 

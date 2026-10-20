@@ -401,6 +401,11 @@ class PositionTracker:
                                 ltp = round(max(0.0, s_ltp - l_ltp), 2)
                         except Exception:
                             ltp = 0.0
+                    if ltp <= 0.0:
+                        try:
+                            ltp = float(self.fill_sim.feed.get_ltp(p.instrument) or 0.0)
+                        except Exception:
+                            pass
                 else:
                     try:
                         ltp = float(self.fill_sim.feed.get_ltp(p.instrument) or 0.0)
@@ -473,8 +478,8 @@ class PositionTracker:
         self,
         pos: Position,
         snap: TradeSnapshot,
-        is_session_end: bool,
-        is_square_off: bool,
+        is_session_end: bool = False,
+        is_square_off: bool = False,
     ) -> Tuple[float, Optional[ExitReason]]:
         """Return (exit_price, exit_reason) or (0, None) if no exit fires.
 
@@ -526,12 +531,30 @@ class PositionTracker:
         # Intelligent Trend-Aware Guard: If the underlying trend remains intact (consolidation flag),
         # position hold is extended up to max_stagnation_bars (default 6 bars / 90 min) to let runners develop,
         # while adverse reversals or broken trends are killed immediately at 3 bars.
-        if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
+        # Guard against premature kill on mid-candle entries: require elapsed duration >= 2400s (40 min)
+        # relative to snapshot timestamp or current wall-clock time if entry_time is available.
+        ref_ts = getattr(snap, "timestamp", None)
+        elapsed_sec = self._get_elapsed_seconds(pos.entry_time, ref_time=ref_ts) if pos.entry_time else 0.0
+        time_elapsed_ok = (elapsed_sec >= 2400) if elapsed_sec > 0 else True
+
+        if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and time_elapsed_ok and not pos.breakeven_set:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
             atr = getattr(pos, "atr", 0.0)
-            if entry_spot > 0 and atr > 0:
-                spot_disp = (snap.close - entry_spot) if pos.direction == Direction.LONG else (entry_spot - snap.close)
+            current_spot = 0.0
+            if snap and snap.close > 0:
+                if entry_spot > 0 and abs(snap.close - entry_spot) / entry_spot < 0.20:
+                    current_spot = snap.close
+            if current_spot <= 0 and hasattr(self, "fill_sim") and getattr(self.fill_sim, "feed", None):
+                try:
+                    current_spot = float(self.fill_sim.feed.get_ltp(pos.symbol) or 0.0)
+                except Exception:
+                    current_spot = 0.0
+            if current_spot <= 0:
+                current_spot = float(getattr(pos, "current_spot", 0.0) or getattr(pos, "underlying_spot", 0.0) or 0.0)
+
+            if entry_spot > 0 and atr > 0 and current_spot > 0:
+                spot_disp = (current_spot - entry_spot) if pos.direction == Direction.LONG else (entry_spot - current_spot)
                 if spot_disp < 0.5 * atr and snap.close < pos.entry_price * 1.05:
                     is_stagnant = True
             elif snap.close < pos.entry_price * 1.03:
@@ -542,7 +565,9 @@ class PositionTracker:
                 health_report = None
                 if getattr(self, "health_engine", None):
                     try:
-                        health_report = self.health_engine.evaluate_position_health(pos, current_premium=snap.close)
+                        health_report = self.health_engine.evaluate_position_health(
+                            pos, current_premium=snap.close, spot_override=current_spot if current_spot > 0 else None
+                        )
                     except Exception as he_err:
                         logger.debug(f"Health engine check in _evaluate_exit inactivity: {he_err}")
                 health_is_ok = bool(
@@ -552,10 +577,7 @@ class PositionTracker:
                 )
 
                 if self.trend_aware:
-                    curr_spot = 0.0
-                    if entry_spot > 0:
-                        if snap.close > 0 and abs(snap.close - entry_spot) / entry_spot < 0.2:
-                            curr_spot = snap.close
+                    curr_spot = current_spot
                     trend_intact = self._is_underlying_trend_intact(
                         symbol=pos.symbol,
                         direction=pos.direction,
@@ -634,6 +656,11 @@ class PositionTracker:
                         ltp = round(max(0.0, s_ltp - l_ltp), 2)
                 except Exception:
                     ltp = 0.0
+            if ltp <= 0.0:
+                try:
+                    ltp = float(self.fill_sim.feed.get_ltp(pos.instrument) or 0.0)
+                except Exception:
+                    pass
         else:
             try:
                 ltp = self.fill_sim.feed.get_ltp(pos.instrument)
@@ -690,7 +717,13 @@ class PositionTracker:
         # Intelligent Trend-Aware Guard: If the underlying trend remains intact (consolidation flag),
         # position hold is extended up to max_stagnation_bars (default 6 bars / 90 min) to let runners develop,
         # while adverse reversals or broken trends are killed immediately at 3 bars.
-        if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and not pos.breakeven_set:
+        # Guard against premature kill on mid-candle entries: require elapsed duration >= 2400s (40 min)
+        # relative to snapshot timestamp or current wall-clock time if entry_time is available.
+        ref_ts = getattr(snap, "timestamp", None)
+        elapsed_sec = self._get_elapsed_seconds(pos.entry_time, ref_time=ref_ts) if pos.entry_time else 0.0
+        time_elapsed_ok = (elapsed_sec >= 2400) if elapsed_sec > 0 else True
+
+        if not is_spread and pos.trade_mode == "intraday" and pos.bars_held >= 3 and time_elapsed_ok and not pos.breakeven_set:
             is_stagnant = False
             entry_spot = getattr(pos, "entry_spot", 0.0)
             atr = getattr(pos, "atr", 0.0)
@@ -814,15 +847,96 @@ class PositionTracker:
         survived SL/target/time-stop evaluation. Added the ``def`` signature
         line back to restore the trailing-stop code path.
         """
-        # Trailing stops are strictly excluded for credit spreads (option selling).
-        # Spreads profit from theta decay over time and require wide breathing room;
-        # intraday micro-trailing causes premature whipsaws.
         is_spread = "/" in (pos.instrument or "") or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in (pos.instrument or "").upper()
-        if is_spread:
-            return
 
         # Strict freeze guard: non-positive or stale price prevents ratchet alteration
-        if current_price <= 0.0:
+        if current_price <= 0.0 or pos.entry_price <= 0.0:
+            return
+
+        sym_root = (pos.underlying or pos.symbol or "").upper()
+        qty = int(getattr(pos, "quantity", 0) or 0)
+
+        # Cost buffer for fee coverage (calibrated to max observed fees in GEMINI.md Section 2)
+        is_fin = ("FIN" in sym_root) or ("FINNIFTY" in sym_root)
+        if is_spread:
+            # Multi-leg spreads execute 2 legs, paying double brokerage and statutory fees
+            if "SENSEX" in sym_root:
+                cost_buffer_pts = 8.50 if (qty <= 20 or qty in (10, 1)) else 6.50
+            elif "BANK" in sym_root:
+                cost_buffer_pts = 8.50 if (qty <= 30 or qty in (15, 1)) else 5.50
+            elif is_fin:
+                cost_buffer_pts = 4.20 if (qty <= 65 or qty in (40, 1)) else 3.20
+            else:
+                cost_buffer_pts = 2.80 if (qty <= 75 or qty in (25, 1)) else 2.20
+        else:
+            # Single-leg option buying calibrated to statutory fee hurdles (GEMINI.md Rule 2)
+            if "SENSEX" in sym_root:
+                cost_buffer_pts = 3.0 if qty > 20 else (5.0 if qty in (10, 1) else 4.50)
+            elif "BANK" in sym_root:
+                cost_buffer_pts = 5.20 if (qty <= 30 or qty in (15, 1)) else 3.50
+            elif is_fin:
+                cost_buffer_pts = 2.20 if (qty <= 65 or qty in (40, 1)) else 1.80
+            else:
+                cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
+
+        # =====================================================================
+        # CREDIT SPREAD (OPTION SELLING) 2-STAGE THETA TRAILING RATCHET
+        # =====================================================================
+        if is_spread:
+            decay_pts = pos.entry_price - current_price
+            decay_pct = decay_pts / max(pos.entry_price, 1e-4)
+
+            # Stage 2: Lock 50% Profit at >= 45% Decay (LTP <= Entry * 0.55)
+            if decay_pct >= 0.45 and pos.trailing_floor < 0.50:
+                lock = 0.50
+                new_sl = round(pos.entry_price * 0.50, 2)
+                if new_sl < pos.stop_loss:
+                    old_sl = pos.stop_loss
+                    pos.stop_loss = new_sl
+                    pos.breakeven_set = True
+                    pos.half_risk_set = True
+                    pos.trailing_floor = lock
+                    logger.info(
+                        f"[{pos.trade_id}] SPREAD_LOCK_50PCT: SL {old_sl:.2f} -> {new_sl:.2f} "
+                        f"(Decay={decay_pct*100:.1f}% >= 45%, Spread LTP={current_price:.2f}, "
+                        f"locking 50% credit = {pos.entry_price * 0.50:.2f} pts)"
+                    )
+                    if self.recorder is not None:
+                        try:
+                            self.recorder.record_open_position(pos.to_dict())
+                        except Exception as e:
+                            logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                    if self.on_sl_update:
+                        try:
+                            self.on_sl_update(pos, old_sl, new_sl, "spread_lock_50pct", current_price, decay_pts, cost_buffer_pts)
+                        except Exception as e:
+                            logger.error(f"on_sl_update spread_lock_50pct callback failed: {e}")
+
+            # Stage 1: Breakeven Lock at >= 30% Decay (LTP <= Entry * 0.70)
+            elif decay_pct >= 0.30 and not pos.breakeven_set:
+                be_sl = round(pos.entry_price - cost_buffer_pts, 2)
+                new_sl = round(min(be_sl, pos.entry_price * 0.90), 2)
+                new_sl = max(0.05, new_sl)
+                if new_sl < pos.stop_loss:
+                    old_sl = pos.stop_loss
+                    pos.stop_loss = new_sl
+                    pos.breakeven_set = True
+                    pos.half_risk_set = True
+                    logger.info(
+                        f"[{pos.trade_id}] SPREAD_BREAKEVEN_LOCK: SL {old_sl:.2f} -> {new_sl:.2f} "
+                        f"(Decay={decay_pct*100:.1f}% >= 30%, Spread LTP={current_price:.2f}, "
+                        f"locking entry - Rs {cost_buffer_pts:.2f} costs)"
+                    )
+                    if self.recorder is not None:
+                        try:
+                            self.recorder.record_open_position(pos.to_dict())
+                        except Exception as e:
+                            logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                    if self.on_sl_update:
+                        try:
+                            self.on_sl_update(pos, old_sl, new_sl, "spread_breakeven", current_price, decay_pts, cost_buffer_pts)
+                        except Exception as e:
+                            logger.error(f"on_sl_update spread_breakeven callback failed: {e}")
             return
 
         # Determine constant initial risk distance (never changes as stop_loss is ratcheted up)
@@ -869,15 +983,16 @@ class PositionTracker:
 
         # Categorize Signal Edge
         # Weak / Failing: Negative health score, threat flag, suggested TIGHTEN_SL, or weak commitment with high churn
+        # Adhere to GEMINI.md Rule 1: do not treat commitment_ratio == 0.0 or net_gex == 0.0 as weak edge if keys are missing from feed
         is_weak_edge = bool(
             health_report is not None
             and (
                 health_score <= -10.0
                 or getattr(health_report, "suggested_action", "") in ("TIGHTEN_SL", "PRE_SL_BAILOUT")
                 or getattr(health_report, "real_threat", False)
-                or (health_score < 0.0 and comm_ratio < 0.15)
+                or (health_score < 0.0 and 0.0 < comm_ratio < 0.15)
                 or (zgl_adverse and health_score <= 0.0)
-                or (is_bullish and net_gex_cr > 2.0 and health_score <= 0.0)
+                or (is_bullish and net_gex != 0.0 and net_gex_cr > 2.0 and health_score <= 0.0)
             )
         )
         # Strong / High-Conviction: Positive score >= 25, real favor, short-gamma squeeze acceleration, or robust commitment
@@ -892,20 +1007,35 @@ class PositionTracker:
             )
         )
 
-        # 2. Recalibrate Cost Buffer (Bank Nifty 4.50, Sensex 5.0, Finnifty 1.8, Nifty 1.5 for 1-lot trading)
+        # 2. Recalibrate Cost Buffer (Bank Nifty >= 5.20, Sensex >= 4.50, FinNifty >= 2.20, Nifty >= 1.40 for 1-lot trading)
         qty = int(getattr(pos, "quantity", 0) or 0)
-        if "SENSEX" in sym_root:
-            cost_buffer_pts = 3.0 if qty == 20 else 5.0
-            min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
-        elif "BANK" in sym_root:
-            cost_buffer_pts = 1.9 if qty == 30 else 4.50
-            min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
-        elif "FINNIFTY" in sym_root:
-            cost_buffer_pts = 1.8
-            min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
+        is_fin = ("FIN" in sym_root) or ("FINNIFTY" in sym_root)
+        if is_spread:
+            if "SENSEX" in sym_root:
+                cost_buffer_pts = 8.50 if (qty <= 20 or qty in (10, 1)) else 6.50
+                min_be_gain = 25.0
+            elif "BANK" in sym_root:
+                cost_buffer_pts = 8.50 if (qty <= 30 or qty in (15, 1)) else 5.50
+                min_be_gain = 25.0
+            elif is_fin:
+                cost_buffer_pts = 4.20 if (qty <= 65 or qty in (40, 1)) else 3.20
+                min_be_gain = 18.0
+            else:
+                cost_buffer_pts = 2.80 if (qty <= 75 or qty in (25, 1)) else 2.20
+                min_be_gain = 5.0
         else:
-            cost_buffer_pts = 0.9 if qty in (50, 65) else 1.5
-            min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
+            if "SENSEX" in sym_root:
+                cost_buffer_pts = 3.0 if qty > 20 else (5.0 if qty in (10, 1) else 4.50)
+                min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
+            elif "BANK" in sym_root:
+                cost_buffer_pts = 5.20 if (qty <= 30 or qty in (15, 1)) else 3.50
+                min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
+            elif is_fin:
+                cost_buffer_pts = 2.20 if (qty <= 65 or qty in (40, 1)) else 1.80
+                min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
+            else:
+                cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
+                min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
 
         gain_pts = current_price - pos.entry_price
 
@@ -1029,62 +1159,7 @@ class PositionTracker:
                     except Exception as e:
                         logger.error(f"on_sl_update half_risk callback failed: {e}")
 
-        # Stage 3 — lock 20% at 1.0R
-        elif pos.breakeven_set and progress >= 1.0 and pos.trailing_floor < 0.20:
-            lock = 0.20
-            new_sl = pos.entry_price + lock * risk_distance
-            if new_sl > pos.stop_loss:
-                old_sl = pos.stop_loss
-                pos.stop_loss = new_sl
-                pos.trailing_floor = lock
-                if self.recorder is not None:
-                    try:
-                        self.recorder.record_open_position(pos.to_dict())
-                    except Exception as e:
-                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
-                if self.on_sl_update:
-                    try:
-                        self.on_sl_update(pos, old_sl, new_sl, "lock_20pct", current_price, gain_pts, cost_buffer_pts)
-                    except Exception as e:
-                        logger.error(f"on_sl_update lock_20pct callback failed: {e}")
-        # Stage 3 — lock 50% at 2.0R
-        elif pos.breakeven_set and progress >= 2.0 and pos.trailing_floor < 0.50:
-            lock = 0.50
-            new_sl = pos.entry_price + lock * risk_distance
-            if new_sl > pos.stop_loss:
-                old_sl = pos.stop_loss
-                pos.stop_loss = new_sl
-                pos.trailing_floor = lock
-                if self.recorder is not None:
-                    try:
-                        self.recorder.record_open_position(pos.to_dict())
-                    except Exception as e:
-                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
-                if self.on_sl_update:
-                    try:
-                        self.on_sl_update(pos, old_sl, new_sl, "lock_50pct", current_price, gain_pts, cost_buffer_pts)
-                    except Exception as e:
-                        logger.error(f"on_sl_update lock_50pct callback failed: {e}")
-        # Stage 4 — lock 70% at 3.0R
-        elif pos.breakeven_set and progress >= 3.0 and pos.trailing_floor < 0.70:
-            lock = 0.70
-            new_sl = pos.entry_price + lock * risk_distance
-            if new_sl > pos.stop_loss:
-                old_sl = pos.stop_loss
-                pos.stop_loss = new_sl
-                pos.trailing_floor = lock
-                if self.recorder is not None:
-                    try:
-                        self.recorder.record_open_position(pos.to_dict())
-                    except Exception as e:
-                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
-                if self.on_sl_update:
-                    try:
-                        self.on_sl_update(pos, old_sl, new_sl, "lock_70pct", current_price, gain_pts, cost_buffer_pts)
-                    except Exception as e:
-                        logger.error(f"on_sl_update lock_70pct callback failed: {e}")
-        # Stage 5 — high-water-trail (beyond 3.0R, never below 70% floor)
-        # Approximate by tightening SL to max(current_sl, 70%-floor, hwm - small buffer)
+        # Stage 4 — high-water-trail (beyond 3.5R, never below 70% floor)
         elif pos.breakeven_set and progress >= 3.5:
             hwm_floor = pos.entry_price + 0.70 * risk_distance
             trail_buf = 0.02 * risk_distance if is_weak_edge else (0.08 * risk_distance if is_strong_edge else 0.05 * risk_distance)
@@ -1104,9 +1179,101 @@ class PositionTracker:
                     except Exception as e:
                         logger.error(f"on_sl_update hwm callback failed: {e}")
 
+        # Stage 3 — lock 75% profit at 2.5R
+        elif pos.breakeven_set and progress >= 2.5 and pos.trailing_floor < 0.75:
+            lock = 0.75
+            new_sl = round(pos.entry_price + lock * risk_distance, 2)
+            if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_sl
+                pos.trailing_floor = lock
+                logger.info(
+                    f"[{pos.trade_id}] LOCK_75PCT_R (Stage 3): SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(progress={progress:.2f}R >= 2.5R, locking +{lock * risk_distance:.2f} pts profit)"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_75pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_75pct callback failed: {e}")
+
+        # Stage 2 — lock 65% profit at 1.75R
+        elif pos.breakeven_set and progress >= 1.75 and pos.trailing_floor < 0.65:
+            lock = 0.65
+            new_sl = round(pos.entry_price + lock * risk_distance, 2)
+            if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_sl
+                pos.trailing_floor = lock
+                logger.info(
+                    f"[{pos.trade_id}] LOCK_65PCT_R (Stage 2): SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(progress={progress:.2f}R >= 1.75R, locking +{lock * risk_distance:.2f} pts profit)"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_65pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_65pct callback failed: {e}")
+
+        # Stage 1 — lock 50% profit at 1.0R
+        elif pos.breakeven_set and progress >= 1.0 and pos.trailing_floor < 0.50:
+            lock = 0.50
+            new_sl = round(pos.entry_price + lock * risk_distance, 2)
+            if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_sl
+                pos.trailing_floor = lock
+                logger.info(
+                    f"[{pos.trade_id}] LOCK_50PCT_R (Stage 1): SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(progress={progress:.2f}R >= 1.0R, locking +{lock * risk_distance:.2f} pts profit)"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_50pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_50pct callback failed: {e}")
+
+        # Stage 0.5 — lock 35% profit at 0.65R (bridges the 0.4R to 1.0R dead zone)
+        elif pos.breakeven_set and progress >= 0.65 and pos.trailing_floor < 0.35:
+            lock = 0.35
+            new_sl = round(pos.entry_price + lock * risk_distance, 2)
+            if new_sl > pos.stop_loss:
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_sl
+                pos.trailing_floor = lock
+                logger.info(
+                    f"[{pos.trade_id}] LOCK_35PCT_R (Stage 0.5): SL {old_sl:.2f} -> {new_sl:.2f} "
+                    f"(progress={progress:.2f}R >= 0.65R, locking +{lock * risk_distance:.2f} pts profit)"
+                )
+                if self.recorder is not None:
+                    try:
+                        self.recorder.record_open_position(pos.to_dict())
+                    except Exception as e:
+                        logger.debug(f"PositionTracker: record_open_position failed for {pos.trade_id}: {e}")
+                if self.on_sl_update:
+                    try:
+                        self.on_sl_update(pos, old_sl, new_sl, "lock_35pct", current_price, gain_pts, cost_buffer_pts)
+                    except Exception as e:
+                        logger.error(f"on_sl_update lock_35pct callback failed: {e}")
+
     @staticmethod
-    def _get_elapsed_seconds(entry_time_val) -> float:
-        """Defensively compute elapsed wall-clock seconds from entry_time."""
+    def _get_elapsed_seconds(entry_time_val, ref_time=None) -> float:
+        """Defensively compute elapsed seconds from entry_time relative to ref_time (or now)."""
         if not entry_time_val:
             return 0.0
         if isinstance(entry_time_val, datetime):
@@ -1123,13 +1290,25 @@ class PositionTracker:
         else:
             return 0.0
 
+        if ref_time is not None:
+            if isinstance(ref_time, datetime):
+                target_dt = ref_time
+            elif isinstance(ref_time, str) and ref_time.strip():
+                try:
+                    target_dt = datetime.fromisoformat(ref_time.strip())
+                except Exception:
+                    target_dt = datetime.now()
+            else:
+                target_dt = datetime.now()
+        else:
+            target_dt = datetime.now(entry_dt.tzinfo) if entry_dt.tzinfo is not None else datetime.now()
+
         try:
-            now = datetime.now(entry_dt.tzinfo) if entry_dt.tzinfo is not None else datetime.now()
-            diff = (now - entry_dt).total_seconds()
+            diff = (target_dt - entry_dt).total_seconds()
         except TypeError:
             entry_naive = entry_dt.replace(tzinfo=None)
-            now_naive = datetime.now()
-            diff = (now_naive - entry_naive).total_seconds()
+            target_naive = target_dt.replace(tzinfo=None) if hasattr(target_dt, "replace") else datetime.now()
+            diff = (target_naive - entry_naive).total_seconds()
         return max(0.0, diff)
 
     def _resolve_current_price(self, pos: Position) -> float:

@@ -66,9 +66,9 @@ class DataBridge:
         fetch_time = datetime.now()
         
         try:
-            # Primary MUST be fresh for live scanning — bypass cache
+            # Primary MUST be fresh for live scanning — bypass cache (5 days ~ 125 candles, single chunk)
             primary = self._data.fetch_historical(
-                symbol, days=60, interval=interval, force_refresh=True
+                symbol, days=5, interval=interval, force_refresh=True
             )
             # Resample 15min → 60min (saves one API call ~1.7s per symbol)
             hourly = _resample_to_hourly(primary)

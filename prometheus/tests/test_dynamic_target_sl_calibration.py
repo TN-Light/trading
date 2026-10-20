@@ -373,3 +373,30 @@ def test_interface_contract_5tuple_unpacking():
     assert res["target_gain_pts"] == target_gain_pts
     assert res.to_dict()["is_compressed"] is True
 
+
+def test_high_vix_target_expansion():
+    """Verify that when VIX > 18.0, target calculation applies a 1.25x expansion multiplier to harvest tail alpha."""
+    res_normal = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=54778.90,
+        spot_atr=88.0,
+        opt_ltp=1055.05,
+        edge_score=8.5,
+        tier="S",
+        is_htf_aligned=True,
+        vix=14.0,
+    )
+    res_high_vix = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=54778.90,
+        spot_atr=88.0,
+        opt_ltp=1055.05,
+        edge_score=8.5,
+        tier="S",
+        is_htf_aligned=True,
+        vix=19.5,
+    )
+    # High VIX target should be significantly larger (1.25x expansion)
+    assert res_high_vix.target_gain_pts > res_normal.target_gain_pts
+    assert res_high_vix.target_gain_pts == pytest.approx(round(res_normal.target_gain_pts * 1.25, 1), abs=1.0)
+

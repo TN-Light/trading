@@ -94,6 +94,7 @@ class _TokenBucket:
         reserve_tokens: float = 0.0,
         max_window: int = 8,
         aging_threshold_sec: float = 4.0,
+        min_pacing: float = 0.0,
     ) -> None:
         self.endpoint = endpoint
         self.fill_rate = float(fill_rate)
@@ -101,6 +102,7 @@ class _TokenBucket:
         self.reserve_tokens = float(reserve_tokens)
         self.max_window = int(max_window)
         self.aging_threshold_sec = float(aging_threshold_sec)
+        self.min_pacing = float(min_pacing)
 
         self.tokens = float(capacity)
         self.last_fill = time.monotonic()
@@ -109,6 +111,7 @@ class _TokenBucket:
         self._seq = 0
         self._cooldown_until: float = 0.0
         self._dispatch_history: List[float] = []
+        self._last_dispatch: float = 0.0
 
         # Telemetry statistics
         self.stats: Dict[str, Any] = {
@@ -218,8 +221,16 @@ class _TokenBucket:
 
             # Reservation rule: P1 can consume down to 0 tokens; others must preserve reserved tokens
             min_req = 0.0 if pri_val == 1 else self.reserve_tokens
+
+            # Mandatory inter-call pacing check (exempt P1 order execution for <50ms SLA)
+            is_pacing_satisfied = True
+            if self.min_pacing > 0.0 and pri_val != 1 and self._last_dispatch > 0.0:
+                if (now - self._last_dispatch) < self.min_pacing:
+                    is_pacing_satisfied = False
+
             can_consume_fast = (
                 (now >= active_cooldown)
+                and is_pacing_satisfied
                 and (len(self._dispatch_history) < self.max_window)
                 and (self.tokens >= (min_req + 1.0))
                 and (len(self._waiters) == 0)
@@ -228,6 +239,7 @@ class _TokenBucket:
             if can_consume_fast:
                 self.tokens -= 1.0
                 self._dispatch_history.append(now)
+                self._last_dispatch = now
                 self.stats["total_requests"] += 1
                 self.stats["total_acquired"] += 1
                 self.stats["fast_path_acquisitions"] += 1
@@ -285,21 +297,29 @@ class _TokenBucket:
                                 eff_pri = waiter.effective_priority
                                 min_req = 0.0 if eff_pri == 1 else self.reserve_tokens
 
-                                if self.tokens >= (min_req + 1.0):
-                                    self.tokens -= 1.0
-                                    self._dispatch_history.append(now)
-                                    self._waiters.remove(waiter)
-                                    self.stats["total_requests"] += 1
-                                    self.stats["total_acquired"] += 1
-                                    self.stats["queued_acquisitions"] += 1
-                                    self.stats["total_throttled"] += 1
-                                    self.stats["requests_by_tier"][pri_enum.name] += 1
-                                    self.stats["total_wait_seconds"] += max(0.0, now - start_time)
-                                    self._notify_next_waiter()
-                                    return True
-                                else:
-                                    deficit = (min_req + 1.0) - self.tokens
-                                    sleep_time = max(0.005, min(0.05, deficit / self.fill_rate))
+                                pacing_ok = True
+                                if self.min_pacing > 0.0 and eff_pri != 1 and self._last_dispatch > 0.0:
+                                    if (now - self._last_dispatch) < self.min_pacing:
+                                        pacing_ok = False
+                                        sleep_time = max(0.005, min(0.05, self.min_pacing - (now - self._last_dispatch)))
+
+                                if pacing_ok:
+                                    if self.tokens >= (min_req + 1.0):
+                                        self.tokens -= 1.0
+                                        self._dispatch_history.append(now)
+                                        self._last_dispatch = now
+                                        self._waiters.remove(waiter)
+                                        self.stats["total_requests"] += 1
+                                        self.stats["total_acquired"] += 1
+                                        self.stats["queued_acquisitions"] += 1
+                                        self.stats["total_throttled"] += 1
+                                        self.stats["requests_by_tier"][pri_enum.name] += 1
+                                        self.stats["total_wait_seconds"] += max(0.0, now - start_time)
+                                        self._notify_next_waiter()
+                                        return True
+                                    else:
+                                        deficit = (min_req + 1.0) - self.tokens
+                                        sleep_time = max(0.005, min(0.05, deficit / self.fill_rate))
                             else:
                                 sleep_time = 0.01
 
@@ -482,12 +502,12 @@ class PrioritizedTokenBucketLimiter:
     """Centralized, endpoint-differentiated prioritized token bucket limiter for SmartAPI."""
 
     DEFAULT_CONFIGS: Dict[EndpointCategory, Dict[str, Any]] = {
-        # Historical: 2.5 req/s (capacity 3.0, max 3 in 1.0s window)
-        EndpointCategory.HISTORICAL: {"rate": 2.5, "cap": 3.0, "reserved": 0.0, "max_window": 3},
+        # Historical: 2.5 req/s (capacity 3.0, max 3 in 1.0s window, mandatory >=400ms inter-call pacing)
+        EndpointCategory.HISTORICAL: {"rate": 2.5, "cap": 3.0, "reserved": 0.0, "max_window": 3, "min_pacing": 0.4},
         # Quotes: 8.5 req/s (capacity 8.5, reserved 2.0, max 8 in 1.0s window)
-        EndpointCategory.QUOTES: {"rate": 8.5, "cap": 8.5, "reserved": 2.0, "max_window": 8},
+        EndpointCategory.QUOTES: {"rate": 8.5, "cap": 8.5, "reserved": 2.0, "max_window": 8, "min_pacing": 0.0},
         # Orders: 8.5 req/s (capacity 5.0, reserved 1.0, max 8 in 1.0s window)
-        EndpointCategory.ORDERS: {"rate": 8.5, "cap": 5.0, "reserved": 1.0, "max_window": 8},
+        EndpointCategory.ORDERS: {"rate": 8.5, "cap": 5.0, "reserved": 1.0, "max_window": 8, "min_pacing": 0.0},
     }
 
     def __init__(
@@ -508,6 +528,7 @@ class PrioritizedTokenBucketLimiter:
             cap = float(default_cfg["cap"])
             res = float(default_cfg["reserved"])
             max_win = int(default_cfg["max_window"])
+            pacing = float(default_cfg.get("min_pacing", 0.0))
 
             # Test fixture bypass (delay_between_calls == 0.0)
             if delay_between_calls is not None and delay_between_calls == 0.0:
@@ -515,19 +536,22 @@ class PrioritizedTokenBucketLimiter:
                 cap = 1_000_000.0
                 res = 0.0
                 max_win = 1_000_000
+                pacing = 0.0
 
             if custom_rates and cat in custom_rates:
                 val = custom_rates[cat]
                 if isinstance(val, (tuple, list)):
                     rate, cap = float(val[0]), float(val[1])
                     max_win = int(val[2]) if len(val) > 2 else int(max(rate, cap, max_win))
+                    pacing = float(val[3]) if len(val) > 3 else 0.0
                 elif isinstance(val, dict):
                     rate = float(val.get("rate", rate))
                     cap = float(val.get("cap", cap))
                     res = float(val.get("reserved", res))
                     max_win = int(val.get("max_window", max(rate, cap, max_win)))
+                    pacing = float(val.get("min_pacing", 0.0))
 
-            cfg_entry = {"rate": rate, "cap": cap, "reserved": res, "max_window": max_win}
+            cfg_entry = {"rate": rate, "cap": cap, "reserved": res, "max_window": max_win, "min_pacing": pacing}
             self.configs[cat] = cfg_entry
             self._buckets[cat] = _TokenBucket(
                 endpoint=cat,
@@ -535,6 +559,7 @@ class PrioritizedTokenBucketLimiter:
                 capacity=cap,
                 reserve_tokens=res,
                 max_window=max_win,
+                min_pacing=pacing,
             )
 
         # Dynamic proxy dicts for direct attribute access compatibility
