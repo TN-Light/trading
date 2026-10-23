@@ -121,7 +121,9 @@ class PositionTracker:
         trend_aware: bool = True,
         max_stagnation_bars: int = 6,
         on_heartbeat: Optional[Callable] = None,
+        heartbeat_interval_seconds: int = 60,
     ):
+        self.heartbeat_interval_seconds = int(heartbeat_interval_seconds)
         self.fill_sim = fill_sim
         self.cost_model = cost_model or CostModel()
         self.enable_trailing = bool(enable_trailing)
@@ -515,12 +517,14 @@ class PositionTracker:
             if tgt > 0 and snap.low <= tgt:
                 return tgt, ExitReason.TARGET
         else:
+            is_trailing = bool(pos.breakeven_set or (pos.stop_loss >= pos.entry_price))
+            sl_reason = ExitReason.TRAILING_STOP if is_trailing else ExitReason.STOP_LOSS
             if snap.open <= sl:
-                return snap.open, ExitReason.STOP_LOSS
+                return snap.open, sl_reason
             if snap.open >= tgt:
                 return snap.open, ExitReason.TARGET
             if snap.low <= sl:
-                return sl, ExitReason.STOP_LOSS
+                return sl, sl_reason
             if snap.high >= tgt:
                 return tgt, ExitReason.TARGET
 
@@ -679,8 +683,10 @@ class PositionTracker:
                     return ltp, ExitReason.STOP_LOSS
             else:
                 # We have a real LTP for the option. Evaluate SL/target with it.
+                is_trailing = bool(pos.breakeven_set or (pos.stop_loss >= pos.entry_price))
+                sl_reason = ExitReason.TRAILING_STOP if is_trailing else ExitReason.STOP_LOSS
                 if sl > 0 and ltp <= sl:
-                    return sl, ExitReason.STOP_LOSS
+                    return sl, sl_reason
                 if tgt > 0 and ltp >= tgt:
                     return ltp, ExitReason.TARGET
 
@@ -1025,13 +1031,13 @@ class PositionTracker:
                 min_be_gain = 5.0
         else:
             if "SENSEX" in sym_root:
-                cost_buffer_pts = 3.0 if qty > 20 else (5.0 if qty in (10, 1) else 4.50)
+                cost_buffer_pts = 3.50 if qty > 20 else 5.50
                 min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
             elif "BANK" in sym_root:
-                cost_buffer_pts = 5.20 if (qty <= 30 or qty in (15, 1)) else 3.50
+                cost_buffer_pts = 5.50 if (qty <= 30 or qty in (15, 1)) else 3.50
                 min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
             elif is_fin:
-                cost_buffer_pts = 2.20 if (qty <= 65 or qty in (40, 1)) else 1.80
+                cost_buffer_pts = 2.50 if (qty <= 65 or qty in (40, 1)) else 1.80
                 min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
             else:
                 cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
@@ -1083,6 +1089,8 @@ class PositionTracker:
         # Set pos.breakeven_set = True and ratchet new_sl = pos.entry_price + cost_buffer_pts.
         is_tier_c = (getattr(pos, "tier", "") or "").upper() == "C"
         micro_lock_pts = 12.0 if ("BANK" in sym_root or "SENSEX" in sym_root) else 5.0
+        # If is_strong_edge is True, preserve runner breathing room (cushion >= 35 pts on SENSEX/BANKNIFTY) outside 1-minute noise!
+        effective_be_gain = (min_be_gain + 15.0) if (is_strong_edge and ("SENSEX" in sym_root or "BANK" in sym_root)) else min_be_gain
 
         if is_tier_c and not pos.breakeven_set and gain_pts >= micro_lock_pts:
             new_sl = pos.entry_price + cost_buffer_pts
@@ -1112,7 +1120,7 @@ class PositionTracker:
         # For high-noise symbols (SENSEX/BANKNIFTY), moving SL to Entry + costs requires
         # gaining at least min_be_gain points so the cushion to peak is outside noise.
         # For NIFTY, 0.4R or be_trigger_pts is already sufficient.
-        elif not is_tier_c and not pos.breakeven_set and (gain_pts >= min_be_gain) and (progress >= 0.4 or gain_pts >= be_trigger_pts):
+        elif not is_tier_c and not pos.breakeven_set and (gain_pts >= effective_be_gain) and (progress >= 0.4 or gain_pts >= be_trigger_pts):
             new_sl = pos.entry_price + cost_buffer_pts
             # Only advance (never retreat)
             if new_sl > pos.stop_loss:
@@ -1345,7 +1353,8 @@ class PositionTracker:
             return False
 
         elapsed_sec = self._get_elapsed_seconds(pos.entry_time)
-        m = int(elapsed_sec // 300)
+        interval = getattr(self, "heartbeat_interval_seconds", 60)
+        m = int(elapsed_sec // interval)
         last_m = getattr(pos, "_last_heartbeat_milestone", 0)
 
         if m >= 1 and m > last_m:

@@ -329,6 +329,7 @@ class LivePaperCapture:
             data_engine=self._data_engine,
             trend_aware=True,
             max_stagnation_bars=6,
+            heartbeat_interval_seconds=60,
         )
         self._tracker = tracker
         # PaperTradeEngine with high cap + allow_duplicate_instrument=True
@@ -600,6 +601,18 @@ class LivePaperCapture:
         if self._telegram is None:
             return
         try:
+            health_score = None
+            health_summary = ""
+            if self._tracker and getattr(self._tracker, "health_engine", None):
+                try:
+                    report = self._tracker.health_engine.evaluate_position_health(pos, current_premium=current_price)
+                    if report:
+                        health_score = getattr(report, "health_score", None)
+                        from prometheus.execution.position_health import format_health_summary
+                        health_summary = format_health_summary(report)
+                except Exception as he:
+                    logger.debug(f"[PaperCapture] health eval failed for trailing stop: {he}")
+
             self._telegram.alert_trailing_stop_updated(
                 symbol=pos.symbol,
                 instrument=pos.instrument,
@@ -610,6 +623,8 @@ class LivePaperCapture:
                 gain_pts=gain_pts,
                 cost_pts=cost_buffer_pts,
                 entry_price=getattr(pos, "entry_price", 0.0),
+                health_score=health_score,
+                health_summary=health_summary,
             )
         except Exception as e:
             logger.debug(f"[PaperCapture] alert_trailing_stop_updated failed: {e}")
@@ -688,8 +703,9 @@ class LivePaperCapture:
                 from prometheus.execution.position_health import format_health_summary
                 health_summary = format_health_summary(report)
 
-            mins = milestone * 5
-            duration_str = f"{mins} minutes"
+            mins = elapsed_seconds // 60
+            secs = elapsed_seconds % 60
+            duration_str = f"{mins}m {secs}s" if mins < 5 else f"{mins} minutes"
 
             update_info = {
                 "trade_id": getattr(pos, "trade_id", ""),
@@ -820,11 +836,12 @@ class LivePaperCapture:
             self._today_closed_instruments.add(trade.instrument)
 
         raw_reason = trade.exit_reason.value if hasattr(trade.exit_reason, "value") else str(trade.exit_reason)
-        if str(raw_reason).lower() == "stop_loss":
+        is_actual_loss = float(getattr(trade, "net_pnl", 0.0) or 0.0) < 0
+        if str(raw_reason).lower() == "stop_loss" and is_actual_loss:
             trade_type = getattr(trade, "trade_type", None) or self._get_trade_type(trade)
             self._today_stopped_out_symbol_directions.add((trade.symbol, trade_type))
             logger.info(
-                f"[PaperCapture] Stop-out recorded for {trade.symbol} ({trade_type}) - locked out from re-entry today"
+                f"[PaperCapture] Stop-out recorded for {trade.symbol} ({trade_type}) with net loss Rs {trade.net_pnl:.2f} - locked out from re-entry today"
             )
 
         self._alert_position_closed(trade)

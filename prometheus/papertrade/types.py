@@ -23,6 +23,7 @@ class ExitReason(str, Enum):
     """
 
     STOP_LOSS = "stop_loss"
+    TRAILING_STOP = "trailing_stop"     # ratcheted breakeven or trailing stop
     TARGET = "target"
     TIME_STOP = "time_stop"             # max bars held
     SQUARE_OFF = "square_off"           # intraday force-close at session end

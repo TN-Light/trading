@@ -1409,6 +1409,8 @@ class TelegramBot:
         gain_pts: float,
         cost_pts: float = 0.9,
         entry_price: float = 0.0,
+        health_score: Optional[float] = None,
+        health_summary: str = "",
     ):
         """Alert whenever trailing stop ratchets up, e.g. moving SL to Breakeven (+brokerage)."""
         from prometheus.utils.symbol_format import human_search_name_from_api_symbol
@@ -1458,6 +1460,8 @@ class TelegramBot:
             else f"🔥 <b>Current LTP:</b> Rs {current_price:.2f} (<b>+{gain_pts:.1f} pts</b> | +{gain_pct:.1f}%)\n"
         )
 
+        health_line = f"📊 <b>Trade Health & Edge:</b> Score: {health_score:+.0f} | {html.escape(health_summary)}\n\n" if health_score is not None else "\n"
+
         msg = (
             f"{headline}\n\n"
             f"<b>Symbol:</b> <code>{html.escape(str(symbol))}</code>\n"
@@ -1465,7 +1469,8 @@ class TelegramBot:
             f"📋 <b>Search Name:</b> <code>{html.escape(str(instrument))}</code>\n\n"
             f"{entry_line}"
             f"🛑 <b>Old SL:</b> Rs {old_sl:.2f} ➔ <b>New Trailing SL:</b> <b>Rs {new_sl:.2f}</b>\n"
-            f"💼 <b>Brokerage & Taxes:</b> ~Rs {cost_pts:.2f} pts/share covered\n\n"
+            f"💼 <b>Brokerage & Taxes:</b> ~Rs {cost_pts:.2f} pts/share covered\n"
+            f"{health_line}"
             f"⚡ <b>ACTION REQUIRED ON KITE:</b>\n"
             f"{action_desc}\n"
             f"━━━━━━━━━━━━━━━━━━"

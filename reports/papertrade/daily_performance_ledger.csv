@@ -1,38 +1,40 @@
 Date,Total_Trades,Wins,Losses,Win_Rate_Pct,Gross_Profit,Gross_Loss,Net_PnL,Capital,Daily_Return_Pct,Cumulative_PnL,Notes
-2026-08-25,4,1,3,25.0,335.0,-1250.0,-915.0,15000.0,-6.1,-25343.27,"NIFTY 24150PE (+28% trailed to +Rs335), NIFTY R2 SL (-Rs465), MIDCAP SL (-Rs651), SENSEX test (-Rs134)"
-2026-08-26,12,8,4,66.7,11199.25,-6507.37,4691.88,15000.0,31.3,-20651.39,"8 Credit Spread Wins (+Rs 11199), 4 Momentum Buying Losses (-Rs 6507)"
-2026-08-27,6,0,6,0.0,0.0,-4452.55,-4458.05,15000.0,-29.7,-25109.44,Midday mean-reversion squeeze; 5 Nifty PE buys and 1 Sensex PE buy hit SL
-2026-08-28,6,2,4,33.3,4411.29,-2560.9,1850.39,15000.0,12.3,-23259.05,"2 Credit Spread Wins (+Rs 4411), 4 Afternoon PE momentum buys hit SL (-Rs 2561)"
-2026-08-31,4,0,4,0.0,0.0,-4454.4,-4459.89,15000.0,-29.7,-27718.94,Morning PE breakout reversed; 2 monthly Sensex PE and 2 Nifty PE hit SL
-2026-09-01,6,5,1,83.3,7128.43,-251.21,6877.22,15000.0,45.8,-20841.72,"5 Credit Spread Wins (+Rs 7128), 1 Expiry FastTrigger PE SL (-Rs 251)"
-2026-09-02,3,0,3,0.0,0.0,-6409.65,-6412.85,15000.0,-42.8,-27254.57,Afternoon upward trend breached Bear Call short strikes; defined-risk SL capped loss
-2026-09-03,6,0,6,0.0,0.0,-9849.6,-9854.53,15000.0,-65.7,-37109.1,Paper ledger recorded fallback; live exchange closing quotes showed +Rs 3378 profit
-2026-09-04,6,2,4,33.3,1378.75,-7022.93,-6181.47,15000.0,-41.2,-43290.57,2 Credit Spreads gained (+Rs 1128 net decay); 4 Call buys lost on afternoon pullback (-Rs 7310)
-2026-09-07,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-43290.57,Intraday paper trading session
-2026-09-08,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-43290.57,Intraday paper trading session
-2026-09-09,1,1,0,100.0,203.0,0.0,75.82,15000.0,0.5,-43214.75,NIFTY 15 SEP Bear Call Spread 23600CE/23750CE: Entry net credit 49.32 exit 46.20 (+Rs 75.82 net; live Kite was flat -Rs 107 gross / ~-Rs 207 net due to midday rally offsetting theta). Golden setup option buying appropriately suppressed in 50pt morning chop.
-2026-09-10,2,2,0,100.0,1489.33,0.0,1239.33,15000.0,8.3,-41975.42,"SENSEX 75000/75300 CE spread (+Rs 660.15 net, target decay hit @ 15.05); MIDCPNIFTY 14625/14700 CE spread (+Rs 579.18 net, square-off @ 27.40)"
-2026-09-11,1,0,1,0.0,0.0,-6730.0,-6881.1,15000.0,-45.9,-48856.52,Deep gap-down (-0.8%) & massive V-reversal (+1351pt Bank Nifty). Morning MIDCAP PE trade caught on stale SQLite candle; system hardened to strictly reject stale cache during market hours.
-2026-09-15,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-48856.52,Intraday paper trading session
-2026-09-16,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-48856.52,Intraday paper trading session
-2026-09-21,3,1,2,33.3,211.25,-1187.55,-1347.06,98652.94,-1.35,-50203.58,"Day 1: 3 Bear Call Spreads (Tier C); 1 BE win (+Rs 87.47 net), 2 SL (-Rs 1434.53). 100% paper."
-2026-09-22,0,0,0,0.0,0.0,0.0,0.0,98652.94,0.0,-50203.58,Day 2: 0 trades executed. Angle One missing 23800CE hedge contract identified and resolved.
-2026-09-23,4,1,3,25.0,216.62,-811.42,-933.54,97719.4,-0.95,-51137.12,Day 3: BN 56500CE SL (-Rs902.84); BN 56600CE trailed win (+Rs8.64); NIFTY BE (-Rs26.37); SENSEX BE (-Rs12.97). Trailing stop saved ~Rs4500 from afternoon 600pt flush.
-2026-09-24,1,0,1,0.0,60.0,0.0,-7.95,97711.45,-0.01,-51145.07,Day 4: SENSEX 74100PE trailed BE scratch (-Rs 7.95 net after charges). MFE reached +138% (Rs 368.15). Progressive Half-Risk Ratchet deployed.
-2026-09-25,0,0,0,0.0,0.0,0.0,0.0,97711.45,0.0,-51145.07,"Day 5: 0 trades executed. 80-92% bars compressed inside 15M ORB across NIFTY, BANK NIFTY, SENSEX. Capital preserved (Rs 97,711.45)."
-2026-09-28,6,3,3,50.0,1232.96,-549.63,221.67,97933.12,0.23,-50923.4,"Day 6: 6 Put buys in massive bear trend. 1 Target hit (+Rs 772.89), 2 Trailed/Kill profit locks (+Rs 167.65), 1 BE scratch (-Rs 21.27), 2 early kill cuts (-Rs 697.60). Net green +Rs 221.67."
-2026-09-29,0,0,0,0.0,0.0,0.0,0.0,97933.12,0.0,-50923.4,"Day 7: 0 trades executed. Capital preserved (Rs 97,933.12)."
-2026-09-30,3,2,1,66.7,2151.34,-2278.62,-545.67,97387.45,-0.56,-51469.07,
-2026-10-01,5,3,2,60.0,3529.89,-661.8,2408.04,99795.49,2.47,-49061.03,"Day 9: Net Green +Rs 2408.04 (+2.47%). 2 Target Wins (NIFTY 22400PE +Rs 2445.19, SENSEX 71900PE +Rs 657.62), 1 Trailed Profit Lock (SENSEX 71700PE +Rs 135.58), 1 BE Scratch (NIFTY 22350PE -Rs 24.02), 1 Trailed Half-Risk Cut (BN 55000CE -Rs 806.33). 60% Win Rate."
-2026-10-02,0,0,0,0.0,0.0,0.0,0.0,99795.49,0.0,-49061.03,0 trades executed. Capital preserved.
-2026-10-05,2,2,0,100.0,925.1,0.0,683.0,100478.49,0.68,-48378.03,Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread decayed from 59.29 to 42.35 (+Rs 217.42 net); NIFTY 22800/22950CE spread decayed from 14.67 to 5.65 (+Rs 465.58 net). Note: Host PC network down from 10:41 to 20:54 IST; positions squared off at 15:15 and reconciled via verified exchange Kite closing quotes.
-2026-10-06,7,2,5,28.6,1510.33,-755.56,-49.88,100428.61,-0.05,-48427.91,"Day 11: 7 trades executed (2 Net Green / 5 Losses, 28.6% Net WR). Gross +Rs 754.77 (Wins Rs 1510.33, Losses -Rs 755.56), Net -Rs 49.88 (Breakeven session after Rs 804.65 costs). 1 Target Win (SENSEX 72600CE +Rs 1099.87), 1 Trailed Cost-Lock (BN 55000CE +Rs 43.56), 2 Inactivity Kill Exits (FINNIFTY -Rs 553.67, NIFTY -Rs 67.23), 1 Cost-Lock Scratch (FINNIFTY -Rs 77.44 net), 2 Bear Spreads (SENSEX -Rs 461.88, -Rs 33.09 net)."
-2026-10-07,8,1,7,12.5,2318.58,-2877.09,-1543.55,98885.06,-1.54,-49971.46,"Day 12: 8 trades executed (1 Net Green / 7 Losses, 12.5% WR). Gross -Rs 558.51, Costs Rs 985.04, Net -Rs 1543.55."
-2026-10-08,8,2,6,25.0,3450.19,-5527.19,-2776.24,96108.82,-2.81,-52747.7,"Day 13: 8 trades executed (2 Net Green / 6 Losses, 25.0% WR). Gross -Rs 2077.00, Costs Rs 699.24, Net -Rs 2776.24."
-2026-10-09,0,0,0,0.0,0.0,0.0,0.0,96108.82,0.0,-52747.7,Intraday paper trading session
-2026-10-12,0,0,0,0.0,0.0,0.0,0.0,96108.82,0.0,-52747.7,Intraday paper trading session
-2026-10-13,5,0,5,0.0,118.76,-1806.35,-2074.55,94034.27,-2.16,-54822.25,"Day 14: 5 trades executed (0 Wins / 5 Losses). Gross -Rs 1687.59, Costs Rs 386.96, Net -Rs 2074.55. Relaxed credit spread gates deployed."
-2026-10-14,0,0,0,0.0,0.0,0.0,0.0,94034.27,0.0,-54822.25,0 trades executed. Midweek session.
-2026-10-15,10,2,8,20.0,1617.5,-6464.2,-6055.73,87978.54,-6.44,-60877.98,"Day 15: 10 trades executed (2 Wins / 8 Losses). Gross -Rs 4846.70, Costs Rs 1209.03, Net -Rs 6055.73. SENSEX 4-trade martingale ladder (-Rs 3667.27) resolved via directional lockout."
-2026-10-16,10,5,5,50.0,2729.75,-4367.91,-2581.79,85396.75,-2.93,-63459.77,"Day 16: 10 trades executed (5 Wins / 5 Losses, 50.0% WR). Gross -Rs 1638.16, Costs Rs 943.63, Net -Rs 2581.79. Interrupted trade 8864A5 cleanly settled."
-2026-10-19,2,1,1,50.0,372.9,0.0,126.18,85522.93,0.15,-63333.59,"Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18)."
+2026-08-25,4,1,3,25.0,335.0,-1250.0,-915.0,15000.0,-6.1,-915.0,"NIFTY 24150PE (+28% trailed to +Rs335), NIFTY R2 SL (-Rs465), MIDCAP SL (-Rs651), SENSEX test (-Rs134)"
+2026-08-26,12,8,4,66.7,11199.25,-6507.37,4691.88,15000.0,31.3,3776.88,"8 Credit Spread Wins (+Rs 11199), 4 Momentum Buying Losses (-Rs 6507)"
+2026-08-27,6,0,6,0.0,0.0,-4452.55,-4458.05,15000.0,-29.7,-681.17,Midday mean-reversion squeeze; 5 Nifty PE buys and 1 Sensex PE buy hit SL
+2026-08-28,6,2,4,33.3,4411.29,-2560.9,1850.39,15000.0,12.3,1169.22,"2 Credit Spread Wins (+Rs 4411), 4 Afternoon PE momentum buys hit SL (-Rs 2561)"
+2026-08-31,4,0,4,0.0,0.0,-4454.4,-4459.89,15000.0,-29.7,-3290.67,Morning PE breakout reversed; 2 monthly Sensex PE and 2 Nifty PE hit SL
+2026-09-01,6,5,1,83.3,7128.43,-251.21,6877.22,15000.0,45.8,3586.55,"5 Credit Spread Wins (+Rs 7128), 1 Expiry FastTrigger PE SL (-Rs 251)"
+2026-09-02,3,0,3,0.0,0.0,-6409.65,-6412.85,15000.0,-42.8,-2826.3,Afternoon upward trend breached Bear Call short strikes; defined-risk SL capped loss
+2026-09-03,6,0,6,0.0,0.0,-9849.6,-9854.53,15000.0,-65.7,-12680.83,Paper ledger recorded fallback; live exchange closing quotes showed +Rs 3378 profit
+2026-09-04,6,2,4,33.3,1378.75,-7022.93,-6181.47,15000.0,-41.2,-18862.3,2 Credit Spreads gained (+Rs 1128 net decay); 4 Call buys lost on afternoon pullback (-Rs 7310)
+2026-09-07,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-18862.3,Intraday paper trading session
+2026-09-08,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-18862.3,Intraday paper trading session
+2026-09-09,1,1,0,100.0,203.0,0.0,75.82,15000.0,0.5,-18786.48,NIFTY 15 SEP Bear Call Spread 23600CE/23750CE: Entry net credit 49.32 exit 46.20 (+Rs 75.82 net; live Kite was flat -Rs 107 gross / ~-Rs 207 net due to midday rally offsetting theta). Golden setup option buying appropriately suppressed in 50pt morning chop.
+2026-09-10,2,2,0,100.0,1489.33,0.0,1239.33,15000.0,8.3,-17547.15,"SENSEX 75000/75300 CE spread (+Rs 660.15 net, target decay hit @ 15.05); MIDCPNIFTY 14625/14700 CE spread (+Rs 579.18 net, square-off @ 27.40)"
+2026-09-11,1,0,1,0.0,0.0,-6730.0,-6881.1,15000.0,-45.9,-24428.25,Deep gap-down (-0.8%) & massive V-reversal (+1351pt Bank Nifty). Morning MIDCAP PE trade caught on stale SQLite candle; system hardened to strictly reject stale cache during market hours.
+2026-09-15,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-24428.25,Intraday paper trading session
+2026-09-16,0,0,0,0.0,0.0,0.0,0.0,15000.0,0.0,-24428.25,Intraday paper trading session
+2026-09-21,3,1,2,33.3,211.25,-1187.55,-1347.06,98652.94,-1.35,-25775.31,"Day 1: 3 Bear Call Spreads (Tier C); 1 BE win (+Rs 87.47 net), 2 SL (-Rs 1434.53). 100% paper."
+2026-09-22,0,0,0,0.0,0.0,0.0,0.0,98652.94,0.0,-25775.31,Day 2: 0 trades executed. Angle One missing 23800CE hedge contract identified and resolved.
+2026-09-23,4,1,3,25.0,216.62,-811.42,-933.54,97719.4,-0.95,-26708.85,Day 3: BN 56500CE SL (-Rs902.84); BN 56600CE trailed win (+Rs8.64); NIFTY BE (-Rs26.37); SENSEX BE (-Rs12.97). Trailing stop saved ~Rs4500 from afternoon 600pt flush.
+2026-09-24,1,0,1,0.0,60.0,0.0,-7.95,97711.45,-0.01,-26716.8,Day 4: SENSEX 74100PE trailed BE scratch (-Rs 7.95 net after charges). MFE reached +138% (Rs 368.15). Progressive Half-Risk Ratchet deployed.
+2026-09-25,0,0,0,0.0,0.0,0.0,0.0,97711.45,0.0,-26716.8,"Day 5: 0 trades executed. 80-92% bars compressed inside 15M ORB across NIFTY, BANK NIFTY, SENSEX. Capital preserved (Rs 97,711.45)."
+2026-09-28,6,3,3,50.0,1232.96,-549.63,221.67,97933.12,0.23,-26495.13,"Day 6: 6 Put buys in massive bear trend. 1 Target hit (+Rs 772.89), 2 Trailed/Kill profit locks (+Rs 167.65), 1 BE scratch (-Rs 21.27), 2 early kill cuts (-Rs 697.60). Net green +Rs 221.67."
+2026-09-29,0,0,0,0.0,0.0,0.0,0.0,97933.12,0.0,-26495.13,"Day 7: 0 trades executed. Capital preserved (Rs 97,933.12)."
+2026-09-30,3,2,1,66.7,2151.34,-2278.62,-545.67,97387.45,-0.56,-27040.8,
+2026-10-01,5,3,2,60.0,3529.89,-661.8,2408.04,99795.49,2.47,-24632.76,"Day 9: Net Green +Rs 2408.04 (+2.47%). 2 Target Wins (NIFTY 22400PE +Rs 2445.19, SENSEX 71900PE +Rs 657.62), 1 Trailed Profit Lock (SENSEX 71700PE +Rs 135.58), 1 BE Scratch (NIFTY 22350PE -Rs 24.02), 1 Trailed Half-Risk Cut (BN 55000CE -Rs 806.33). 60% Win Rate."
+2026-10-02,0,0,0,0.0,0.0,0.0,0.0,99795.49,0.0,-24632.76,0 trades executed. Capital preserved.
+2026-10-05,2,2,0,100.0,925.1,0.0,683.0,100478.49,0.68,-23949.76,Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread decayed from 59.29 to 42.35 (+Rs 217.42 net); NIFTY 22800/22950CE spread decayed from 14.67 to 5.65 (+Rs 465.58 net). Note: Host PC network down from 10:41 to 20:54 IST; positions squared off at 15:15 and reconciled via verified exchange Kite closing quotes.
+2026-10-06,7,2,5,28.6,1510.33,-755.56,-49.88,100428.61,-0.05,-23999.64,"Day 11: 7 trades executed (2 Net Green / 5 Losses, 28.6% Net WR). Gross +Rs 754.77 (Wins Rs 1510.33, Losses -Rs 755.56), Net -Rs 49.88 (Breakeven session after Rs 804.65 costs). 1 Target Win (SENSEX 72600CE +Rs 1099.87), 1 Trailed Cost-Lock (BN 55000CE +Rs 43.56), 2 Inactivity Kill Exits (FINNIFTY -Rs 553.67, NIFTY -Rs 67.23), 1 Cost-Lock Scratch (FINNIFTY -Rs 77.44 net), 2 Bear Spreads (SENSEX -Rs 461.88, -Rs 33.09 net)."
+2026-10-07,8,1,7,12.5,2318.58,-2877.09,-1543.55,98885.06,-1.54,-25543.19,"Day 12: 8 trades executed (1 Net Green / 7 Losses, 12.5% WR). Gross -Rs 558.51, Costs Rs 985.04, Net -Rs 1543.55."
+2026-10-08,8,2,6,25.0,3450.19,-5527.19,-2776.24,96108.82,-2.81,-28319.43,"Day 13: 8 trades executed (2 Net Green / 6 Losses, 25.0% WR). Gross -Rs 2077.00, Costs Rs 699.24, Net -Rs 2776.24."
+2026-10-09,0,0,0,0.0,0.0,0.0,0.0,96108.82,0.0,-28319.43,Intraday paper trading session
+2026-10-12,0,0,0,0.0,0.0,0.0,0.0,96108.82,0.0,-28319.43,Intraday paper trading session
+2026-10-13,5,0,5,0.0,118.76,-1806.35,-2074.55,94034.27,-2.16,-30393.98,"Day 14: 5 trades executed (0 Wins / 5 Losses). Gross -Rs 1687.59, Costs Rs 386.96, Net -Rs 2074.55. Relaxed credit spread gates deployed."
+2026-10-14,0,0,0,0.0,0.0,0.0,0.0,94034.27,0.0,-30393.98,0 trades executed. Midweek session.
+2026-10-15,10,2,8,20.0,1617.5,-6464.2,-6055.73,87978.54,-6.44,-36449.71,"Day 15: 10 trades executed (2 Wins / 8 Losses). Gross -Rs 4846.70, Costs Rs 1209.03, Net -Rs 6055.73. SENSEX 4-trade martingale ladder (-Rs 3667.27) resolved via directional lockout."
+2026-10-16,10,5,5,50.0,2729.75,-4367.91,-2581.79,85396.75,-2.93,-39031.5,"Day 16: 10 trades executed (5 Wins / 5 Losses, 50.0% WR). Gross -Rs 1638.16, Costs Rs 943.63, Net -Rs 2581.79. Interrupted trade 8864A5 cleanly settled."
+2026-10-19,2,1,1,50.0,372.9,0.0,126.18,85522.93,0.15,-38905.32,"Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18)."
+2026-10-21,0,0,0,0.0,0.0,0.0,0.0,85396.75,0.0,-38905.32,Intraday paper trading session
+2026-10-23,0,1,0,0.0,0.0,0.0,0.0,85522.93,0.0,-38905.32,Intraday paper trading session

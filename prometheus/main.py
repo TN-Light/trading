@@ -2052,7 +2052,7 @@ class Prometheus:
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
             df_1h = None
             try:
-                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=10, force_refresh=False)
+                df_1h = self.data.fetch_historical(symbol, interval="60minute", days=5, force_refresh=False)
             except Exception as e:
                 logger.debug(f"Could not fetch 1H data for {symbol}: {e}")
 
@@ -5453,6 +5453,18 @@ class Prometheus:
                         position = self._execute_signal_with_feedback(
                             refined, confirm=False, context=mode_label
                         )
+                        # In paper mode, _execute_signal_with_feedback returns None.
+                        # Route to paper_capture so Rank #1 setups are never silently dropped!
+                        if position is None and getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
+                            try:
+                                shadow_trade_id = self.paper_capture.on_signal(refined)
+                                tier_label = tier_info.get("tier", "B")
+                                logger.info(
+                                    f"📝 [PAPER-LIVE-ELIGIBLE] Rank #1 ({tier_label}) signal paper-tracked: "
+                                    f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
+                                )
+                            except Exception as e:
+                                logger.error(f"Paper capture error for Rank #1 {symbol}: {e}")
                     elif is_rank_1 and is_bn_fn_buying:
                         logger.info(
                             f"[CAPITAL-ALLOCATION] De-allocating live capital from {refined.get('symbol')} "

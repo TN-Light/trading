@@ -174,10 +174,13 @@ class PostExitTracker:
 
         with self._lock:
             for tid, item in list(self._watches.items()):
-                # Match instrument or composite leg
-                if item.instrument and item.instrument != instrument and instrument not in item.instrument:
-                    if (not item.symbol or item.symbol != instrument) and (not item.underlying or item.underlying != instrument):
+                # Match strictly against the option contract instrument (or composite spread leg)
+                # NEVER match cash index spot symbols against option contract positions!
+                if item.instrument:
+                    if item.instrument != instrument and instrument not in item.instrument:
                         continue
+                elif item.symbol != instrument:
+                    continue
 
                 # 1. Update Post-Exit MFE and MAE
                 if ltp > item.post_exit_mfe:
@@ -288,7 +291,10 @@ class PostExitTracker:
 
     def on_bar(self, snapshot: Any) -> List[PostExitWatchItem]:
         """Convenience adapter to evaluate closed OHLC bar."""
-        inst = getattr(snapshot, "instrument", "") or getattr(snapshot, "symbol", "")
+        inst = getattr(snapshot, "instrument", "")
+        if not inst:
+            # Underlying index bar without specific contract - cannot be used as option premium!
+            return []
         close_px = float(getattr(snapshot, "close", 0.0) or 0.0)
         ts = getattr(snapshot, "timestamp", None)
         return self.on_tick(inst, close_px, timestamp=ts)

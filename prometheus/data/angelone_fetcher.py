@@ -253,7 +253,7 @@ class AngelOneFetcher:
             }
 
             # ── Retry with aggressive backoff for rate limiting ───────
-            max_retries = 3
+            max_retries = 2
             success = False
             for attempt in range(max_retries):
                 try:
@@ -280,8 +280,8 @@ class AngelOneFetcher:
                         err_code = str(result.get("errorcode", ""))
                         err_msg = str(result.get("message", ""))
                         if err_code == "AB1021" or "too many requests" in err_msg.lower():
-                            # Aggressive backoff: 5s, 10s, 20s
-                            wait = min(5 * (2 ** attempt), 60)
+                            # Fast backoff: 1s, 2s
+                            wait = min(1.0 + (1.0 * attempt), 2.5)
                             # Set cooldown on historical endpoint and propagate
                             self.rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
                             self._rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
@@ -311,7 +311,7 @@ class AngelOneFetcher:
                         "too many requests" in err_msg.lower()
                     )
                     if is_rate_limit:
-                        wait = min(5 * (2 ** attempt), 60)  # 5s, 10s, 20s (cap 60s)
+                        wait = min(1.0 + (1.0 * attempt), 2.5)  # 1s, 2s fast backoff to prevent scan freeze
                         self.rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
                         self._rate_limiter.set_cooldown(wait, endpoint=EndpointCategory.HISTORICAL)
                         logger.warning(

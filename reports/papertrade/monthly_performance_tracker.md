@@ -1,42 +1,25 @@
-# 📊 PROMETHEUS — Performance Tracker & System Ledger
+# 📊 PROMETHEUS — Monthly Performance Tracker
 
-**Tracking Period:** August – October 2026  
+**Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
 **Current Realized Net P&L:** **🔴 -Rs 38,905.32 (-259.37%)**  
-**Last Updated:** 2026-10-19 22:00:00 IST  
+**Last Updated:** 2026-10-23 16:00:17 IST  
 
 ---
 
-## 1. System Performance Overview (Lifetime N=131 vs. Crucible N=74)
-
-### A. Lifetime Performance (August 25 – October 19, 2026)
+## 1. Month-to-Date Performance Overview
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 38,905.32** | +Rs 5,000 / month | 🔴 Drawdown |
-| **Lifetime Return %** | **-259.37%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **37** | 20–22 days | 37 Sessions Tracked |
-| **Green / Red Days** | **9 Green / 17 Red / 11 BE** | > 65% Green | 24.3% Green Rate |
-| **Total Trades** | **131** | ~3–5 / day | 46W + 85L = 131 |
-| **Win Rate** | **35.1%** (46W / 85L) | > 55.0% | ⚠️ Under Review |
-| **Gross Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
+| **Net Realized P&L** | **-Rs 38,905.32** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-259.37%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **39** | 20–22 days | In Progress |
+| **Green / Red Days** | **9 Green / 17 Red / 13 BE** | > 65% Green | 23.1% |
+| **Total Trades** | **131** | ~3–5 / day | Tracked |
+| **Win Rate** | **35.9%** (47W / 85L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
 | **Gross Profit** | +Rs 46,590.22 | — | Winning Trades |
 | **Gross Loss** | -Rs 76,775.93 | — | Losing Trades |
-
-### B. Crucible Phase Performance (September 21 – October 19, 2026 — `live_ledger.sqlite`)
-
-| Metric | Value | Benchmark / Target | Status |
-| :--- | :---: | :---: | :---: |
-| **Crucible Base Capital** | **Rs 100,000.00** | — | Single-Lot Baseline |
-| **Crucible Ending Equity**| **Rs 85,522.93** | — | -14.48% Drawdown |
-| **Crucible Net P&L** | **-Rs 14,477.07** | Positive Expected | 🔴 Protected Capital |
-| **Crucible Trades** | **74** | — | 25W + 49L = 74 |
-| **Crucible Net Win Rate** | **33.8%** (25W / 49L) | > 50.0% | ⚠️ Under Review |
-| **Crucible Gross P&L** | -Rs 6,842.15 | — | (+Rs 20,445.17 / -Rs 27,287.32) |
-| **Crucible Gross PF** | **0.75** | > 1.50 | ⚠️ Under Review |
-| **Total Statutory Costs**| **Rs 7,634.92** | — | Avg Rs 103.17 / trade |
-| **Tier B Net P&L** | **+Rs 2,375.39** | Positive Edge | 🟢 Net Green (30 trades: 11W / 19L) |
-| **Tier C Net P&L** | **-Rs 16,852.46** | Inverted Expectancy | 🔴 Paper Shadow Only (44 trades) |
 
 ---
 
@@ -79,8 +62,10 @@
 | **2026-10-13** | 5 | 0W / 5L | 0% | +Rs 119 | -Rs 1,806 | **🔴 -Rs 2,074.6** | -2.2% | **-Rs 30,394.0** | Day 14: 5 trades executed (0 Wins / 5 Losses). Gross -Rs 1687.59, Costs Rs 386.96, Net -Rs 2074.55. Relaxed credit spread gates deployed. |
 | **2026-10-14** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 30,394.0** | 0 trades executed. Midweek session. |
 | **2026-10-15** | 10 | 2W / 8L | 20% | +Rs 1,618 | -Rs 6,464 | **🔴 -Rs 6,055.7** | -6.4% | **-Rs 36,449.7** | Day 15: 10 trades executed (2 Wins / 8 Losses). Gross -Rs 4846.70, Costs Rs 1209.03, Net -Rs 6055.73. SENSEX 4-trade martingale ladder (-Rs 3667.27) resolved via directional lockout. |
-| **2026-10-19** | 2 | 1W / 1L | 50% | +Rs 373 | -Rs 0 | **🟢 +Rs 126.2** | +0.15% | **-Rs 38,905.3** | Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18). |
-
+| **2026-10-16** | 10 | 5W / 5L | 50% | +Rs 2,730 | -Rs 4,368 | **🔴 -Rs 2,581.8** | -2.9% | **-Rs 39,031.5** | Day 16: 10 trades executed (5 Wins / 5 Losses, 50.0% WR). Gross -Rs 1638.16, Costs Rs 943.63, Net -Rs 2581.79. Interrupted trade 8864A5 cleanly settled. |
+| **2026-10-19** | 2 | 1W / 1L | 50% | +Rs 373 | -Rs 0 | **🟢 +Rs 126.2** | +0.1% | **-Rs 38,905.3** | Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18). |
+| **2026-10-21** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 38,905.3** | Intraday paper trading session |
+| **2026-10-23** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 38,905.3** | Intraday paper trading session |
 
 ---
 

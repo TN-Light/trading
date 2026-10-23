@@ -215,6 +215,32 @@ class PaperTradeEngine:
         if _bar_ts is not None and _bar_ts.tzinfo is None:
             _bar_ts = IST.localize(_bar_ts)
 
+        # Slippage-Aware Target & SL Recalibration:
+        # Anchor target and stop_loss to fill.fill_price so slippage never inverts targets
+        fill_px = float(fill.fill_price)
+        hint_px = float(getattr(signal, "entry_price_hint", 0.0) or 0.0)
+        tgt_gain = float(getattr(signal, "target_gain_pts", 0.0) or 0.0)
+        dir_val = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
+        is_long = dir_val.upper() in ("LONG", "BUY")
+
+        if is_long:
+            if tgt_gain <= 0 and signal.target > hint_px > 0:
+                tgt_gain = signal.target - hint_px
+            effective_target = round(fill_px + tgt_gain, 2) if tgt_gain > 0 else signal.target
+            risk_dist = (hint_px - signal.stop_loss) if (hint_px > signal.stop_loss > 0) else (fill_px * 0.35)
+            effective_sl = max(1.0, round(fill_px - risk_dist, 2)) if risk_dist > 0 else signal.stop_loss
+        else:
+            if hint_px > 0 and signal.target > 0:
+                target_decay_ratio = max(0.1, min(0.9, signal.target / hint_px))
+                effective_target = round(fill_px * target_decay_ratio, 2)
+            else:
+                effective_target = signal.target
+            if hint_px > 0 and signal.stop_loss > hint_px:
+                sl_ratio = signal.stop_loss / hint_px
+                effective_sl = round(fill_px * sl_ratio, 2)
+            else:
+                effective_sl = signal.stop_loss
+
         position = Position(
             trade_id=trade_id,
             symbol=signal.symbol,
@@ -223,27 +249,9 @@ class PaperTradeEngine:
             direction=signal.direction,
             quantity=qty,
             entry_price=fill.fill_price,
-            # Live entries use wall-clock time; replay/test paths use
-            # the signal's bar_timestamp. We distinguish by bar age:
-            # if the bar's timestamp is older than 1 day, the signal is
-            # being driven off stale data (e.g. HistoricalDataBridge fed
-            # yesterday's 15:15 bar today), and using it as the entry
-            # time would produce negative holding_duration (the bug
-            # observed 2026-07-21: -1095 min). In that case fall back to
-            # datetime.now(). Test/replay bars (same-day or future-day
-            # timestamps) are honored as before.
-            #
-            # Bug #1 (2026-07-22): the live path builds bar_timestamp
-            # as a tz-NAIVE string (main.py:1834 str(.iloc[-1])), which
-            # _parse_bar_timestamp parses back into a tz-naive datetime.
-            # Subtracting it from tz-aware datetime.now(IST) raised
-            # TypeError and silently killed every LivePaperCapture
-            # signal. Fix: localize the naive bar_timestamp to IST
-            # before the arithmetic (treats naive as local IST, which
-            # is correct for this system — engine always stores IST).
             entry_time=datetime.now(IST),
-            stop_loss=signal.stop_loss,
-            target=signal.target,
+            stop_loss=effective_sl,
+            target=effective_target,
             max_bars=max_bars,
             bars_held=0,
             strategy=signal.strategy,
