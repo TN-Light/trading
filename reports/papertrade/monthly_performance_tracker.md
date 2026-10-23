@@ -1,25 +1,42 @@
-# 📊 PROMETHEUS — Monthly Performance Tracker
+# 📊 PROMETHEUS — Performance Tracker & System Ledger
 
-**Tracking Period:** August 2026  
+**Tracking Period:** August – October 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 38,905.32 (-259.37%)**  
-**Last Updated:** 2026-10-23 16:00:17 IST  
+**Current Realized Net P&L:** **🔴 -Rs 38,572.64 (-257.15%)**  
+**Last Updated:** 2026-10-23 21:55:00 IST  
 
 ---
 
-## 1. Month-to-Date Performance Overview
+## 1. System Performance Overview (Lifetime N=133 vs. Crucible N=76)
+
+### A. Lifetime Performance (August 25 – October 23, 2026)
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 38,905.32** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-259.37%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **39** | 20–22 days | In Progress |
-| **Green / Red Days** | **9 Green / 17 Red / 13 BE** | > 65% Green | 23.1% |
-| **Total Trades** | **131** | ~3–5 / day | Tracked |
-| **Win Rate** | **35.9%** (47W / 85L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 46,590.22 | — | Winning Trades |
-| **Gross Loss** | -Rs 76,775.93 | — | Losing Trades |
+| **Net Realized P&L** | **-Rs 38,572.64** | +Rs 5,000 / month | 🔴 Drawdown |
+| **Lifetime Return %** | **-257.15%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **40** | 20–22 days | 40 Sessions Tracked |
+| **Green / Red Days** | **10 Green / 17 Red / 13 BE** | > 65% Green | 25.0% Green Rate |
+| **Total Trades** | **133** | ~3–5 / day | 47W + 86L = 133 |
+| **Win Rate** | **35.3%** (47W / 86L) | > 55.0% | ⚠️ Under Review |
+| **Gross Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 47,110.35 | — | Winning Trades |
+| **Gross Loss** | -Rs 76,865.93 | — | Losing Trades |
+
+### B. Crucible Phase Performance (September 21 – October 23, 2026 — `live_ledger.sqlite`)
+
+| Metric | Value | Benchmark / Target | Status |
+| :--- | :---: | :---: | :---: |
+| **Crucible Base Capital** | **Rs 100,000.00** | — | Single-Lot Baseline |
+| **Crucible Ending Equity**| **Rs 85,855.61** | — | -14.14% Drawdown |
+| **Crucible Net P&L** | **-Rs 14,144.39** | Positive Expected | 🔴 Protected Capital |
+| **Crucible Trades** | **76** | — | 26W + 50L = 76 |
+| **Crucible Net Win Rate** | **34.2%** (26W / 50L) | > 50.0% | ⚠️ Under Review |
+| **Crucible Gross P&L** | -Rs 6,322.02 | — | (+Rs 19,783.24 / -Rs 26,105.26) |
+| **Crucible Gross PF** | **0.76** | > 1.50 | ⚠️ Under Review |
+| **Total Statutory Costs**| **Rs 7,822.37** | — | Avg Rs 102.93 / trade |
+| **Tier B Net P&L** | **+Rs 2,371.74** | Positive Edge | 🟢 Net Green (31 trades: 11W / 20L) |
+| **Tier C Net P&L** | **-Rs 16,516.13** | Inverted Expectancy | 🔴 Paper Shadow Only (45 trades) |
 
 ---
 
@@ -50,11 +67,11 @@
 | **2026-09-25** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,716.8** | Day 5: 0 trades executed. 80-92% bars compressed inside 15M ORB across NIFTY, BANK NIFTY, SENSEX. Capital preserved (Rs 97,711.45). |
 | **2026-09-28** | 6 | 3W / 3L | 50% | +Rs 1,233 | -Rs 550 | **🟢 +Rs 221.7** | +0.2% | **-Rs 26,495.1** | Day 6: 6 Put buys in massive bear trend. 1 Target hit (+Rs 772.89), 2 Trailed/Kill profit locks (+Rs 167.65), 1 BE scratch (-Rs 21.27), 2 early kill cuts (-Rs 697.60). Net green +Rs 221.67. |
 | **2026-09-29** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 26,495.1** | Day 7: 0 trades executed. Capital preserved (Rs 97,933.12). |
-| **2026-09-30** | 3 | 2W / 1L | 67% | +Rs 2,151 | -Rs 2,279 | **🔴 -Rs 545.7** | -0.6% | **-Rs 27,040.8** | nan |
+| **2026-09-30** | 3 | 2W / 1L | 67% | +Rs 2,151 | -Rs 2,279 | **🔴 -Rs 545.7** | -0.6% | **-Rs 27,040.8** | Day 8: 3 trades executed (2 Wins / 1 Loss). Net -Rs 545.67. |
 | **2026-10-01** | 5 | 3W / 2L | 60% | +Rs 3,530 | -Rs 662 | **🟢 +Rs 2,408.0** | +2.5% | **-Rs 24,632.8** | Day 9: Net Green +Rs 2408.04 (+2.47%). 2 Target Wins (NIFTY 22400PE +Rs 2445.19, SENSEX 71900PE +Rs 657.62), 1 Trailed Profit Lock (SENSEX 71700PE +Rs 135.58), 1 BE Scratch (NIFTY 22350PE -Rs 24.02), 1 Trailed Half-Risk Cut (BN 55000CE -Rs 806.33). 60% Win Rate. |
 | **2026-10-02** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 24,632.8** | 0 trades executed. Capital preserved. |
-| **2026-10-05** | 2 | 2W / 0L | 100% | +Rs 925 | -Rs 0 | **🟢 +Rs 683.0** | +0.7% | **-Rs 23,949.8** | Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread decayed from 59.29 to 42.35 (+Rs 217.42 net); NIFTY 22800/22950CE spread decayed from 14.67 to 5.65 (+Rs 465.58 net). Note: Host PC network down from 10:41 to 20:54 IST; positions squared off at 15:15 and reconciled via verified exchange Kite closing quotes. |
-| **2026-10-06** | 7 | 2W / 5L | 29% | +Rs 1,510 | -Rs 756 | **🔴 -Rs 49.9** | -0.1% | **-Rs 23,999.6** | Day 11: 7 trades executed (2 Net Green / 5 Losses, 28.6% Net WR). Gross +Rs 754.77 (Wins Rs 1510.33, Losses -Rs 755.56), Net -Rs 49.88 (Breakeven session after Rs 804.65 costs). 1 Target Win (SENSEX 72600CE +Rs 1099.87), 1 Trailed Cost-Lock (BN 55000CE +Rs 43.56), 2 Inactivity Kill Exits (FINNIFTY -Rs 553.67, NIFTY -Rs 67.23), 1 Cost-Lock Scratch (FINNIFTY -Rs 77.44 net), 2 Bear Spreads (SENSEX -Rs 461.88, -Rs 33.09 net). |
+| **2026-10-05** | 2 | 2W / 0L | 100% | +Rs 925 | -Rs 0 | **🟢 +Rs 683.0** | +0.7% | **-Rs 23,949.8** | Day 10: 2 Bear Call Spreads (Tier B). 100% Win Rate (+Rs 683.00 Net P&L). SENSEX 73300/73600CE spread decayed from 59.29 to 42.35 (+Rs 217.42 net); NIFTY 22800/22950CE spread decayed from 14.67 to 5.65 (+Rs 465.58 net). |
+| **2026-10-06** | 7 | 2W / 5L | 29% | +Rs 1,510 | -Rs 756 | **🔴 -Rs 49.9** | -0.1% | **-Rs 23,999.6** | Day 11: 7 trades executed (2 Net Green / 5 Losses, 28.6% Net WR). Gross +Rs 754.77, Costs Rs 804.65, Net -Rs 49.88. |
 | **2026-10-07** | 8 | 1W / 7L | 12% | +Rs 2,319 | -Rs 2,877 | **🔴 -Rs 1,543.5** | -1.5% | **-Rs 25,543.2** | Day 12: 8 trades executed (1 Net Green / 7 Losses, 12.5% WR). Gross -Rs 558.51, Costs Rs 985.04, Net -Rs 1543.55. |
 | **2026-10-08** | 8 | 2W / 6L | 25% | +Rs 3,450 | -Rs 5,527 | **🔴 -Rs 2,776.2** | -2.8% | **-Rs 28,319.4** | Day 13: 8 trades executed (2 Net Green / 6 Losses, 25.0% WR). Gross -Rs 2077.00, Costs Rs 699.24, Net -Rs 2776.24. |
 | **2026-10-09** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 28,319.4** | Intraday paper trading session |
@@ -65,11 +82,13 @@
 | **2026-10-16** | 10 | 5W / 5L | 50% | +Rs 2,730 | -Rs 4,368 | **🔴 -Rs 2,581.8** | -2.9% | **-Rs 39,031.5** | Day 16: 10 trades executed (5 Wins / 5 Losses, 50.0% WR). Gross -Rs 1638.16, Costs Rs 943.63, Net -Rs 2581.79. Interrupted trade 8864A5 cleanly settled. |
 | **2026-10-19** | 2 | 1W / 1L | 50% | +Rs 373 | -Rs 0 | **🟢 +Rs 126.2** | +0.1% | **-Rs 38,905.3** | Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18). |
 | **2026-10-21** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 38,905.3** | Intraday paper trading session |
-| **2026-10-23** | 0 | 1W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 38,905.3** | Intraday paper trading session |
+| **2026-10-23** | 2 | 1W / 1L | 50% | +Rs 520 | -Rs 90 | **🟢 +Rs 332.7** | +0.4% | **-Rs 38,572.6** | Day 18: 2 trades executed (1 Win / 1 Loss, 50.0% WR). SENSEX 73100PE target hit (+Rs 336.33 net), SENSEX 72900PE trailed BE scratch (-Rs 3.65 net). Net Green session (+Rs 332.68). |
 
 ---
 
 ## 3. Data File Locations
 
+* **SQLite Primary Ledger:** [`reports/papertrade/live_ledger.sqlite`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/live_ledger.sqlite)
 * **CSV Raw Ledger:** [`reports/papertrade/daily_performance_ledger.csv`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/daily_performance_ledger.csv)
+* **Live Trades CSV:** [`reports/papertrade/live_ledger.csv`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/live_ledger.csv)
 * **Markdown Tracker:** [`reports/papertrade/monthly_performance_tracker.md`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/monthly_performance_tracker.md)

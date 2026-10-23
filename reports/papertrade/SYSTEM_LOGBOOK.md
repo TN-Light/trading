@@ -1087,3 +1087,46 @@ equire_long_gamma: true (min_net_gex: 1.5), requiring positive market maker gamm
   - prometheus/tests/test_credit_spread_relaxed_gates.py: 15/15 passed.
   - prometheus/tests/test_oct15_directional_and_lockout_fixes.py: 11/11 passed.
 - Total: **31 passed in 4.24s** with 100% success rate.
+
+
+---
+
+## DAY 19 — 2026-10-23: FRIDAY FORENSIC MARKET, SIGNAL & EXECUTION AUDIT
+
+### 1. Executive Summary & Session Ground Truth
+- **Trading Date**: Friday, October 23, 2026 (SENSEX Weekly Expiry Session).
+- **Execution Mode**: Paper Trading / Forward Evaluation.
+- **Trades Executed**: 2 (both SENSEX PE long options).
+- **Session Net P&L**: **🟢 +₹332.68 (+0.39%)** (Gross: +₹520.13, Statutory Costs: ₹187.45).
+- **Win Rate**: 50.0% (1 Win / 1 Loss / 0 BE).
+- **Continuous Capital**: Advanced from **₹85,522.93** to **₹85,855.61**.
+- **Crucible Cumulative P&L (N=76)**: **-₹14,144.39** (Drawdown reduced from -14.48% to -14.14%).
+- **Lifetime Cumulative P&L (N=133)**: **-₹38,572.64**.
+
+### 2. Verified Executed Trades (from `reports/papertrade/live_ledger.sqlite`)
+| Trade ID | Underlying & Instrument | Entry (IST) | Exit (IST) | Entry (₹) | Exit (₹) | Gross (₹) | Costs (₹) | Net P&L (₹) | Exit Reason |
+|---|---|---|---|---|---|---|---|---|---|
+| `AC2A37` | SENSEX 73100PE | 10:07:48 | 10:08:26 (38s) | 594.29 | 615.80 | +₹430.13 | ₹93.80 | **+₹336.33** | target |
+| `1491D6` | SENSEX 72900PE | 10:33:26 | 10:36:30 (184s) | 603.85 | 608.35 | +₹90.00 | ₹93.65 | **-₹3.65** | stop_loss (trailed BE) |
+
+### 3. Full Population Performance Breakdown (N=76 Crucible)
+* **Tier B (Trend Runners / Macro-Aligned)**: 31 trades | 11 Net Wins / 20 Net Losses (35.5% Net WR; 21 Gross Wins / 67.7% Gross WR) | Gross: +₹5,385.06 | Net: **+₹2,371.74 (Net Green Edge)** 🟢
+* **Tier C (Scalps / Chop / Monthly Spreads)**: 45 trades | 15 Net Wins / 30 Net Losses (33.3% Net WR) | Gross: -₹11,707.08 | Net: **-₹16,516.13 (Severe Friction)** 🔴
+
+### 4. 8 Production Execution Bugs Identified & Resolved
+1. **Rank #1 Paper Capture Bypass**: `main.py` routed Rank #1 live-eligible setups only to broker router, dropping them in paper mode. Fixed by branching paper capture for Rank #1 when in paper mode.
+2. **Dynamic Fill Slippage Anchoring**: Target/SL anchored to signal hint price rather than fill price, causing 38s instant exit on positive fill slippage. Fixed by anchoring to `fill.fill_price`.
+3. **Missing Enum Value**: `TRAILING_STOP` added to `ExitReason` enum in `types.py`.
+4. **SENSEX Statutory Cost Buffer**: Recalibrated from 4.5 pts to $\ge 5.50$ pts, preventing net-red trailed breakevens.
+5. **Martingale Lockout Gating**: Restricted lockout strictly to real capital losses (`raw_reason == 'stop_loss' and net_pnl < 0`).
+6. **Post-Exit Tracker Token Validation**: Filtered out index spot bars (`instrument=""`) to eliminate key collisions.
+7. **Telegram In-Trade Heartbeats**: Added 60s periodic in-trade health checks and integrated 8-Pillar health scores into trailing stop alerts.
+8. **SmartAPI 10-Day Lookback Reduction**: Reduced 1H historical lookback to 5 days, capped retries to 2 with 1-2s backoff.
+
+### 5. Continuous Account Capital Status
+* **Starting Base Capital (Day 1):** ₹1,00,000.00
+* **Day 17 Ending Equity:** ₹85,522.93
+* **Day 18 Realized Net P&L:** **🟢 +₹332.68 (+0.39%)**
+* **Crucible Cumulative Net P&L (N=76):** **-₹14,144.39** (-14.14% drawdown from initial base)
+* **Current Continuous Account Equity:** **₹85,855.61**
+* **Lifetime System Cumulative P&L (N=133):** **-₹38,572.64**

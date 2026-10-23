@@ -36,5 +36,5 @@ Date,Total_Trades,Wins,Losses,Win_Rate_Pct,Gross_Profit,Gross_Loss,Net_PnL,Capit
 2026-10-15,10,2,8,20.0,1617.5,-6464.2,-6055.73,87978.54,-6.44,-36449.71,"Day 15: 10 trades executed (2 Wins / 8 Losses). Gross -Rs 4846.70, Costs Rs 1209.03, Net -Rs 6055.73. SENSEX 4-trade martingale ladder (-Rs 3667.27) resolved via directional lockout."
 2026-10-16,10,5,5,50.0,2729.75,-4367.91,-2581.79,85396.75,-2.93,-39031.5,"Day 16: 10 trades executed (5 Wins / 5 Losses, 50.0% WR). Gross -Rs 1638.16, Costs Rs 943.63, Net -Rs 2581.79. Interrupted trade 8864A5 cleanly settled."
 2026-10-19,2,1,1,50.0,372.9,0.0,126.18,85522.93,0.15,-38905.32,"Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18)."
-2026-10-21,0,0,0,0.0,0.0,0.0,0.0,85396.75,0.0,-38905.32,Intraday paper trading session
-2026-10-23,0,1,0,0.0,0.0,0.0,0.0,85522.93,0.0,-38905.32,Intraday paper trading session
+2026-10-21,0,0,0,0.0,0.0,0.0,0.0,85522.93,0.0,-38905.32,Intraday paper trading session
+2026-10-23,2,1,1,50.0,520.13,-90.0,332.68,85855.61,0.39,-38572.64,"Day 18: 2 trades executed (1 Win / 1 Loss, 50.0% WR). SENSEX 73100PE target win (+Rs 336.33 net), SENSEX 72900PE trailed BE scratch (-Rs 3.65 net). Net Green session (+Rs 332.68)."
