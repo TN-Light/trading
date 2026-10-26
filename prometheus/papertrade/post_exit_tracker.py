@@ -51,6 +51,7 @@ class PostExitWatchItem:
     is_premature_shakeout: bool = False
     alpha_left_pts: float = 0.0
     drawdown_saved_pts: float = 0.0
+    is_short_gamma_squeeze: int = 0
     status: str = "WATCHING"
     created_at: float = field(default_factory=time.monotonic)
 
@@ -119,6 +120,7 @@ class PostExitTracker:
             entry_spot = float(getattr(trade, "entry_spot", 0.0) or (trade.get("entry_spot", 0.0) if isinstance(trade, dict) else 0.0))
             dur_sec = int(getattr(trade, "holding_duration_seconds", 0) or (trade.get("holding_duration_seconds", 0) if isinstance(trade, dict) else 0))
 
+            is_sq = int(getattr(trade, "is_short_gamma_squeeze", 0) or (trade.get("is_short_gamma_squeeze", 0) if isinstance(trade, dict) else 0))
             watch_item = PostExitWatchItem(
                 trade_id=trade_id,
                 symbol=symbol,
@@ -136,6 +138,7 @@ class PostExitTracker:
                 holding_duration_seconds=dur_sec,
                 post_exit_mfe=exit_price,
                 post_exit_mae=exit_price,
+                is_short_gamma_squeeze=is_sq,
                 status="WATCHING",
             )
 

@@ -241,6 +241,9 @@ class PaperTradeEngine:
             else:
                 effective_sl = signal.stop_loss
 
+        gex_val = getattr(signal, "net_gex", None)
+        gamma_reg = str(getattr(signal, "gamma_regime", "")).upper()
+        is_sq = 1 if ((gex_val is not None and gex_val < 0) or gamma_reg == "SHORT_GAMMA") else 0
         position = Position(
             trade_id=trade_id,
             symbol=signal.symbol,
@@ -265,6 +268,7 @@ class PaperTradeEngine:
             atr=getattr(signal, "atr", 0.0) or 0.0,
             target_gain_pts=float(getattr(signal, "target_gain_pts", 0.0) or 0.0),
             tier=getattr(signal, "tier", "") or "",
+            is_short_gamma_squeeze=is_sq,
         )
         position.bar_timestamp = _bar_ts
         self.tracker.open_position(position)

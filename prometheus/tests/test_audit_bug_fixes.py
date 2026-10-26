@@ -262,8 +262,8 @@ def test_paper_trailing_stop_constant_denominator():
     # Step 1: Move price up to 109 (0.45R -> triggers Breakeven Stage 0 at 0.4R)
     tracker._maybe_advance_trailing_stop(pos, 109.0)
     assert pos.breakeven_set is True
-    # SL is moved to entry + cost_buffer (1.40 statutory floor for NIFTY) = 101.4
-    assert pos.stop_loss == 101.4
+    # SL is moved to entry + cost_buffer (2.00 statutory floor for NIFTY) = 102.0
+    assert pos.stop_loss == 102.0
     # Crucially, denominator must remain 20.0, NOT (100 - 100.9 = -0.9 -> 1e-9)
     assert pos.initial_risk_distance == 20.0
 

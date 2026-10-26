@@ -95,6 +95,7 @@ class PaperTrade:
     entry_spot: float = 0.0
     target_gain_pts: float = 0.0
     trade_type: str = ""
+    is_short_gamma_squeeze: int = 0
 
     def __post_init__(self):
         if not self.trade_type:
@@ -166,6 +167,7 @@ class Position:
     atr: float = 0.0
     target_gain_pts: float = 0.0
     tier: str = ""
+    is_short_gamma_squeeze: int = 0
 
     def __post_init__(self):
         if self.initial_sl <= 0.0 and self.stop_loss > 0.0:

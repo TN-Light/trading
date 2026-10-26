@@ -38,3 +38,4 @@ Date,Total_Trades,Wins,Losses,Win_Rate_Pct,Gross_Profit,Gross_Loss,Net_PnL,Capit
 2026-10-19,2,1,1,50.0,372.9,0.0,126.18,85522.93,0.15,-38905.32,"Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18)."
 2026-10-21,0,0,0,0.0,0.0,0.0,0.0,85522.93,0.0,-38905.32,Intraday paper trading session
 2026-10-23,2,1,1,50.0,520.13,-90.0,332.68,85855.61,0.39,-38572.64,"Day 18: 2 trades executed (1 Win / 1 Loss, 50.0% WR). SENSEX 73100PE target win (+Rs 336.33 net), SENSEX 72900PE trailed BE scratch (-Rs 3.65 net). Net Green session (+Rs 332.68)."
+2026-10-26,2,1,1,50.0,201.0,0.0,6.24,85861.85,0.01,-38566.4,"Day 19: 2 trades executed (1 Win / 1 Loss, 50.0% WR). SENSEX 73300CE trailed BE (+Rs 6.65 net), NIFTY 22650CE trailed BE (-Rs 0.41 net friction). Squeeze micro-locks protected against -Rs 1,064 post-exit MAE crashes. Net Green session (+Rs 6.24)."

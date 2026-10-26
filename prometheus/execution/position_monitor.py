@@ -806,16 +806,16 @@ class PositionMonitor:
             sym_root = (getattr(state, "symbol", "") or "").upper()
             qty = int(getattr(state, "quantity", 0) or 0)
             if "SENSEX" in sym_root or "BSX" in sym_root:
-                cost_buffer_pts = 3.0 if qty > 20 else (5.0 if qty in (10, 1) else 4.50)
+                cost_buffer_pts = 3.50 if qty > 20 else 5.50
                 min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
             elif "BANK" in sym_root:
-                cost_buffer_pts = 5.20 if (qty <= 30 or qty in (15, 1)) else 3.50
+                cost_buffer_pts = 5.50 if (qty <= 30 or qty in (15, 1)) else 3.50
                 min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
             elif "FINNIFTY" in sym_root:
-                cost_buffer_pts = 2.20 if (qty <= 65 or qty in (40, 1)) else 1.80
+                cost_buffer_pts = 2.60 if (qty <= 65 or qty in (40, 1)) else 1.80
                 min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
             else:
-                cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
+                cost_buffer_pts = 2.00 if (qty <= 75 or qty in (25, 1)) else 1.20
                 min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
 
             if getattr(state, "low_vix_mode", False):

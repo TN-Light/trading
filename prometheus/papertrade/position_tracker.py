@@ -94,6 +94,38 @@ class CostModel:
 
 
 class PositionTracker:
+    @staticmethod
+    def get_statutory_cost_buffer(sym_root: str, qty: int, is_spread: bool = False) -> float:
+        """
+        Unified Statutory Fee Hurdle Buffer (GEMINI.md Rule 2).
+        Calculated to ensure that breakeven trailing stop exits always cover
+        maximum observed round-trip statutory fees (brokerage + STT + turnover + GST + SEBI).
+        NIFTY: 2.00 pts (1-lot) / 1.20 pts (multi-lot)
+        SENSEX: 5.50 pts (1-lot) / 3.50 pts (multi-lot)
+        BANK NIFTY: 5.50 pts (1-lot) / 3.50 pts (multi-lot)
+        FINNIFTY: 2.60 pts (1-lot) / 1.80 pts (multi-lot)
+        """
+        sym_u = (sym_root or "").upper()
+        is_fin = ("FIN" in sym_u) or ("FINNIFTY" in sym_u)
+        if is_spread:
+            if "SENSEX" in sym_u:
+                return 8.50 if (qty <= 20 or qty in (10, 1)) else 6.50
+            elif "BANK" in sym_u:
+                return 8.50 if (qty <= 30 or qty in (15, 1)) else 5.50
+            elif is_fin:
+                return 4.20 if (qty <= 65 or qty in (40, 1)) else 3.20
+            else:
+                return 2.80 if (qty <= 75 or qty in (25, 1)) else 2.20
+        else:
+            if "SENSEX" in sym_u:
+                return 3.50 if qty > 20 else 5.50
+            elif "BANK" in sym_u:
+                return 5.50 if (qty <= 30 or qty in (15, 1)) else 3.50
+            elif is_fin:
+                return 2.60 if (qty <= 65 or qty in (40, 1)) else 1.80
+            else:
+                return 2.00 if (qty <= 75 or qty in (25, 1)) else 1.20
+
     """Holds open positions; emits closed trades on exit events.
 
     Args:
@@ -162,6 +194,10 @@ class PositionTracker:
                 f"rejecting duplicate"
             )
             return
+        if getattr(position, "is_short_gamma_squeeze", 0) == 0:
+            gex_val = getattr(position, "net_gex", None)
+            if gex_val is not None and gex_val < 0:
+                position.is_short_gamma_squeeze = 1
         self.open_positions[position.trade_id] = position
         # Bug C.2 (2026-07-25 audit): persist immediately so a crash/restart
         # between this insert and the eventual close still leaves a recoverable
@@ -287,6 +323,7 @@ class PositionTracker:
             tier=getattr(pos, "tier", ""),
             entry_spot=getattr(pos, "entry_spot", 0.0),
             target_gain_pts=getattr(pos, "target_gain_pts", 0.0),
+            is_short_gamma_squeeze=getattr(pos, "is_short_gamma_squeeze", 0),
         )
         trade.bar_timestamp = getattr(pos, "bar_timestamp", None)
         self.closed_trades.append(trade)
@@ -862,28 +899,8 @@ class PositionTracker:
         sym_root = (pos.underlying or pos.symbol or "").upper()
         qty = int(getattr(pos, "quantity", 0) or 0)
 
-        # Cost buffer for fee coverage (calibrated to max observed fees in GEMINI.md Section 2)
-        is_fin = ("FIN" in sym_root) or ("FINNIFTY" in sym_root)
-        if is_spread:
-            # Multi-leg spreads execute 2 legs, paying double brokerage and statutory fees
-            if "SENSEX" in sym_root:
-                cost_buffer_pts = 8.50 if (qty <= 20 or qty in (10, 1)) else 6.50
-            elif "BANK" in sym_root:
-                cost_buffer_pts = 8.50 if (qty <= 30 or qty in (15, 1)) else 5.50
-            elif is_fin:
-                cost_buffer_pts = 4.20 if (qty <= 65 or qty in (40, 1)) else 3.20
-            else:
-                cost_buffer_pts = 2.80 if (qty <= 75 or qty in (25, 1)) else 2.20
-        else:
-            # Single-leg option buying calibrated to statutory fee hurdles (GEMINI.md Rule 2)
-            if "SENSEX" in sym_root:
-                cost_buffer_pts = 3.0 if qty > 20 else (5.0 if qty in (10, 1) else 4.50)
-            elif "BANK" in sym_root:
-                cost_buffer_pts = 5.20 if (qty <= 30 or qty in (15, 1)) else 3.50
-            elif is_fin:
-                cost_buffer_pts = 2.20 if (qty <= 65 or qty in (40, 1)) else 1.80
-            else:
-                cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
+        # Cost buffer for fee coverage (calibrated to unified statutory fee hurdles)
+        cost_buffer_pts = self.get_statutory_cost_buffer(sym_root, qty, is_spread=is_spread)
 
         # =====================================================================
         # CREDIT SPREAD (OPTION SELLING) 2-STAGE THETA TRAILING RATCHET
@@ -1013,34 +1030,25 @@ class PositionTracker:
             )
         )
 
-        # 2. Recalibrate Cost Buffer (Bank Nifty >= 5.20, Sensex >= 4.50, FinNifty >= 2.20, Nifty >= 1.40 for 1-lot trading)
+        # 2. Recalibrate Cost Buffer (Unified Statutory Fee Hurdle Floor)
         qty = int(getattr(pos, "quantity", 0) or 0)
         is_fin = ("FIN" in sym_root) or ("FINNIFTY" in sym_root)
+        cost_buffer_pts = self.get_statutory_cost_buffer(sym_root, qty, is_spread=is_spread)
         if is_spread:
-            if "SENSEX" in sym_root:
-                cost_buffer_pts = 8.50 if (qty <= 20 or qty in (10, 1)) else 6.50
-                min_be_gain = 25.0
-            elif "BANK" in sym_root:
-                cost_buffer_pts = 8.50 if (qty <= 30 or qty in (15, 1)) else 5.50
+            if "SENSEX" in sym_root or "BANK" in sym_root:
                 min_be_gain = 25.0
             elif is_fin:
-                cost_buffer_pts = 4.20 if (qty <= 65 or qty in (40, 1)) else 3.20
                 min_be_gain = 18.0
             else:
-                cost_buffer_pts = 2.80 if (qty <= 75 or qty in (25, 1)) else 2.20
                 min_be_gain = 5.0
         else:
             if "SENSEX" in sym_root:
-                cost_buffer_pts = 3.50 if qty > 20 else 5.50
                 min_be_gain = 20.0      # SENSEX option noise floor: need >= 20 pts gain for full breakeven
             elif "BANK" in sym_root:
-                cost_buffer_pts = 5.50 if (qty <= 30 or qty in (15, 1)) else 3.50
                 min_be_gain = 18.0      # Bank Nifty option noise floor: need >= 18 pts gain for full breakeven
             elif is_fin:
-                cost_buffer_pts = 2.50 if (qty <= 65 or qty in (40, 1)) else 1.80
                 min_be_gain = 16.0      # FINNIFTY option noise floor: need >= 16 pts gain for full breakeven
             else:
-                cost_buffer_pts = 1.40 if (qty <= 75 or qty in (25, 1)) else 0.90
                 min_be_gain = 2.0       # NIFTY default: noise floor >= 2.0 pts
 
         gain_pts = current_price - pos.entry_price

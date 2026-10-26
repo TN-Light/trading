@@ -446,8 +446,8 @@ def test_single_lot_cost_buffers_calibrated_for_statutory_fees():
     tracker.open_positions[pos_sensex.trade_id] = pos_sensex
     tracker._maybe_advance_trailing_stop(pos_sensex, 320.0)  # +20 pts gain (hits noise floor)
     assert pos_sensex.breakeven_set is True
-    # Breakeven SL should be Entry + 4.50 = 304.50
-    assert pos_sensex.stop_loss == pytest.approx(304.50, abs=1e-2)
+    # Breakeven SL should be Entry + 5.50 = 305.50 (GEMINI.md Rule 2)
+    assert pos_sensex.stop_loss == pytest.approx(305.50, abs=1e-2)
 
     # NIFTY single lot (qty = 65): covers Rs 69.52 round trip fees (1.20 pts * 65 = Rs 78.00)
     pos_nifty = Position(
@@ -465,8 +465,8 @@ def test_single_lot_cost_buffers_calibrated_for_statutory_fees():
     )
     tracker.open_positions[pos_nifty.trade_id] = pos_nifty
     tracker._maybe_advance_trailing_stop(pos_nifty, 110.0)  # +10 pts gain
-    # Breakeven SL should be Entry + 1.40 = 101.40 (GEMINI.md Rule 2)
-    assert pos_nifty.stop_loss == pytest.approx(101.40, abs=1e-2)
+    # Breakeven SL should be Entry + 2.00 = 102.00 (GEMINI.md Rule 2)
+    assert pos_nifty.stop_loss == pytest.approx(102.00, abs=1e-2)
 
 
 def test_missing_telemetry_keys_do_not_trigger_weak_edge_ratchet():
@@ -541,7 +541,7 @@ def test_position_monitor_live_cost_buffers_and_telemetry_guards():
     # Gain +20 pts reaches SENSEX noise floor (>= 20 pts)
     monitor._process_tick(state_sensex, 320.0)
     assert state_sensex.breakeven_set is True
-    assert state_sensex.current_sl == pytest.approx(304.50, abs=1e-2)
+    assert state_sensex.current_sl == pytest.approx(305.50, abs=1e-2)
 
     # 2. NIFTY 65 qty single lot in PositionMonitor
     state_nifty = TrailingState(
@@ -562,7 +562,7 @@ def test_position_monitor_live_cost_buffers_and_telemetry_guards():
     # Gain +10 pts triggers breakeven
     monitor._process_tick(state_nifty, 110.0)
     assert state_nifty.breakeven_set is True
-    assert state_nifty.current_sl == pytest.approx(101.40, abs=1e-2)
+    assert state_nifty.current_sl == pytest.approx(102.00, abs=1e-2)
 
     # 3. Missing telemetry keys (commitment_ratio=0.0, net_gex=0.0) must not trigger weak edge ratchet in PositionMonitor
     state_guard = TrailingState(

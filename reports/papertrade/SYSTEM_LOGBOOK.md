@@ -1130,3 +1130,52 @@ equire_long_gamma: true (min_net_gex: 1.5), requiring positive market maker gamm
 * **Crucible Cumulative Net P&L (N=76):** **-₹14,144.39** (-14.14% drawdown from initial base)
 * **Current Continuous Account Equity:** **₹85,855.61**
 * **Lifetime System Cumulative P&L (N=133):** **-₹38,572.64**
+
+
+---
+
+## DAY 20 — 2026-10-26: MONDAY FORENSIC AUDIT, SQUEEZE MICROSTRUCTURE & COST BUFFER UNIFICATION
+
+### 1. Executive Summary & Session Ground Truth
+- **Trading Date**: Monday, October 26, 2026.
+- **Execution Mode**: Paper Trading / Forward Evaluation.
+- **Trades Executed**: 2 (both morning CE option buys during a Short Gamma squeeze).
+- **Session Net P&L**: **🟢 +₹6.24 (+0.01%)** (Gross: +₹201.00, Statutory Costs: ₹194.76).
+- **Win Rate**: 50.0% (1 Win / 1 Loss / 0 BE).
+- **Continuous Capital**: Advanced from **₹85,855.61** to **₹85,861.85**.
+- **Crucible Cumulative P&L (N=78)**: **-₹14,138.15** (27W / 51L / 0BE, 34.62% WR).
+- **Lifetime Cumulative P&L (N=135)**: **-₹38,566.40** (48W / 87L / 0BE, 35.56% WR).
+
+### 2. Verified Executed Trades (from `reports/papertrade/live_ledger.sqlite`)
+| Trade ID | Underlying & Instrument | Entry (IST) | Exit (IST) | Entry (₹) | Exit (₹) | Gross (₹) | Costs (₹) | Net P&L (₹) | Exit Reason |
+|---|---|---|---|---|---|---|---|---|---|
+| `BD632D` | NIFTY 22650CE | 10:32:07 | 10:35:44 (217s) | 173.72 | 175.12 | +₹91.00 | ₹91.41 | **-₹0.41** | trailing_stop (Micro-Lock) |
+| `EDAC5C` | SENSEX 73300CE | 10:32:09 | 10:35:54 (225s) | 773.12 | 778.62 | +₹110.00 | ₹103.35 | **+₹6.65** | trailing_stop (Micro-Lock) |
+
+### 3. Key Forensic Discoveries & Structural Insights
+1. **Short Gamma Squeeze Microstructure & Post-Exit MAE Crash**:
+   - Both setups triggered during negative Dealer GEX (`net_gex < 0`).
+   * Peak excursion reached +6.13 pts on NIFTY (+3.53% premium) and +19.98 pts on SENSEX (+2.58% premium) at 10:34 IST.
+   * Post-exit attribution proved that after the 10:35 trailing stop exit, NIFTY collapsed to 167.05 (-6.67 pts below entry) and SENSEX collapsed to 751.65 (-21.47 pts below entry).
+   * The trailing micro-lock saved **8.07 pts (+₹524.55)** on NIFTY and **26.97 pts (+₹539.40)** on SENSEX, preventing a combined -₹1,064 loss.
+2. **The Nominal vs. Percentage Scale Illusion**:
+   * SENSEX at 73,300 is $3.24\times$ NIFTY at 22,650. In percentage terms, NIFTY's premium expanded faster (+3.53%) than SENSEX (+2.58%). Both peaked and rolled over at the exact same minute.
+3. **Cost Buffer Desynchronization & Statutory Fee Hurdle Floor**:
+   * Discovered that code had two desynchronized cost buffer definitions in `position_tracker.py` and `position_monitor.py`.
+   * NIFTY's buffer of 1.40 pts produced ₹91.00 gross against ₹91.41 statutory costs, causing the -₹0.41 deficit.
+   * **Engineering Action Taken**: Unified statutory buffers via `PositionTracker.get_statutory_cost_buffer` across both engines:
+     - NIFTY 50: **2.00 pts** (1-lot) / **1.20 pts** (multi-lot)
+     - SENSEX: **5.50 pts** (1-lot) / **3.50 pts** (multi-lot)
+     - BANK NIFTY: **5.50 pts** (1-lot) / **3.50 pts** (multi-lot)
+     - FINNIFTY: **2.60 pts** (1-lot) / **1.80 pts** (multi-lot)
+4. **Dedicated Short Gamma Squeeze Tracking Tag (`is_short_gamma_squeeze`)**:
+   * Added `is_short_gamma_squeeze` column across `paper_trades`, `paper_open_positions`, and `post_exit_attribution`.
+   * Squeeze trades across the Crucible dataset ($N=38$) exhibit positive gross P&L (+₹127.72) but suffer from fee friction (-₹4,037.97) and excessive holding time (avg 63.4m), reinforcing the necessity of tight micro-locking.
+
+### 4. Continuous Account Capital Status
+* **Starting Base Capital (Day 1):** ₹1,00,000.00
+* **Day 18 Ending Equity:** ₹85,855.61
+* **Day 19 Realized Net P&L:** **🟢 +₹6.24 (+0.01%)**
+* **Crucible Cumulative Net P&L (N=78):** **-₹14,138.15** (-14.14% drawdown from initial base)
+* **Current Continuous Account Equity:** **₹85,861.85**
+* **Lifetime System Cumulative P&L (N=135):** **-₹38,566.40**

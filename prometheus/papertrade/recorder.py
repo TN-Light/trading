@@ -51,6 +51,7 @@ TRADE_COLUMNS = [
     "tier",
     "entry_spot",
     "target_gain_pts",
+    "is_short_gamma_squeeze",
 ]
 
 
@@ -143,6 +144,10 @@ class TradeRecorder:
             pass
         try:
             self._db.execute("ALTER TABLE paper_trades ADD COLUMN target_gain_pts REAL")
+        except Exception:
+            pass
+        try:
+            self._db.execute("ALTER TABLE paper_trades ADD COLUMN is_short_gamma_squeeze INTEGER DEFAULT 0")
         except Exception:
             pass
         self._db.execute("""
@@ -352,6 +357,7 @@ class TradeRecorder:
             ("entry_spot", "REAL"),
             ("atr", "REAL"),
             ("target_gain_pts", "REAL"),
+            ("is_short_gamma_squeeze", "INTEGER DEFAULT 0"),
         ]:
             try:
                 self._db.execute(f"ALTER TABLE paper_open_positions ADD COLUMN {col_name} {col_type}")
@@ -377,7 +383,7 @@ class TradeRecorder:
             "trailing_floor", "high_water_mark", "strategy",
             "signal_score", "signal_confidence", "trade_mode",
             "commitment_ratio", "net_gex", "zgl", "tier",
-            "entry_spot", "atr", "target_gain_pts",
+            "entry_spot", "atr", "target_gain_pts", "is_short_gamma_squeeze",
         ]
         try:
             self._db.execute(
@@ -413,6 +419,7 @@ class TradeRecorder:
                     float(position_dict.get("entry_spot") or 0.0),
                     float(position_dict.get("atr") or 0.0),
                     float(position_dict.get("target_gain_pts") or 0.0),
+                    int(position_dict.get("is_short_gamma_squeeze") or 0),
                 ],
             )
             self._db.commit()
@@ -498,6 +505,7 @@ class TradeRecorder:
                 alpha_left_pts REAL DEFAULT 0.0,
                 drawdown_saved_pts REAL DEFAULT 0.0,
                 holding_duration_seconds INTEGER,
+                is_short_gamma_squeeze INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'WATCHING',
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -516,7 +524,7 @@ class TradeRecorder:
                 "entry_spot", "price_t5m", "price_t15m", "price_t30m", "price_t60m", "price_eod",
                 "post_exit_mfe", "post_exit_mae", "target_reclaimed", "entry_reclaimed",
                 "is_premature_shakeout", "alpha_left_pts", "drawdown_saved_pts",
-                "holding_duration_seconds", "status", "updated_at"
+                "holding_duration_seconds", "status", "updated_at", "is_short_gamma_squeeze"
             ]
             placeholders = ",".join(["?"] * len(cols))
             col_str = ",".join(cols)
@@ -550,6 +558,7 @@ class TradeRecorder:
                 data.get("holding_duration_seconds", 0),
                 data.get("status", "WATCHING"),
                 now_iso,
+                int(data.get("is_short_gamma_squeeze") or 0),
             ]
             self._db.execute(
                 f"INSERT OR REPLACE INTO post_exit_attribution ({col_str}) VALUES ({placeholders})",
