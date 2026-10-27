@@ -2,40 +2,41 @@
 
 **Tracking Period:** August – October 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 38,566.40 (-257.11%)**  
-**Last Updated:** 2026-10-26 21:00:00 IST  
+**Current Realized Net P&L:** **🔴 -Rs 40,651.46 (-271.01%)**  
+**Last Updated:** 2026-10-27 20:30:00 IST  
 
 ---
 
-## 1. System Performance Overview (Lifetime N=135 vs. Crucible N=78)
+## 1. System Performance Overview (Lifetime N=139 vs. Crucible N=82)
 
-### A. Lifetime Performance (August 25 – October 26, 2026)
-
-| Metric | Value | Benchmark / Target | Status |
-| :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 38,566.40** | +Rs 5,000 / month | 🔴 Drawdown |
-| **Lifetime Return %** | **-257.11%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **41** | 20–22 days | 41 Sessions Tracked |
-| **Green / Red Days** | **11 Green / 17 Red / 13 BE** | > 65% Green | 26.8% Green Rate |
-| **Total Trades** | **135** | ~3–5 / day | 48W + 87L = 135 |
-| **Win Rate** | **35.6%** (48W / 87L) | > 55.0% | ⚠️ Under Review |
-| **Gross Profit Factor** | **0.62** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 47,311.35 | — | Winning Trades |
-| **Gross Loss** | -Rs 76,774.93 | — | Losing Trades |
-
-### B. Crucible Phase Performance (September 21 – October 26, 2026 — `live_ledger.sqlite`)
+### A. Lifetime Performance (August 25 – October 27, 2026)
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Crucible Net P&L** | **-Rs 14,138.15** | Capital Preservation | -14.14% Drawdown |
+| **Net Realized P&L** | **-Rs 40,651.46** | +Rs 5,000 / month | 🔴 Drawdown |
+| **Lifetime Return %** | **-271.01%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **42** | 20–22 days | 42 Sessions Tracked |
+| **Green / Red Days** | **11 Green / 18 Red / 13 BE** | > 65% Green | 26.2% Green Rate |
+| **Total Trades** | **139** | ~3–5 / day | 49W + 90L = 139 |
+| **Win Rate** | **35.3%** (49W / 90L) | > 55.0% | ⚠️ Under Review |
+| **Gross Profit Factor** | **0.60** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 47,467.36 | — | Winning Trades |
+| **Gross Loss** | -Rs 78,657.87 | — | Losing Trades |
+
+### B. Crucible Phase Performance (September 21 – October 27, 2026 — `live_ledger.sqlite`)
+
+| Metric | Value | Benchmark / Target | Status |
+| :--- | :---: | :---: | :---: |
+| **Crucible Net P&L** | **-Rs 16,223.21** | Capital Preservation | -16.22% Drawdown |
 | **Starting Equity** | **Rs 1,00,000.00** | — | Normalized Capital Base |
-| **Current Continuous Equity**| **Rs 85,861.85** | — | Realized Balance |
-| **Total Trades (N)** | **78** | — | 27W + 51L = 78 |
-| **Net Win Rate** | **34.6%** (27W / 51L) | > 50.0% | Strict Net-over-Gross |
-| **Gross P&L** | -Rs 6,121.02 | — | Profit: +Rs 19,893.24 / Loss: -Rs 26,014.26 |
-| **Total Statutory Costs** | **Rs 8,017.13** | — | Avg Rs 102.78 / trade |
-| **Tier B Net P&L (Runners)**| **🟢 +Rs 2,371.74** | Positive Expectancy | **11W / 20L (Proven Alpha)** |
-| **Tier C Net P&L (Scalps)** | **🔴 -Rs 16,509.89**| Paper Shadow Only | **16W / 31L (Friction Drag)** |
+| **Current Continuous Equity**| **Rs 83,776.79** | — | Realized Balance |
+| **Total Trades (N)** | **82** | — | 28W + 54L = 82 |
+| **Net Win Rate** | **34.1%** (28W / 54L) | > 50.0% | Strict Net-over-Gross |
+| **Gross P&L** | -Rs 7,847.95 | — | Profit: +Rs 21,322.31 / Loss: -Rs 29,170.26 |
+| **Total Statutory Costs** | **Rs 8,375.26** | — | Avg Rs 102.14 / trade |
+| **Tier A Net P&L (Spreads)** | **🔴 -Rs 412.48** | Statistical Tracking | **0W / 1L (0-DTE Gamma Spike)** |
+| **Tier B Net P&L (Runners)**| **🟢 +Rs 623.01** | Positive Expectancy | **11W / 22L (Positive Edge)** |
+| **Tier C Net P&L (Scalps)** | **🔴 -Rs 16,433.74**| Paper Shadow Only | **17W / 31L (Friction Drag)** |
 | **Short Gamma Squeeze (N=38)**| **Rs -3,910.25** | Quick Breakeven Locking| **Gross +Rs 127.72 / Costs Rs 4,037.97** |
 
 ---
@@ -50,6 +51,7 @@
 | **2026-10-21** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 38,905.3** | Intraday paper trading session |
 | **2026-10-23** | 2 | 1W / 1L | 50% | +Rs 520 | -Rs 90 | **🟢 +Rs 332.7** | +0.4% | **-Rs 38,572.6** | Day 18: 2 trades executed (1 Win / 1 Loss, 50.0% WR). SENSEX 73100PE target hit (+Rs 336.33 net), SENSEX 72900PE trailed BE scratch (-Rs 3.65 net). Net Green session (+Rs 332.68). |
 | **2026-10-26** | 2 | 1W / 1L | 50% | +Rs 201 | -Rs 0 | **🟢 +Rs 6.2** | +0.01% | **-Rs 38,566.4** | Day 19: 2 trades executed (1 Win / 1 Loss, 50.0% WR). SENSEX 73300CE trailed BE (+Rs 6.65 net), NIFTY 22650CE trailed BE (-Rs 0.41 net friction). Squeeze micro-locks saved -Rs 1,064 in MAE drawdown. Unified statutory buffers recalibrated (NIFTY >= 2.00, SENSEX/BN >= 5.50, FIN >= 2.60). Net Green session (+Rs 6.24). |
+| **2026-10-27** | 4 | 1W / 3L | 25% | +Rs 156 | -Rs 1,883 | **🔴 -Rs 2,085.1** | -2.43% | **-Rs 40,651.5** | Day 20: 4 trades executed (1 Win / 3 Losses, 25.0% WR). Gross -Rs 1,726.93, Costs Rs 358.13, Net -Rs 2,085.06. FINNIFTY 24500CE (Tier C) banked +Rs 76.15 net. NIFTY 22750CE (-Rs 878.60 net) & SENSEX 73600CE (-Rs 870.13 net) Tier B calls stopped out into +102k Cr Long Gamma dealer absorption. FINNIFTY Bear Call Spread (-Rs 412.48 net) Tier A stopped out on 0-DTE gamma spike. |
 
 ---
 

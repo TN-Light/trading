@@ -1179,3 +1179,52 @@ equire_long_gamma: true (min_net_gex: 1.5), requiring positive market maker gamm
 * **Crucible Cumulative Net P&L (N=78):** **-₹14,138.15** (-14.14% drawdown from initial base)
 * **Current Continuous Account Equity:** **₹85,861.85**
 * **Lifetime System Cumulative P&L (N=135):** **-₹38,566.40**
+
+
+---
+
+## DAY 20 — 2026-10-27: TUESDAY FORENSIC AUDIT, LONG GAMMA SUPPLY WALL & TIER INVERSION
+
+### 1. Executive Summary & Session Ground Truth
+- **Trading Date**: Tuesday, October 27, 2026.
+- **Execution Mode**: Paper Trading / Forward Evaluation.
+- **Trades Executed**: 4 (2 Tier B Option Buys, 1 Tier A Credit Spread, 1 Tier C Scalp).
+- **Session Net P&L**: **🔴 -₹2,085.06 (-2.43%)** (Gross: -₹1,726.93, Statutory Costs: ₹358.13).
+- **Win Rate**: 25.0% (1 Win / 3 Losses / 0 BE).
+- **Continuous Capital**: Reduced from **₹85,861.85** to **₹83,776.79**.
+- **Crucible Cumulative P&L (N=82)**: **-₹16,223.21** (28W / 54L / 0BE, 34.15% Net WR).
+- **Lifetime Cumulative P&L (N=139)**: **-₹40,651.46** (49W / 90L / 0BE, 35.25% Net WR).
+
+### 2. Verified Executed Trades (from `reports/papertrade/live_ledger.sqlite`)
+| Trade ID | Underlying & Instrument | Tier | Entry (IST) | Exit (IST) | Entry (₹) | Exit (₹) | Gross (₹) | Costs (₹) | Net P&L (₹) | Exit Reason |
+|---|---|:---:|---|---|---|---|---|---|---|---|
+| `8D44B8` | FINNIFTY 24500CE | C | 10:01:33 | 10:05:07 (213s) | 119.97 | 122.57 | +₹156.01 | ₹79.86 | **🟢 +₹76.15** | `trailing_stop` (Defensive Lock) |
+| `A5CEE3` | NIFTY 22750CE | B | 10:16:31 | 10:21:10 (278s) | 81.63 | 69.23 | -₹806.10 | ₹72.50 | **🔴 -₹878.60** | `stop_loss` (Long Gamma Absorption) |
+| `127102` | SENSEX 73600CE | B | 10:16:32 | 10:21:32 (300s) | 502.55 | 463.35 | -₹784.04 | ₹86.09 | **🔴 -₹870.13** | `stop_loss` (Long Gamma Absorption) |
+| `595FE7` | FINNIFTY 24600CE/24750CE | A | 12:31:47 | 12:44:12 (744s) | 8.42 | 13.30 | -₹292.80 | ₹119.68 | **🔴 -₹412.48** | `stop_loss` (0-DTE Gamma Spike) |
+
+### 3. Key Forensic Discoveries & Structural Insights
+1. **The Dealer Long Gamma Absorption Trap**:
+   - At 10:16 IST, both NIFTY and SENSEX broke their 15m ORB highs, triggering Golden Setup (Tier B, Score 8.0).
+   - Dealer Net GEX was heavily positive: NIFTY Net GEX = **+102,068 Cr**, SENSEX Net GEX = **+16,518 Cr**.
+   - In massive Long Gamma regimes, market makers are forced to sell futures into rallies and buy into dips to maintain delta neutrality.
+   - The breakout was immediately absorbed by institutional supply: NIFTY spot fell -53.15 pts and SENSEX spot fell -163.09 pts in 4-5 minutes, hitting stop-losses.
+2. **The Tier Inversion Paradox**:
+   - Tier B is designed to capture 30–80 pt runners and intentionally maintains wide breathing room (>= 18-20 pts threshold). In a Long Gamma range pin, there are no runners, turning small unrealized gains into full stop-outs.
+   - Tier C (FINNIFTY 24500CE) had weak edge (Score 7.0). The engine engaged paranoid defense (`WEAK_EDGE_DEFENSIVE_LOCK` at +3.83 pts gain) and locked in +₹76.15 net before the option collapsed to 115.60.
+3. **0-DTE Expiry Midday Gamma Risk**:
+   - Selling FINNIFTY Bear Call Spread on 0-DTE expiry afternoon (12:31 IST) yielded 8.42 pts credit.
+   - A minor 22-pt spot bounce caused extreme gamma acceleration, blowing the spread out to 13.30 pts in 12 minutes. Midday 0-DTE credit spreads carry unacceptable delta convexity relative to theta yield.
+4. **Anti-Martingale Directional Lockout Success**:
+   - At 11:01 IST, another NIFTY BUY_CE setup fired and was blocked by directional lockout, preventing an additional -₹850 loss.
+   - Between 12:47 and 14:14 IST, 15 consecutive FINNIFTY Bear Call Spread attempts were blocked by directional lockout, preventing cascading compounding losses.
+5. **Post-Exit Attribution Proof**:
+   - In 100% of today's trades, stopped-out options collapsed further (NIFTY dropped another 20.28 pts to 48.95; SENSEX dropped another 46.75 pts to 416.60). The stop-losses saved ₹2,671.40 in holding losses.
+
+### 4. Continuous Account Capital Status
+* **Starting Base Capital (Day 1):** ₹1,00,000.00
+* **Day 19 Ending Equity:** ₹85,861.85
+* **Day 20 Realized Net P&L:** **🔴 -₹2,085.06 (-2.43%)**
+* **Crucible Cumulative Net P&L (N=82):** **-₹16,223.21** (-16.22% drawdown from initial base)
+* **Current Continuous Account Equity:** **₹83,776.79**
+* **Lifetime System Cumulative P&L (N=139):** **-₹40,651.46**
