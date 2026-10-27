@@ -163,6 +163,10 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
     # ─────────────────────────────────────────────────────────────
     is_buying = "BUY" in action or action in ("BUY_CE", "BUY_PE")
     if is_buying:
+        instr = str(signal.get("instrument", "") or signal.get("tradingsymbol", "")).upper()
+        is_call = ("CE" in action) or (str(signal.get("direction", "")).upper() == "LONG") or (str(signal.get("option_type", "")).upper() == "CE") or instr.endswith("CE")
+        is_put = ("PE" in action) or (str(signal.get("direction", "")).upper() == "SHORT") or (str(signal.get("option_type", "")).upper() == "PE") or instr.endswith("PE")
+
         has_orb = any("ORB" in r for r in reasons)
         has_vwap = any("VWAP" in r for r in reasons)
         has_vol_surge = any("Volume_Surge" in r for r in reasons) or bool(signal.get("has_volume_surge", False))
@@ -170,7 +174,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         is_htf_bull = any("1H_Trend_Bullish" in r for r in reasons)
         is_htf_bear = any("1H_Trend_Bearish" in r for r in reasons)
         has_htf_explicit = is_htf_bull or is_htf_bear or ("is_htf_aligned" in signal)
-        is_htf_aligned = (("CE" in action and is_htf_bull) or ("PE" in action and is_htf_bear)) or bool(signal.get("is_htf_aligned", False))
+        is_htf_aligned = ((is_call and is_htf_bull) or (is_put and is_htf_bear)) or bool(signal.get("is_htf_aligned", False))
         
         is_golden = bool(signal.get("is_golden_setup", False)) or "golden_setup" in strat_name
 
@@ -194,9 +198,11 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 instruction="📝 <b>ACTION:</b> Paper Trading Engine Only (BN/FN Directional Buying De-Allocated to Paper)"
             )
 
-        # Dealer Gamma Regime Invariant (Option Buying vs Selling):
-        # In Long Gamma (net_gex > +1.5 Cr), dealers supply counter-trend liquidity and dampen range.
-        # Directional breakout expansion is suppressed. Option buying is capped to Tier C (Paper Only).
+        # Dealer Gamma Regime Invariant (Asymmetric GEX x Direction Gate):
+        # In Long Gamma (net_gex > +1.5 Cr), institutional dealers supply counter-trend liquidity against rallies.
+        # Call Buying (LONG) breakout setups walk directly into institutional inventory dumping (Empirical 12.5% WR, -Rs 5,882 loss).
+        # Therefore, Call Buying (LONG) is strictly prohibited from Tier S and Tier B live execution (gated to Tier C).
+        # Conversely, Put Buying (SHORT) fading range ceilings is permitted for Tier B (Empirical 62.5% WR, +Rs 3,136 net profit).
         net_gex_val = float(signal.get("net_gex", 0.0) or signal.get("gex", 0.0) or 0.0)
         net_gex_cr = float(
             signal.get("net_gex_cr", 0.0) or
@@ -205,6 +211,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         )
         gamma_reg = str(signal.get("gamma_regime", "")).upper()
         is_dealer_long_gamma = (net_gex_cr > 1.5) or (gamma_reg == "LONG_GAMMA" and net_gex_cr > 0.5)
+        is_gex_gated_call = is_dealer_long_gamma and is_call
 
         # Time Window Validation (60-day Angel One empirical tick distribution):
         # Window A (Morning): 09:30 - 11:30 IST (Primary ORB & momentum impulses)
@@ -313,10 +320,11 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         # Requirements:
         #   1. 15M ORB + Session VWAP alignment
         #   2. STRICT 1H HTF Trend Alignment (BULLISH for CE, BEARISH for PE; NEUTRAL is banned)
-        #   3. Edge score >= 6.5 (Standard non-0DTE) OR >= 8.0 (0-DTE Golden Setup or Long Gamma Regime Scalp)
+        #   3. Edge score >= 6.5 (Standard non-0DTE) OR >= 8.0 (0-DTE Golden Setup or Long Gamma Put Scalp)
         #   4. Valid Trading Window: 09:30-11:30 AM OR 13:15-14:15 PM
+        #   5. Asymmetric GEX Invariant: Call Buying (LONG) is strictly gated in Long Gamma.
         min_tier_b_score = 8.0 if (is_0dte_buying or is_dealer_long_gamma) else 6.5
-        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= min_tier_b_score and is_valid_entry_window:
+        if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= min_tier_b_score and is_valid_entry_window and not is_gex_gated_call:
             window_desc = "Morning Window (09:30-11:30)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Window (13:15-14:15)"
             reasons_b = [
                 "15M Opening Range Breakout (with ATR Buffer)",
@@ -325,10 +333,11 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 f"Valid Trading Window ({window_desc})",
             ]
             if is_dealer_long_gamma:
-                reasons_b.append(f"Dealer Long Gamma Active ({net_gex_cr:+.1f}Cr): Compressed Scalp Boundaries Active (GEMINI.md Rule 3)")
+                reasons_b.append(f"Asymmetric GEX Gate: Put Buying (SHORT) permitted in Positive Gamma (+{net_gex_cr:+.1f}Cr) to harvest ceiling fade")
+                reasons_b.append(f"Dealer Long Gamma Active (+{net_gex_cr:+.1f}Cr): Compressed Scalp Boundaries Active (GEMINI.md Rule 3)")
                 reasons_b.append(f"High Conviction Setup ({score:.1f}/10 >= 8.0)")
-                badge_text = "🎯 <b>[TIER B: REGIME SCALP — LONG GAMMA COMPRESSED TARGET]</b>"
-                instruction_text = "🎯 <b>ACTION:</b> Live Trade — Compressed Scalp Target (Dealer Long Gamma Active: Take Profit at Scalp Boundary)"
+                badge_text = "🎯 <b>[TIER B: REGIME SCALP — LONG GAMMA PUT FADE]</b>"
+                instruction_text = "🎯 <b>ACTION:</b> Live Trade — Compressed Scalp Target (Long Gamma Put Fade: Take Profit at Scalp Boundary)"
             elif is_0dte_buying:
                 reasons_b.append(f"Short/Neutral Gamma Regime ({net_gex_cr:+.1f}Cr)")
                 reasons_b.append(f"0-DTE Golden Setup High Conviction ({score:.1f}/10 >= 8.0)")
@@ -350,9 +359,15 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
             )
 
         # TIER C (Standard Momentum / Partial Confluences):
-        # Triggered when score >= 3.5 but missing decisive 1H trend, score < 6.5, or 0-DTE buying < 8.0
+        # Triggered when score >= 3.5 but missing decisive 1H trend, score < 6.5, 0-DTE buying < 8.0, or gated by Asymmetric GEX
         if score >= 3.5:
             missing = []
+            if is_gex_gated_call:
+                missing.append(
+                    f"Asymmetric GEX Gate: Call Buying (LONG) strictly gated in Positive Dealer Gamma "
+                    f"(+{net_gex_cr:.1f}Cr >= +1.5Cr). Institutional dealers absorb upside momentum "
+                    f"(Empirical 12.5% WR, -Rs 5,882 loss across 8 historical trades; routed to Tier C Paper Only)"
+                )
             if not is_htf_aligned:
                 missing.append("1H HTF Trend is NEUTRAL or Conflicting (Chop Risk)")
             if not has_orb:
@@ -363,8 +378,8 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 missing.append(f"0-DTE Expiry Option Buying gated (Requires score >= 8.0 for Tier B, got {score:.1f}/10)")
             elif score < 6.5:
                 missing.append(f"Score {score:.1f}/10 is below Tier B requirement (6.5+)")
-            if is_dealer_long_gamma and score < 8.0:
-                missing.append(f"Dealer Long Gamma Regime (Net GEX {net_gex_cr:+.1f}Cr > +1.5Cr: Requires Score >= 8.0 for Tier B Scalp, got {score:.1f}/10; routed to Paper)")
+            if is_dealer_long_gamma and is_put and score < 8.0:
+                missing.append(f"Dealer Long Gamma Regime (Net GEX +{net_gex_cr:.1f}Cr >= +1.5Cr: Requires Score >= 8.0 for Tier B Put Scalp, got {score:.1f}/10; routed to Paper)")
             if not is_valid_entry_window:
                 if bar_time and bar_time > dtime(14, 15):
                     missing.append("Post-Cutoff Window (After 14:15 IST)")
