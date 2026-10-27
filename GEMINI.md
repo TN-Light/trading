@@ -43,35 +43,74 @@
     4. **Automated Test Certification**: Ensure all changes are verified by automated tests in `prometheus/tests/`.
 - **Zero-Manipulation Invariant**: Hardcoding trade outcomes, synthetic price fills, or manual parameter overrides in replay, backtesting, or tracking scripts is strictly prohibited and treated as a critical system defect.
 
-## 6. Forensic Quantitative Thinking & Deep-Dive Diagnostic Protocols
-- **Multi-Dimensional Cross-Tabulation Mandate (Anti-Aggregation Invariant)**:
-  - Never evaluate a market regime, indicator, or strategy rule as a monolithic aggregate.
-  - Every diagnostic breakdown MUST intersect along orthogonal market dimensions:
-    Performance = f(Regime x Direction x DTE Bucket x Symbol)
-  - If analyzing Option Buying in Long Gamma, the breakdown must explicitly present:
-    1. (LONG_GAMMA, LONG): Call Buying (Breakout into dealer supply)
-    2. (LONG_GAMMA, SHORT): Put Buying (Ceiling resistance fade)
-    3. (SHORT_GAMMA, LONG): Call Buying (Gamma squeeze expansion)
-    4. (SHORT_GAMMA, SHORT): Put Buying (Liquidity cascade breakdown)
-- **First-Principles Market Microstructure Anchoring**:
-  - Telemetry and technical indicator readings (SuperTrend, VWAP, Score) describe what happened; institutional market microstructure explains why it happened.
-  - Every proposed rule change or diagnostic conclusion must be mathematically and structurally anchored in Indian index derivatives mechanics:
-    - Dealer Delta Hedging: In Long Gamma (Net GEX > 0), market makers buy dips and dump index futures into rallies to remain delta-neutral, pinning the index and absorbing call breakouts.
-    - Implied Volatility Asymmetry: Upward momentum grinds generally suffer from IV crush, while downward momentum expands IV and accelerates option delta.
-    - Retail Skew Friction: NIFTY/SENSEX options carry persistent call-side retail buying skew, inflating CE entry premiums and raising statutory break-even hurdles relative to PE.
-- **Counter-Factual Population Replay (Anti-Causal Inversion)**:
-  - Before recommending any gate, cap, or heuristic filter (e.g., 'cap concurrent entries to 1 lot', 'widen SL by 5 pts'):
-    - Explicitly replay the filter across the ENTIRE historical ledger population.
-    - Tabulate both what is prevented (bad trades avoided) AND what is sacrificed (good trades filtered out).
-    - If the counter-factual net rupee delta is negative, the proposal is mathematically invalid and must be rejected immediately.
-- **The Orthogonal ~X Test (Systemic vs Symptomatic Drill)**:
-  - Whenever a setup is diagnosed as failing under condition X (e.g. 'Calls failed because of Long Gamma'):
-    - Mandatory check: Does the setup also fail under the opposite condition ~X (Short Gamma)?
-    - If Call Buying carries an empirical win rate of 14.3% across ALL regimes, the diagnosis is NOT 'Long Gamma failure'; it is a systemic Call Buying structural failure that requires addressing entry criteria, premium skew, or directional validity.
-- **Root-Cause Depth Invariant (The Five Whys Standard)**:
-  - Never stop at surface-level indicator alignment. Drill down through five layers of causality:
-    1. Level 1 (Execution): Did the trade hit SL, Target, or Trail?
-    2. Level 2 (Telemetry): What were the Confluence Score, VWAP, GEX, and DTE?
-    3. Level 3 (Regime): What was the dealer inventory and gamma positioning?
-    4. Level 4 (Microstructure): How did liquidity, bid-ask spread, and delta hedging absorb the move?
-    5. Level 5 (Structural): Is this asset or setup fundamentally viable given statutory transaction costs and market participant flow?
+## 6. Universal Quantitative Forensics & Architectural Invariant Framework
+This framework governs ALL trading strategies, execution engines, market regimes, indicators, and instrument analyses. It is not limited to any single indicator, regime, or asset class; it is the universal standard for all quantitative reasoning and diagnostic decisions.
+
+- **Universal Multi-Dimensional Cross-Tabulation Mandate (Anti-Aggregation Invariant)**:
+  - Aggregate statistics (monolithic win rates, gross P&L sums, blended drawdowns) are mathematically deceitful and strictly forbidden as diagnostic proof.
+  - Every diagnostic breakdown, strategy evaluation, or rule proposal MUST cross-tabulate across all active orthogonal dimensions:
+    Expectancy = f(Strategy Archetype x Direction x Regime x Time Window x DTE / Horizon x Instrument x Execution Priority)
+  - Mandatory cross-tabulation vectors:
+    1. *Strategy Archetype x Direction*:
+       - Defined-Risk Spreads: Bull Put (Long trend / credit) vs Bear Call (Ceiling fade / credit).
+       - Directional Option Buying: Call Buying (Long breakout) vs Put Buying (Short breakdown / ceiling fade).
+       - Mean Reversion: Dip Buying at support vs Rip Shorting at resistance.
+    2. *Market Regime x Microstructure State*:
+       - Volatility State: IV Expansion vs IV Compression / High IV vs Low IV regimes.
+       - Trend State: Macro Trend Aligned (1H) vs Chop / Consolidation / Counter-trend.
+       - Institutional Positioning: Long Gamma (pinning/supply absorption) vs Short Gamma (squeeze/expansion) vs Neutral.
+    3. *Temporal & Expiry Horizon*:
+       - DTE Buckets: 0-DTE (Hyper-gamma, terminal theta) vs 1-3 DTE (Intraday momentum, low gamma) vs Monthly 8-14 DTE (Slow theta, margin-heavy).
+       - Session Windows: Morning ORB (09:30-11:30) vs Lunch Dead Zone (11:30-13:15) vs Afternoon Continuation (13:15-14:30) vs Expiry Gamma Squeeze (14:30-15:30).
+    4. *Instrument Microstructure*:
+       - Instrument-specific spread friction, tick size, lot multiplier, and statutory fee drag (e.g. SENSEX vs NIFTY 50 vs BANK NIFTY vs FINNIFTY).
+    5. *Signal Quality & Execution Priority*:
+       - Primary entries (Rank 1) vs Secondary concurrent entries (Rank 2+).
+       - Edge Confluence Score tiers (Score >= 8.0 vs 6.5-8.0 vs < 6.5).
+
+- **Universal First-Principles Market Microstructure Anchoring**:
+  - Telemetry and technical indicators (SuperTrend, VWAP, EMA crosses, Confluence Scores, RSI, ADX) are descriptive mathematical shadows of past price ticks. They NEVER cause price movement.
+  - Every analytical diagnostic, rule change, or performance claim must be structurally anchored in first-principles auction market mechanics:
+    1. *Counter-Party Liquidity & Order Flow Mechanics*: Who is on the other side of this trade? Are institutional market makers absorbing inventory, algorithmic trend followers chasing momentum, or trapped retail participants triggering cascading stop-losses?
+    2. *Options Pricing Physics & Greek Dynamics*:
+       - Non-linear theta acceleration: The decay rate d(Theta)/dt spikes exponentially in the final 24 hours to expiry.
+       - Implied Volatility Asymmetry & Skew: Upward grinds generally suffer from IV crush, while downward momentum expands IV and accelerates option delta.
+       - Gamma Asymmetry: ATM options near expiry carry explosive gamma risk, while OTM options carry rapid premium decay.
+    3. *Statutory Friction & Economic Asymmetry*:
+       - Fixed statutory costs (brokerage, STT, exchange turnover fees, SEBI charges, stamp duty, GST) and bid-ask spread friction impose an unrelenting hurdle.
+       - A flat point gain is often a net rupee loss. Every strategy, stop loss, and breakeven rule must be verified against its symbol-specific statutory cost floor.
+    4. *Retail Behavioral Skew*:
+       - Systematic retail biases (e.g. persistent Call-buying skew in Indian index options) inflate premiums on one side of the book, worsening the risk/reward of buying that side and creating structural edge for disciplined sellers or counter-fade buyers.
+
+- **Universal Counter-Factual Population Replay (Anti-Causal Inversion)**:
+  - Never recommend a gate, filter, parameter tweak, or heuristic change based on a single painful trade, an isolated session, or an untested hypothesis.
+  - Every proposal MUST undergo rigorous counter-factual replay across the ENTIRE historical ledger population (N_total):
+    Delta_Net_PnL = Sum(Filtered Bad Trades: Avoided Loss) - Sum(Filtered Good Trades: Sacrificed Profit)
+  - Mandatory Reporting:
+    1. Exactly which trades and how much net rupee loss would have been prevented.
+    2. Exactly which trades and how much net rupee profit would have been sacrificed.
+    3. The net rupee impact Delta_Net_PnL across the full population.
+  - If Delta_Net_PnL <= 0, the proposal is mathematically invalid, destructive to the system, and must be rejected immediately.
+
+- **The Universal Orthogonal ~X Test (Systemic vs Symptomatic Drill)**:
+  - Whenever a setup is diagnosed as failing under condition X (e.g. 'Setup failed because of condition X'):
+    - Mandatory Verification: Does the setup also fail under the complementary condition ~X?
+    - Universal test examples across all trading disciplines:
+      - *Indicator/Timeframe*: If breakouts fail below VWAP (X), do they also fail above VWAP (~X)?
+      - *Session Timing*: If a strategy loses during Lunch (X), does it also lose outside Lunch (~X)? If it loses in both, the strategy suffers from an edge deficit, not a lunch deficit.
+      - *Expiry Horizon*: If credit spreads lose in 0-DTE (X), do they also lose in multi-day spreads (~X)?
+      - *Market Regime*: If buying calls fails in positive GEX (X), does buying calls also fail in negative GEX (~X)?
+    - If failure persists in ~X, condition X is NOT the causal driver. The failure is systemic, and treating X alone is merely symptomatic band-aiding.
+
+- **Universal Root-Cause Depth (The 'Five Whys' Standard for All Systems)**:
+  - Never terminate an analysis at surface-level indicator alignment. Every diagnostic investigation must descend through all five causal strata:
+    1. *Level 1 (Execution Layer)*: Did the trade hit SL, Target, Trailing Stop, or Time Kill? What were the exact entry/exit fills, slippage, and execution timestamps?
+    2. *Level 2 (Telemetry & Signal Layer)*: What were the Confluence Score, multi-timeframe indicator alignments, DTE, and chart patterns?
+    3. *Level 3 (Market State & Regime Layer)*: What was the broader market regime (Trend vs Range, High IV vs Low IV, Dealer Gamma state, Session Window)?
+    4. *Level 4 (Microstructure & Order Flow Layer)*: How did liquidity depth, bid-ask spread friction, delta-hedging inventory, and institutional order absorption interact with the trade?
+    5. *Level 5 (Structural & Economic Layer)*: Is this strategy, instrument, and setup fundamentally viable after statutory transaction friction, or is it mathematically doomed by fee drag and negative expectancy?
+
+- **Universal Falsification & Anti-Premature Closure Mandate**:
+  - The quantitative engineer or AI assistant must actively attempt to falsify its own hypothesis before presenting conclusions.
+  - Never present a single theory as settled fact without testing alternative explanations.
+  - When sample size is small (N < 10), explicitly state: 'Sample size N is statistically inconclusive; findings indicate directional tendency only, not mathematical proof.'
