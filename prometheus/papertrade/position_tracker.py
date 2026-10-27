@@ -198,6 +198,12 @@ class PositionTracker:
             gex_val = getattr(position, "net_gex", None)
             if gex_val is not None and gex_val < 0:
                 position.is_short_gamma_squeeze = 1
+        if not getattr(position, "gex_regime", "") or position.gex_regime == "NEUTRAL":
+            gex_val = getattr(position, "net_gex", None)
+            if gex_val is not None:
+                position.gex_regime = "LONG_GAMMA" if gex_val > 0 else ("SHORT_GAMMA" if gex_val < 0 else "NEUTRAL")
+            else:
+                position.gex_regime = "NEUTRAL" 
         self.open_positions[position.trade_id] = position
         # Bug C.2 (2026-07-25 audit): persist immediately so a crash/restart
         # between this insert and the eventual close still leaves a recoverable
@@ -324,6 +330,7 @@ class PositionTracker:
             entry_spot=getattr(pos, "entry_spot", 0.0),
             target_gain_pts=getattr(pos, "target_gain_pts", 0.0),
             is_short_gamma_squeeze=getattr(pos, "is_short_gamma_squeeze", 0),
+            gex_regime=getattr(pos, "gex_regime", "NEUTRAL"),
         )
         trade.bar_timestamp = getattr(pos, "bar_timestamp", None)
         self.closed_trades.append(trade)

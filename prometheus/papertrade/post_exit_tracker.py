@@ -52,6 +52,7 @@ class PostExitWatchItem:
     alpha_left_pts: float = 0.0
     drawdown_saved_pts: float = 0.0
     is_short_gamma_squeeze: int = 0
+    gex_regime: str = "NEUTRAL"
     status: str = "WATCHING"
     created_at: float = field(default_factory=time.monotonic)
 
@@ -121,6 +122,7 @@ class PostExitTracker:
             dur_sec = int(getattr(trade, "holding_duration_seconds", 0) or (trade.get("holding_duration_seconds", 0) if isinstance(trade, dict) else 0))
 
             is_sq = int(getattr(trade, "is_short_gamma_squeeze", 0) or (trade.get("is_short_gamma_squeeze", 0) if isinstance(trade, dict) else 0))
+            gex_reg = str(getattr(trade, "gex_regime", "") or (trade.get("gex_regime", "") if isinstance(trade, dict) else "") or "NEUTRAL")
             watch_item = PostExitWatchItem(
                 trade_id=trade_id,
                 symbol=symbol,
@@ -139,6 +141,7 @@ class PostExitTracker:
                 post_exit_mfe=exit_price,
                 post_exit_mae=exit_price,
                 is_short_gamma_squeeze=is_sq,
+                gex_regime=gex_reg,
                 status="WATCHING",
             )
 

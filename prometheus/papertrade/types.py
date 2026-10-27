@@ -96,8 +96,15 @@ class PaperTrade:
     target_gain_pts: float = 0.0
     trade_type: str = ""
     is_short_gamma_squeeze: int = 0
+    gex_regime: str = "NEUTRAL"
 
     def __post_init__(self):
+        if not getattr(self, "gex_regime", "") or self.gex_regime == "NEUTRAL":
+            g_val = getattr(self, "net_gex", None)
+            if g_val is not None:
+                self.gex_regime = "LONG_GAMMA" if g_val > 0 else ("SHORT_GAMMA" if g_val < 0 else "NEUTRAL")
+            else:
+                self.gex_regime = "NEUTRAL"
         if not self.trade_type:
             is_spread = "/" in (self.instrument or "") or "SPREAD" in getattr(self, "strategy", "").upper()
             if is_spread:
@@ -168,8 +175,15 @@ class Position:
     target_gain_pts: float = 0.0
     tier: str = ""
     is_short_gamma_squeeze: int = 0
+    gex_regime: str = 'NEUTRAL'
 
     def __post_init__(self):
+        if not getattr(self, "gex_regime", "") or self.gex_regime == "NEUTRAL":
+            g_val = getattr(self, "net_gex", None)
+            if g_val is not None:
+                self.gex_regime = "LONG_GAMMA" if g_val > 0 else ("SHORT_GAMMA" if g_val < 0 else "NEUTRAL")
+            else:
+                self.gex_regime = "NEUTRAL"
         if self.initial_sl <= 0.0 and self.stop_loss > 0.0:
             self.initial_sl = self.stop_loss
         if self.initial_risk_distance <= 0.0 and self.entry_price > 0.0 and self.initial_sl > 0.0:
