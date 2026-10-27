@@ -42,3 +42,36 @@
     3. **Net Rupee Primacy**: Compute all metrics on `net_pnl`. Report gross metrics strictly alongside statutory transaction costs (`costs`).
     4. **Automated Test Certification**: Ensure all changes are verified by automated tests in `prometheus/tests/`.
 - **Zero-Manipulation Invariant**: Hardcoding trade outcomes, synthetic price fills, or manual parameter overrides in replay, backtesting, or tracking scripts is strictly prohibited and treated as a critical system defect.
+
+## 6. Forensic Quantitative Thinking & Deep-Dive Diagnostic Protocols
+- **Multi-Dimensional Cross-Tabulation Mandate (Anti-Aggregation Invariant)**:
+  - Never evaluate a market regime, indicator, or strategy rule as a monolithic aggregate.
+  - Every diagnostic breakdown MUST intersect along orthogonal market dimensions:
+    Performance = f(Regime x Direction x DTE Bucket x Symbol)
+  - If analyzing Option Buying in Long Gamma, the breakdown must explicitly present:
+    1. (LONG_GAMMA, LONG): Call Buying (Breakout into dealer supply)
+    2. (LONG_GAMMA, SHORT): Put Buying (Ceiling resistance fade)
+    3. (SHORT_GAMMA, LONG): Call Buying (Gamma squeeze expansion)
+    4. (SHORT_GAMMA, SHORT): Put Buying (Liquidity cascade breakdown)
+- **First-Principles Market Microstructure Anchoring**:
+  - Telemetry and technical indicator readings (SuperTrend, VWAP, Score) describe what happened; institutional market microstructure explains why it happened.
+  - Every proposed rule change or diagnostic conclusion must be mathematically and structurally anchored in Indian index derivatives mechanics:
+    - Dealer Delta Hedging: In Long Gamma (Net GEX > 0), market makers buy dips and dump index futures into rallies to remain delta-neutral, pinning the index and absorbing call breakouts.
+    - Implied Volatility Asymmetry: Upward momentum grinds generally suffer from IV crush, while downward momentum expands IV and accelerates option delta.
+    - Retail Skew Friction: NIFTY/SENSEX options carry persistent call-side retail buying skew, inflating CE entry premiums and raising statutory break-even hurdles relative to PE.
+- **Counter-Factual Population Replay (Anti-Causal Inversion)**:
+  - Before recommending any gate, cap, or heuristic filter (e.g., 'cap concurrent entries to 1 lot', 'widen SL by 5 pts'):
+    - Explicitly replay the filter across the ENTIRE historical ledger population.
+    - Tabulate both what is prevented (bad trades avoided) AND what is sacrificed (good trades filtered out).
+    - If the counter-factual net rupee delta is negative, the proposal is mathematically invalid and must be rejected immediately.
+- **The Orthogonal ~X Test (Systemic vs Symptomatic Drill)**:
+  - Whenever a setup is diagnosed as failing under condition X (e.g. 'Calls failed because of Long Gamma'):
+    - Mandatory check: Does the setup also fail under the opposite condition ~X (Short Gamma)?
+    - If Call Buying carries an empirical win rate of 14.3% across ALL regimes, the diagnosis is NOT 'Long Gamma failure'; it is a systemic Call Buying structural failure that requires addressing entry criteria, premium skew, or directional validity.
+- **Root-Cause Depth Invariant (The Five Whys Standard)**:
+  - Never stop at surface-level indicator alignment. Drill down through five layers of causality:
+    1. Level 1 (Execution): Did the trade hit SL, Target, or Trail?
+    2. Level 2 (Telemetry): What were the Confluence Score, VWAP, GEX, and DTE?
+    3. Level 3 (Regime): What was the dealer inventory and gamma positioning?
+    4. Level 4 (Microstructure): How did liquidity, bid-ask spread, and delta hedging absorb the move?
+    5. Level 5 (Structural): Is this asset or setup fundamentally viable given statutory transaction costs and market participant flow?
