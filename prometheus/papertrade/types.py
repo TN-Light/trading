@@ -48,11 +48,11 @@ class Direction(str, Enum):
     def from_signal_direction(cls, signal_direction: str) -> "Direction":
         """Map signal direction to LONG or SHORT."""
         d = (signal_direction or "").lower().strip()
-        if d in ("bullish", "long", "buy", "buy_ce", "buy_pe"):
+        if d in ("bullish", "long", "buy", "buy_ce"):
             return cls.LONG
-        if d in ("bearish", "short", "sell", "neutral_range", "neutral", "sell_call_spread", "sell_put_spread"):
+        if d in ("bearish", "short", "sell", "buy_pe", "neutral_range", "neutral", "sell_call_spread", "sell_put_spread"):
             return cls.SHORT
-        return cls.SHORT if "sell" in d or "spread" in d else cls.LONG
+        return cls.SHORT if "sell" in d or "spread" in d or "pe" in d else cls.LONG
 
 
 @dataclass

@@ -162,7 +162,12 @@ class PositionHealthEngine:
 
         latest_bar = df.iloc[-1]
         spot_price = float(spot_override) if spot_override is not None else float(latest_bar.get("close", 0.0))
-        trade_is_bullish = (direction in {"bullish", "buy_ce", "long"})
+        d_str = str(direction).lower().strip()
+        trade_is_bullish = (
+            d_str in {"bullish", "buy_ce", "long", "buy"}
+            or (tsym.upper().endswith("CE") and "/" not in tsym)
+            or ("bull" in d_str)
+        )
 
         # Initialize pillar scores
         p_scores: Dict[str, float] = {}
@@ -351,7 +356,7 @@ class PositionHealthEngine:
             entry_spot_val = float(getattr(state, "entry_spot", 0.0) or 0.0)
             spot_breakdown = False
             if spot_val > 0 and entry_spot_val > 0:
-                trade_bull = (state.direction == "bullish")
+                trade_bull = trade_is_bullish
                 adverse_spot = (entry_spot_val - spot_val) if trade_bull else (spot_val - entry_spot_val)
                 spot_noise = 35.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 15.0
                 if adverse_spot > spot_noise:

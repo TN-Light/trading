@@ -87,6 +87,27 @@ class TrailingState:
     _last_heartbeat_milestone: int = 0
     _last_heartbeat_ts: float = 0.0
 
+    @property
+    def is_bullish(self) -> bool:
+        """Return True if this trade is a bullish market bet, False if bearish."""
+        d = str(getattr(self, "direction", "") or "").lower().strip()
+        if d in ("bullish", "long", "buy", "buy_ce"):
+            return True
+        if d in ("bearish", "short", "sell", "buy_pe"):
+            return False
+        ts = str(getattr(self, "tradingsymbol", "") or "").upper().strip()
+        if "/" not in ts:
+            if ts.endswith("CE"):
+                return True
+            if ts.endswith("PE"):
+                return False
+        strat = str(getattr(self, "strategy", "") or "").lower()
+        if "bull" in d or "bull" in strat:
+            return True
+        if "bear" in d or "bear" in strat:
+            return False
+        return False
+
     def __post_init__(self):
         is_credit = (
             getattr(self, "strategy_type", "") == "credit_spread"
@@ -648,7 +669,7 @@ class PositionMonitor:
                         current_atr = float(atr_s.iloc[-1]) if not atr_s.empty else getattr(state, "atr", 0.0)
 
                         if current_atr > 0:
-                            trade_is_bullish = (state.direction == "bullish")
+                            trade_is_bullish = state.is_bullish
                             spot_disp = (curr_spot - state.entry_spot) if trade_is_bullish else (state.entry_spot - curr_spot)
                             min_progress = 0.5 * current_atr
                             if spot_disp < min_progress and current_price < entry * 1.05:
@@ -1046,7 +1067,7 @@ class PositionMonitor:
             
             latest_bar = data.iloc[-1]
             spot = float(latest_bar["close"])
-            trade_is_bullish = state.direction == "bullish"  # CE position
+            trade_is_bullish = state.is_bullish  # Normalized bullish check (CE/bull spread)
             
             # 1. VWAP Structural Invalidation Check
             if cfg.get("vwap_exit", True):

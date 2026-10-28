@@ -157,7 +157,8 @@ class PaperTradeEngine:
         # long the option premium in both cases. (Fix 2026-07-18: previously
         # SHORT was miswired to SELL, turning every bearish BUY_PE signal
         # into a naked PUT WRITE.)
-        side = "BUY"
+        is_spread = "/" in signal.instrument or "spread" in getattr(signal, "strategy", "").lower()
+        side = "SELL" if is_spread else "BUY"
         fill = self.tracker.fill_sim.fill(
             instrument=signal.instrument,
             direction=signal.direction,

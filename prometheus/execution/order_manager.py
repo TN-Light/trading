@@ -593,10 +593,18 @@ class OrderManager:
                     qty = get_lot_size(state.symbol)
                 
                 # Reconstruct entry order
+                is_spread = (
+                    getattr(state, "is_spread", False)
+                    or getattr(state, "strategy_type", "") == "credit_spread"
+                    or "credit_spread" in str(getattr(state, "strategy", "")).lower()
+                    or "spread" in str(getattr(state, "strategy", "")).lower()
+                    or "/" in str(getattr(state, "tradingsymbol", ""))
+                )
+                entry_side = OrderSide.SELL if is_spread else OrderSide.BUY
                 dummy_entry = Order(
                     symbol=state.symbol,
                     tradingsymbol=state.tradingsymbol,
-                    side=OrderSide.BUY if state.direction == "bullish" else OrderSide.SELL,
+                    side=entry_side,
                     order_type=OrderType.MARKET,
                     quantity=qty,
                     filled_quantity=qty,
@@ -622,6 +630,8 @@ class OrderManager:
                 managed.sl_order_id = state.sl_order_id
                 managed.max_bars = state.max_bars
                 managed.breakeven_ratio = state.breakeven_ratio
+                if is_spread:
+                    managed.strategy_type = "credit_spread" 
                 
                 self.managed_positions[position_id] = managed
                 logger.info(f"Reconstructed ManagedPosition for {position_id} ({state.tradingsymbol}, qty={qty}) from TrailingState.")

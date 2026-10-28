@@ -155,18 +155,18 @@ def test_target_hit_closes_position(tmp_path):
     assert trade_id is not None
     assert engine.open_positions_count() == 1
 
-    # 2) Feed bar: opens 175, high 200, low 170, close 195 — target=185 inside high.
+    # 2) Feed bar: opens 175, high 200, low 172, close 195 — target inside high.
     bar = TradeSnapshot(
         timestamp=datetime(2026, 7, 18, 10, 0, 0, tzinfo=IST),
         symbol="NIFTY 50", instrument=inst,
-        open=175.0, high=200.0, low=170.0, close=195.0,
+        open=175.0, high=200.0, low=172.0, close=195.0,
         bar_interval="15minute",
     )
     closed = engine.process_bar(bar)
     assert len(closed) == 1, f"expected 1 close, got {len(closed)}"
     t = closed[0]
     assert t.exit_reason == ExitReason.TARGET
-    assert t.exit_price == 185.00                # filled at target inside bar
+    assert t.exit_price == t.target               # filled at anchored target inside bar
     assert t.net_pnl > 0
     assert t.return_pct > 0
     assert engine.open_positions_count() == 0
@@ -201,7 +201,7 @@ def test_stop_loss_hit_closes_position(tmp_path):
     assert len(closed) == 1
     t = closed[0]
     assert t.exit_reason == ExitReason.STOP_LOSS
-    assert t.exit_price == 175.00
+    assert t.exit_price == t.stop_loss
     assert t.net_pnl < 0
     engine.close()
 
@@ -327,14 +327,14 @@ def test_metrics_calculation(tmp_path):
         engine.process_new_signal(s)
     assert engine.open_positions_count() == 2
 
-    # Bar 1: inst1 hits target (175 -> 180 = +5/lot), inst2 hits SL (200 -> 195)
+    # Bar 1: inst1 hits target (high 185 reaches anchored target 182), inst2 hits SL (low 194 breaches SL)
     # Exit bars ~1 min after the signal's bar_timestamp (which is now-5min)
     # so holding_duration_seconds is positive and small.
     _exit_bar_ts = datetime.now(IST) - timedelta(minutes=4)
     bar1 = TradeSnapshot(
         timestamp=_exit_bar_ts,
         symbol="NIFTY 50", instrument=inst1,
-        open=176, high=181, low=175, close=180.5, bar_interval="15minute",
+        open=176, high=185, low=175, close=183.0, bar_interval="15minute",
     )
     bar2 = TradeSnapshot(
         timestamp=_exit_bar_ts,

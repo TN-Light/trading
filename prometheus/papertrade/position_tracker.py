@@ -248,7 +248,8 @@ class PositionTracker:
         # close by selling the contract; the PnL math below is therefore the
         # long-premium PnL: (exit - entry) * qty.
         if exit_price <= 0:
-            side = "SELL"
+            is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
+            side = "BUY" if is_spread else "SELL"
             price_hint = pos.stop_loss if exit_reason == ExitReason.STOP_LOSS else (pos.entry_price or pos.stop_loss)
             fill = self.fill_sim.fill(
                 pos.instrument, pos.direction, price_hint=price_hint,
@@ -487,7 +488,7 @@ class PositionTracker:
         if entry_spot <= 0 or current_spot <= 0:
             return False
 
-        trade_is_bullish = (direction == Direction.LONG)
+        trade_is_bullish = (direction == Direction.LONG or str(direction).upper() in ("LONG", "BUY", "BULLISH"))
         sym_upper = symbol.upper()
         default_buf = 35.0 if "SENSEX" in sym_upper else (18.0 if "BANK" in sym_upper else 8.0)
         noise_buf = max(default_buf, 0.35 * atr) if atr > 0 else default_buf
