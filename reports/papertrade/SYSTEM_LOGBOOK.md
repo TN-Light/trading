@@ -1228,3 +1228,49 @@ equire_long_gamma: true (min_net_gex: 1.5), requiring positive market maker gamm
 * **Crucible Cumulative Net P&L (N=82):** **-₹16,223.21** (-16.22% drawdown from initial base)
 * **Current Continuous Account Equity:** **₹83,776.79**
 * **Lifetime System Cumulative P&L (N=139):** **-₹40,651.46**
+
+
+---
+
+## DAY 21 — 2026-10-28: WEDNESDAY PUT TARGET INVERSION FORENSICS & +921 PT SHORT SQUEEZE
+
+### 1. Executive Summary & Session Ground Truth
+- **Trading Date**: Wednesday, October 28, 2026.
+- **Execution Mode**: Paper Trading / Forward Evaluation.
+- **Trades Executed**: 4 (all single-leg Put Buying `BUY_PE`, Tier C Paper Only).
+- **Session Net P&L**: **🔴 -₹459.82 (-0.55%)** (Gross: -₹106.60, Statutory Costs: ₹353.22).
+- **Win Rate**: 50.0% (2 Wins / 2 Losses / 0 BE).
+- **Continuous Capital**: Baseline ₹100,000 + Cumulative Net PnL -₹16,683.03 = **₹83,316.97**.
+- **Crucible Cumulative P&L (N=86)**: **-₹16,683.03** (30W / 56L / 0BE, 34.88% Net WR).
+- **Lifetime Cumulative P&L (N=143)**: **-₹41,111.28** (51W / 92L / 0BE, 35.66% Net WR).
+- **Afternoon Session (Post-11:35 Bug Fix)**: 0 trades entered across 11 consecutive 15-minute scan cycles.
+
+### 2. Verified Executed Trades (from `reports/papertrade/live_ledger.sqlite`)
+| Trade ID | Underlying & Instrument | Tier | Entry (IST) | Exit (IST) | Entry (₹) | Exit (₹) | Gross (₹) | Costs (₹) | Net P&L (₹) | Exit Reason | Forensic Diagnosis |
+|---|---|:---:|---|---|---|---|---|---|---|---|---|
+| `A0E63B` | SENSEX 73100PE | C | 09:46:58 | 09:47:17 (18s) | 418.67 | 431.10 | +₹248.64 | ₹83.40 | **🟢 +₹165.24** | `target` | Stored target was inverted to 376.80 (`entry * 0.90`) by legacy unpatched bytecode. Exited in 18s. |
+| `8B722C` | NIFTY 22600PE | C | 09:47:00 | 09:47:11 (11s) | 188.49 | 191.75 | +₹212.01 | ₹94.40 | **🟢 +₹117.61** | `target` | Stored target was inverted to 169.64. Exited in 11s. |
+| `D6840F` | NIFTY 22550PE | C | 10:47:28 | 10:47:46 (17s) | 209.26 | 202.90 | -₹413.34 | ₹96.98 | **🔴 -₹510.32** | `target` | Inverted target 188.33. Tick at 202.90 was lower than entry but `>= 188.33`, exiting on false target in 17s. |
+| `759F7E` | SENSEX 72900PE | C | 11:01:40 | 11:02:09 (28s) | 346.10 | 338.40 | -₹153.91 | ₹78.44 | **🔴 -₹232.35** | `target` | Inverted target 311.49. Tick at 338.40 triggered false target in 28s at net loss. |
+
+### 3. Key Forensic Discoveries & Structural Insights
+1. **The Put Target Inversion Bug Root Cause (Resolved in Commit `ad92270`)**:
+   - Flawed `if is_long:` check in `engine.py` (introduced Oct 23) assumed `direction == SHORT` meant credit spread decay, clamping Put Buying targets to `fill * 0.90`.
+   - Now structurally detected via `is_spread = "/" in instrument or "SPREAD" in strategy`.
+   - Unit tests certified in `test_put_target_inversion_fix.py`.
+2. **The +921 Point V-Bottom Short Squeeze**:
+   - SENSEX collapsed -650 pts from 73,253 to 72,603 by 10:30, then staged an explosive +921 pt rally to 73,525 by 13:15!
+   - NIFTY swung 280 pts (low 22,497 to high 22,778), and BANK NIFTY surged 814 pts (53,626 to 54,440).
+3. **Why Zero Signals Entered Post-11:35 Bug Fix**:
+   - **Lunch Dead Zone Gate (11:30–13:15)**: Strategy fired 4 PE setups at 11:36 and 11:51. The Lunch Gate suppressed them. SENSEX immediately surged +171 pts, proving the gate prevented severe capital loss.
+   - **Macro Multi-Timeframe Trend Alignment (13:15–14:15)**: 1H trend was still Bearish from the morning crater while 15M candles were green. Multi-timeframe conflict prevented buying calls into an unconfirmed counter-trend rally.
+   - **Dealer Short Gamma Gate**: Credit spreads evaluated on NIFTY/SENSEX. Net GEX was deeply negative (-₹107B on SENSEX). Option selling was strictly banned, protecting capital against the parabolic +921 pt squeeze.
+   - **14:15 Cutoff**: Engaged at 14:15 IST; square-off completed at 15:15 IST.
+
+### 4. Continuous Account Capital Status
+* **Starting Base Capital (Day 1):** ₹1,00,000.00
+* **Day 20 Ending Equity:** ₹83,776.79
+* **Day 21 Realized Net P&L:** **🔴 -₹459.82 (-0.55%)**
+* **Crucible Cumulative Net P&L (N=86):** **-₹16,683.03** (-16.68% drawdown from initial base)
+* **Current Continuous Account Equity:** **₹83,316.97**
+* **Lifetime System Cumulative P&L (N=143):** **-₹41,111.28**
