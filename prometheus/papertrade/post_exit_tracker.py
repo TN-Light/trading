@@ -195,9 +195,10 @@ class PostExitTracker:
                     item.post_exit_mae = round(ltp, 2)
 
                 # 2. Check Reclaim & Shakeout Conditions
-                # Long premium position: target > entry_price (whether Call or Put buyer!)
-                # Short premium / credit spread: target < entry_price (seller wants decay)
-                is_long_premium = (item.target > item.entry_price) if item.target > 0 else ("SPREAD" not in item.instrument.upper() and "/" not in item.instrument)
+                # Option Buying (both Call and Put buyers): Long option premium
+                # Credit Spreads: Short option premium (wants decay)
+                is_spread = ("/" in (item.instrument or "")) or ("SPREAD" in (item.instrument or "").upper())
+                is_long_premium = not is_spread
                 if is_long_premium:
                     if item.target > 0 and ltp >= item.target:
                         item.target_reclaimed = True

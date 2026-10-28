@@ -220,26 +220,48 @@ class PaperTradeEngine:
         fill_px = float(fill.fill_price)
         hint_px = float(getattr(signal, "entry_price_hint", 0.0) or 0.0)
         tgt_gain = float(getattr(signal, "target_gain_pts", 0.0) or 0.0)
-        dir_val = signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction)
-        is_long = dir_val.upper() in ("LONG", "BUY")
 
-        if is_long:
+        # Distinguish Option Buying (CE/PE) from Option Selling (Credit Spreads).
+        # In Option Buying, both Call (LONG) and Put (SHORT) buyers are LONG option premium,
+        # so target must EXPAND above entry (effective_target > fill_px) and SL must be below entry.
+        # In Credit Spreads, premium is collected and DECAYS to target (effective_target < fill_px).
+        is_spread = (
+            "/" in (signal.instrument or "")
+            or "SPREAD" in str(getattr(signal, "strategy", "")).upper()
+            or str(getattr(signal, "strategy_type", "")).lower() == "credit_spread"
+            or "SPREAD" in str(getattr(signal, "instrument", "")).upper()
+            or "SPREAD" in str(getattr(signal, "action", "")).upper()
+            or (isinstance(getattr(signal, "metadata", None), dict) and (
+                str(signal.metadata.get("strategy_type", "")).lower() == "credit_spread"
+                or str(signal.metadata.get("raw", {}).get("strategy_type", "")).lower() == "credit_spread"
+                or "SPREAD" in str(signal.metadata.get("action", "")).upper()
+                or "SPREAD" in str(signal.metadata.get("raw", {}).get("action", "")).upper()
+            ))
+        )
+
+        if not is_spread:
+            # OPTION BUYING (Both CE and PE): Premium EXPANDS when profitable
             if tgt_gain <= 0 and signal.target > hint_px > 0:
                 tgt_gain = signal.target - hint_px
-            effective_target = round(fill_px + tgt_gain, 2) if tgt_gain > 0 else signal.target
+            effective_target = round(fill_px + tgt_gain, 2) if tgt_gain > 0 else (
+                signal.target if signal.target > fill_px else round(fill_px + max(8.0, fill_px * 0.15), 2)
+            )
             risk_dist = (hint_px - signal.stop_loss) if (hint_px > signal.stop_loss > 0) else (fill_px * 0.35)
-            effective_sl = max(1.0, round(fill_px - risk_dist, 2)) if risk_dist > 0 else signal.stop_loss
+            effective_sl = max(1.0, round(fill_px - risk_dist, 2)) if risk_dist > 0 else (
+                signal.stop_loss if 0 < signal.stop_loss < fill_px else max(1.0, round(fill_px * 0.65, 2))
+            )
         else:
+            # OPTION SELLING (Credit Spreads): Premium DECAYS when profitable
             if hint_px > 0 and signal.target > 0:
                 target_decay_ratio = max(0.1, min(0.9, signal.target / hint_px))
                 effective_target = round(fill_px * target_decay_ratio, 2)
             else:
-                effective_target = signal.target
+                effective_target = signal.target if 0 < signal.target < fill_px else round(fill_px * 0.5, 2)
             if hint_px > 0 and signal.stop_loss > hint_px:
                 sl_ratio = signal.stop_loss / hint_px
                 effective_sl = round(fill_px * sl_ratio, 2)
             else:
-                effective_sl = signal.stop_loss
+                effective_sl = signal.stop_loss if signal.stop_loss > fill_px else round(fill_px * 1.5, 2)
 
         gex_val = getattr(signal, "net_gex", None)
         gamma_reg = str(getattr(signal, "gamma_regime", "")).upper()
