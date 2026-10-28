@@ -42,6 +42,12 @@
     2. **Conservation of Population**: Assert that $\sum \text{subsets} = N_{\text{total}}$ and $\text{Wins} + \text{Losses} = N_{\text{total}}$.
     3. **Net Rupee Primacy**: Compute all metrics on `net_pnl`. Report gross metrics strictly alongside statutory transaction costs (`costs`).
     4. **Automated Test Certification**: Ensure all changes are verified by automated tests in `prometheus/tests/`.
+- **The 5 Universal Verification & Anti-Confirmation Invariants (Mandatory Test Protocol)**:
+  1. *Run Full Suite, Report Full Suite*: Never cherry-pick passing subsets or declare victory on targeted tests alone. Always run python -m pytest prometheus/papertrade/tests/ prometheus/tests/ -q. If failures occur, disclose the exact triage: (a) Regressions caused by current patch, (b) Pre-existing debt, (c) Under investigation.
+  2. *Falsification Before Proof (No Vanity Tests)*: A test is invalid if it cannot fail when the bug is present. Never write synthetic tests that mask production behavior (e.g. asserting Direction.LONG on PE option contracts).
+  3. *Blast Radius Accounting*: Before committing changes to core modules (engine.py, position_tracker.py, position_monitor.py), map and execute all dependent functional test suites (trailing stops, alerts, heartbeats, durations).
+  4. *Zero Legacy Debt Tolerance*: Pre-existing test failures are not an excuse to look away. If system constants change (e.g. statutory fee buffers or GEX tier gates), immediately refactor all legacy assertions to match the new invariants.
+  5. *Certification Rigor Standard*: The word 'CERTIFIED' carries legal-grade weight in quantitative systems. It is strictly forbidden to use 'CERTIFIED' unless 100% of the repository test suite passes with 0 failures.
 - **Zero-Manipulation Invariant**: Hardcoding trade outcomes, synthetic price fills, or manual parameter overrides in replay, backtesting, or tracking scripts is strictly prohibited and treated as a critical system defect.
 
 ## 6. Universal Quantitative Forensics & Architectural Invariant Framework
