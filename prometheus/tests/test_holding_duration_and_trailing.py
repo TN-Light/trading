@@ -246,8 +246,9 @@ def test_tier_c_sensex_offensive_microlock_at_12pts():
     # At +12.0 pts gain (current_price = 212.0)
     tracker._maybe_advance_trailing_stop(pos, 212.0)
     assert pos.breakeven_set is True
-    # Sensex cost buffer is 3.0 pts -> new_sl = 200.0 + 3.0 = 203.0
-    assert pos.stop_loss == pytest.approx(203.0, 0.01)
+    # Sensex cost buffer is 5.50 pts -> new_sl = 200.0 + 5.50 = 205.50
+    sx_cost_buf = PositionTracker.get_statutory_cost_buffer("SENSEX", qty=20)
+    assert pos.stop_loss == pytest.approx(200.0 + sx_cost_buf, 0.01)
 
 
 def test_tier_c_nifty_offensive_microlock_at_5pts():
@@ -282,8 +283,9 @@ def test_tier_c_nifty_offensive_microlock_at_5pts():
     # Gain is +5.0 pts (>= 5.0 pts)
     tracker._maybe_advance_trailing_stop(pos, 105.0)
     assert pos.breakeven_set is True
-    # Nifty cost buffer is 0.9 pts -> new_sl = 100.0 + 0.9 = 100.90
-    assert pos.stop_loss == pytest.approx(100.90, 0.01)
+    # Nifty cost buffer is 2.00 pts -> new_sl = 100.0 + 2.00 = 102.00
+    nf_cost_buf = PositionTracker.get_statutory_cost_buffer("NIFTY 50", qty=65)
+    assert pos.stop_loss == pytest.approx(100.0 + nf_cost_buf, 0.01)
 
 
 # ==============================================================================

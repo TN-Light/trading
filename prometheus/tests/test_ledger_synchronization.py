@@ -45,6 +45,10 @@ def test_sqlite_csv_exact_match():
     total_csv_net = sum(r[1] for r in csv_rows)
     assert abs(total_sql_net - total_csv_net) < 1e-4, f"Net PnL mismatch: SQL {total_sql_net:.2f} vs CSV {total_csv_net:.2f}"
     
+    # Sort both by trade_id so comparison is independent of entry_time vs exit_time write order
+    sqlite_rows = sorted(sqlite_rows, key=lambda r: r[0])
+    csv_rows = sorted(csv_rows, key=lambda r: r[0])
+
     # Assert every trade_id matches in sequence
     for (sql_id, sql_net), (csv_id, csv_net) in zip(sqlite_rows, csv_rows):
         assert sql_id == csv_id, f"Trade ID mismatch: {sql_id} vs {csv_id}"

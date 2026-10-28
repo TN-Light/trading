@@ -248,7 +248,11 @@ class PositionTracker:
         # close by selling the contract; the PnL math below is therefore the
         # long-premium PnL: (exit - entry) * qty.
         if exit_price <= 0:
-            is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
+            is_spread = (
+                "/" in (pos.instrument or "")
+                or str(getattr(pos, "strategy", "")).lower() == "credit_spread"
+                or str(getattr(pos, "strategy_type", "")).lower() == "credit_spread"
+            )
             side = "BUY" if is_spread else "SELL"
             price_hint = pos.stop_loss if exit_reason == ExitReason.STOP_LOSS else (pos.entry_price or pos.stop_loss)
             fill = self.fill_sim.fill(
@@ -540,7 +544,11 @@ class PositionTracker:
         # (premium rallied). The old `else` branch applied inverted
         # conventions assuming SHORT = "short the asset", which was wrong
         # for our BUY_PE convention. (Fix 2026-07-18.)
-        is_spread = "/" in (pos.instrument or "") or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in (pos.instrument or "").upper()
+        is_spread = (
+            "/" in (pos.instrument or "")
+            or str(getattr(pos, "strategy", "")).lower() == "credit_spread"
+            or str(getattr(pos, "strategy_type", "")).lower() == "credit_spread"
+        )
         sl = pos.stop_loss
         tgt = pos.target
 

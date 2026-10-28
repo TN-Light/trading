@@ -719,7 +719,7 @@ def test_fetcher_fetch_historical_ab1021_triggers_endpoint_cooldown(monkeypatch)
 
     assert len(cooldowns) >= 1
     assert cooldowns[0][1] == EndpointCategory.HISTORICAL
-    assert cooldowns[0][0] >= 5.0
+    assert cooldowns[0][0] >= 1.0  # Fast backoff starts at 1.0s to avoid scan freeze
 
 
 def test_fetcher_get_candle_data_ab1021_sets_cooldown():

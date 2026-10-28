@@ -169,7 +169,7 @@ def test_live_paper_capture_poll_open_positions_triggers_heartbeat():
     assert mock_telegram.alert_trade_update.call_count == 1
     call_args = mock_telegram.alert_trade_update.call_args[0][0]
     assert call_args["trade_id"] == "PAPER-HEARTBEAT-01"
-    assert call_args["milestone"] == 1
+    assert call_args["milestone"] == 5  # 5th 60-second milestone (310s elapsed)
     assert call_args["holding_duration"] == "5 minutes"
     assert call_args["current_price"] == 105.0
     assert call_args["gross_pnl_pts"] == 10.0  # 105 - 95
@@ -178,10 +178,10 @@ def test_live_paper_capture_poll_open_positions_triggers_heartbeat():
     capture.poll_open_positions()
     assert mock_telegram.alert_trade_update.call_count == 1
 
-    # Advance entry time to 610s (milestone 2 = 10 minutes)
+    # Advance entry time to 610s (milestone 10 = 10 minutes)
     pos.entry_time = now - timedelta(seconds=610)
     capture.poll_open_positions()
     assert mock_telegram.alert_trade_update.call_count == 2
     call_args2 = mock_telegram.alert_trade_update.call_args[0][0]
-    assert call_args2["milestone"] == 2
+    assert call_args2["milestone"] == 10  # 10th 60-second milestone (~10 minutes)
     assert call_args2["holding_duration"] == "10 minutes"

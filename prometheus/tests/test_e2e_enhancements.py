@@ -1024,9 +1024,9 @@ class TestTier2BoundaryAndCornerCases:
         assert tgt >= 35.0
 
     def test_b8_tier_s_penny_option_risk_cap(self):
-        """B8: Low-priced option on Tier S obeys 35% SL premium risk cap."""
+        """B8: Low-priced option on Tier S obeys 35% SL premium risk cap bounded by noise floor (GEMINI.md Rule 2)."""
         _, sl, _, _, _ = self.calibrator("NIFTY 50", 25000.0, 25.0, 20.0, 8.5, "S", True)
-        assert sl <= round(20.0 * 0.35, 1)
+        assert sl <= max(round(20.0 * 0.35, 1), 10.0)
 
     def test_b9_tier_b_zero_atr_graceful_handling(self):
         """B9: Tier B with spot_atr=0 falls back safely to default ATR."""

@@ -52,7 +52,16 @@ class Direction(str, Enum):
             return cls.LONG
         if d in ("bearish", "short", "sell", "buy_pe", "neutral_range", "neutral", "sell_call_spread", "sell_put_spread"):
             return cls.SHORT
-        return cls.SHORT if "sell" in d or "spread" in d or "pe" in d else cls.LONG
+        is_bearish = (
+            d.startswith("sell")
+            or "spread" in d
+            or d.endswith("_pe")
+            or d.endswith(" pe")
+            or d.startswith("pe_")
+            or d == "pe"
+            or "put" in d
+        )
+        return cls.SHORT if is_bearish else cls.LONG
 
 
 @dataclass

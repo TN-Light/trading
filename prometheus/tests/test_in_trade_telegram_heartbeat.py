@@ -67,6 +67,7 @@ def _create_mock_tracker(on_heartbeat=None, feed_dict=None):
         cost_model=CostModel(),
         enable_trailing=True,
         on_heartbeat=on_heartbeat,
+        heartbeat_interval_seconds=300,
     )
 
 
@@ -556,7 +557,7 @@ def test_live_paper_capture_heartbeat_wiring(tmp_path):
     assert update["gross_pnl_pts"] == 25.0
     assert update["gross_pnl"] == 1875.0
     assert update["holding_duration"] == "5 minutes"
-    assert update["milestone"] == 1
+    assert update["milestone"] == 5  # 5th 60-second milestone (305s elapsed)
 
 
 def test_operator_action_command_variants():

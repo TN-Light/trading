@@ -150,14 +150,16 @@ class PaperTradeEngine:
                     return None
 
         # 3. Resolve entry fill
-        # PROMETHEUS only ever BUYS options (CE for bullish, PE for bearish).
-        # There is no option-selling path (documented in CLAUDE.md:
-        # "NO naked option selling"). So both LONG-direction (bullish CE) and
-        # SHORT-direction (bearish PE) translate to side="BUY" — they're
-        # long the option premium in both cases. (Fix 2026-07-18: previously
-        # SHORT was miswired to SELL, turning every bearish BUY_PE signal
-        # into a naked PUT WRITE.)
-        is_spread = "/" in signal.instrument or "spread" in getattr(signal, "strategy", "").lower()
+        # Single-leg option buying (both CE for bullish and PE for bearish) always BUYS
+        # the option premium (side="BUY") because the position is long premium.
+        # Defined-risk credit spreads sell the net spread for a credit (side="SELL").
+        # Naked option selling is strictly prohibited.
+        is_spread = (
+            "/" in (signal.instrument or "")
+            or str(getattr(signal, "strategy", "")).lower() == "credit_spread"
+            or str(getattr(signal, "strategy_type", "")).lower() == "credit_spread"
+            or str(getattr(signal, "action", "")).upper() in ("BEAR_CALL_SPREAD", "BULL_PUT_SPREAD", "SELL_SPREAD")
+        )
         side = "SELL" if is_spread else "BUY"
         fill = self.tracker.fill_sim.fill(
             instrument=signal.instrument,
@@ -228,16 +230,9 @@ class PaperTradeEngine:
         # In Credit Spreads, premium is collected and DECAYS to target (effective_target < fill_px).
         is_spread = (
             "/" in (signal.instrument or "")
-            or "SPREAD" in str(getattr(signal, "strategy", "")).upper()
+            or str(getattr(signal, "strategy", "")).lower() == "credit_spread"
             or str(getattr(signal, "strategy_type", "")).lower() == "credit_spread"
-            or "SPREAD" in str(getattr(signal, "instrument", "")).upper()
-            or "SPREAD" in str(getattr(signal, "action", "")).upper()
-            or (isinstance(getattr(signal, "metadata", None), dict) and (
-                str(signal.metadata.get("strategy_type", "")).lower() == "credit_spread"
-                or str(signal.metadata.get("raw", {}).get("strategy_type", "")).lower() == "credit_spread"
-                or "SPREAD" in str(signal.metadata.get("action", "")).upper()
-                or "SPREAD" in str(signal.metadata.get("raw", {}).get("action", "")).upper()
-            ))
+            or str(getattr(signal, "action", "")).upper() in ("BEAR_CALL_SPREAD", "BULL_PUT_SPREAD", "SELL_SPREAD")
         )
 
         if not is_spread:

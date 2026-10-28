@@ -227,7 +227,7 @@ def test_b3_tier_c_micro_locking_vs_tier_b_breathing_room():
     
     # Tick at 212 (+12 pts gain)
     pm._process_tick(state_tier_c, 212.0)
-    assert state_tier_c.current_sl == 201.9  # Entry + 1.9 pt Bank Nifty cost buffer
+    assert state_tier_c.current_sl == 205.5  # Entry + 5.50 pt Bank Nifty statutory cost buffer
     assert state_tier_c.breakeven_set is True
     
     # Tier B setup on Bank Nifty: Entry 200, SL 170. Gain +12 pts -> MUST NOT ratchet to BE
@@ -253,7 +253,7 @@ def test_b3_tier_c_micro_locking_vs_tier_b_breathing_room():
     
     # Tick at 218.5 (+18.5 pts gain >= 18.0 pt Bank Nifty noise floor) -> Now triggers breakeven
     pm._process_tick(state_tier_b, 218.5)
-    assert state_tier_b.current_sl == 201.9  # Breakeven + buffer
+    assert state_tier_b.current_sl == 205.5  # Breakeven + statutory cost buffer (5.50 pts)
     assert state_tier_b.breakeven_set is True
 
 

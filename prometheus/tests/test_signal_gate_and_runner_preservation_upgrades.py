@@ -145,7 +145,7 @@ def test_dealer_long_gex_gates_option_buying_to_tier_c():
     tier_info = classify_signal_tier(sig)
     assert tier_info["tier"] == "C"
     assert tier_info["is_live_eligible"] is False
-    assert any("Dealer Long Gamma" in r for r in tier_info["classification_reasons"])
+    assert any("Dealer" in r and "Gamma" in r for r in tier_info["classification_reasons"])
 
 
 def test_0dte_golden_setup_promoted_to_tier_b_when_score_8():

@@ -66,18 +66,18 @@ def test_climax_exhaustion_detection_logic():
 # ============================================================================
 
 def test_long_gamma_tier_b_promotion_for_score_8_plus():
-    """Score >= 8.0 in Dealer Long Gamma must promote to Tier B Scalp with compressed targets."""
+    """Score >= 8.0 in Dealer Long Gamma for Put Buying (ceiling fade) promotes to Tier B Scalp with compressed targets (GEMINI.md Rule 1)."""
     sig = {
-        "action": "BUY_CE",
+        "action": "BUY_PE",
         "symbol": "BANK NIFTY",
         "strategy": "PriceAction_Momentum",
         "strategy_type": "option_buying",
         "edge_score": 8.5,
         "bar_timestamp": "2026-10-16 10:53:00",
         "reasons": [
-            "15M_ORB_High_Breakout",
-            "Session_VWAP_Bullish",
-            "1H_Trend_Bullish",
+            "15M_ORB_Low_Breakdown",
+            "Session_VWAP_Bearish",
+            "1H_Trend_Bearish",
         ],
         "net_gex_crores": 2500.0,  # Strongly Dealer Long Gamma (> +500 Cr)
         "net_gex": 2500.0,
@@ -90,6 +90,12 @@ def test_long_gamma_tier_b_promotion_for_score_8_plus():
     assert res["is_live_eligible"] is True
     assert "REGIME SCALP" in res["tier_badge"]
     assert "Compressed Scalp Target" in res["action_instruction"]
+
+    # In contrast, Call Buying (BUY_CE) in Dealer Long Gamma is strictly demoted to Tier C (Asymmetric GEX Gate)
+    sig_ce = dict(sig, action="BUY_CE")
+    res_ce = classify_signal_tier(sig_ce)
+    assert res_ce["tier"] == "C"
+    assert res_ce["is_live_eligible"] is False
 
 
 def test_long_gamma_remains_tier_c_if_score_below_8():

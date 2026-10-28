@@ -190,7 +190,8 @@ def test_position_tracker_breakeven_at_50pct_target_and_disk_persistence():
     # Price moves to 437.0 (+22.0 pts, 0.88R >= 0.85R): Progressive Stage 2 (Breakeven) triggers!
     tracker._maybe_advance_trailing_stop(pos, 437.0)
     assert pos.breakeven_set is True
-    expected_be_sl = 415.0 + 1.9  # Entry + brokerage
+    cost_buf = PositionTracker.get_statutory_cost_buffer("NIFTY BANK", qty=30)
+    expected_be_sl = 415.0 + cost_buf  # Entry + empirical statutory fee floor (5.50 pts)
     assert abs(pos.stop_loss - expected_be_sl) < 1e-4
 
     # Critical: Check that recorder persisted the updated SL to disk!

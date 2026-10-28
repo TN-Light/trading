@@ -55,7 +55,7 @@ def test_cost_buffer_recalibration_1lot_vs_legacy():
     """Verify cost buffer recalibration for 1-lot sizing and legacy backward compatibility."""
     tracker = PositionTracker(fill_sim=MagicMock(), cost_model=CostModel(cost_per_side_bps=0.0))
 
-    # 1-lot Bank Nifty (quantity=15 or 1): cost_buffer_pts should be 4.50
+    # 1-lot Bank Nifty (quantity=15 or 1): cost_buffer_pts should be 5.50
     pos_bn_1lot = Position(
         trade_id="POS-BN-1LOT",
         symbol="NIFTY BANK",
@@ -72,16 +72,16 @@ def test_cost_buffer_recalibration_1lot_vs_legacy():
     tracker.open_positions[pos_bn_1lot.trade_id] = pos_bn_1lot
     tracker._maybe_advance_trailing_stop(pos_bn_1lot, 218.0)  # +18 pts gain
     assert pos_bn_1lot.breakeven_set is True
-    assert pos_bn_1lot.stop_loss == pytest.approx(204.50, rel=1e-2)
+    assert pos_bn_1lot.stop_loss == pytest.approx(205.50, rel=1e-2)
 
-    # Legacy 2-lot Bank Nifty (quantity=30): cost_buffer_pts should be 1.90
+    # Multi-lot Bank Nifty (quantity=45): cost_buffer_pts should be 3.50
     pos_bn_2lot = Position(
         trade_id="POS-BN-2LOT",
         symbol="NIFTY BANK",
         instrument="BANKNIFTY26OCT50000CE",
         underlying="BANKNIFTY",
         direction=Direction.LONG,
-        quantity=30,
+        quantity=45,
         entry_price=200.0,
         entry_time=datetime.now(),
         stop_loss=170.0,
@@ -91,7 +91,7 @@ def test_cost_buffer_recalibration_1lot_vs_legacy():
     tracker.open_positions[pos_bn_2lot.trade_id] = pos_bn_2lot
     tracker._maybe_advance_trailing_stop(pos_bn_2lot, 218.0)
     assert pos_bn_2lot.breakeven_set is True
-    assert pos_bn_2lot.stop_loss == pytest.approx(201.90, rel=1e-2)
+    assert pos_bn_2lot.stop_loss == pytest.approx(203.50, rel=1e-2)
 
 
 def test_weak_edge_capital_defense_lock():
@@ -126,10 +126,10 @@ def test_weak_edge_capital_defense_lock():
     tracker.health_engine = MagicMock()
     tracker.health_engine.evaluate_position_health.return_value = mock_report
 
-    # Gain +6.0 pts (greater than cost_buffer 4.50 + 1.0 = 5.50 pts, but well below normal 18 pt threshold)
-    tracker._maybe_advance_trailing_stop(pos, 206.0)
+    # Gain +7.0 pts (greater than cost_buffer 5.50 + 1.0 = 6.50 pts, but well below normal 18 pt threshold)
+    tracker._maybe_advance_trailing_stop(pos, 207.0)
     assert pos.breakeven_set is True
-    assert pos.stop_loss == pytest.approx(204.50, rel=1e-2)
+    assert pos.stop_loss == pytest.approx(205.50, rel=1e-2)
 
 
 def test_oi_analyzer_fallback_wider_window():
@@ -321,7 +321,7 @@ def test_position_monitor_cost_buffer_recalibration_1lot_vs_legacy():
     om = MagicMock()
     pm = PositionMonitor(broker=om)
 
-    # 1-lot Bank Nifty (qty=15): should use cost_buffer_pts = 4.50 -> BE at entry 200 + 4.50 = 204.50
+    # 1-lot Bank Nifty (qty=15): should use cost_buffer_pts = 5.50 -> BE at entry 200 + 5.50 = 205.50
     state_1lot = TrailingState(
         position_id="POS_MON_1LOT",
         symbol="NIFTY BANK",
@@ -337,9 +337,9 @@ def test_position_monitor_cost_buffer_recalibration_1lot_vs_legacy():
     pm.add_position(state_1lot)
     pm._process_tick(state_1lot, 218.0)  # +18 pts gain (Bank Nifty noise floor)
     assert state_1lot.breakeven_set is True
-    assert state_1lot.current_sl == pytest.approx(204.50, rel=1e-2)
+    assert state_1lot.current_sl == pytest.approx(205.50, rel=1e-2)
 
-    # Legacy 2-lot Bank Nifty (qty=30): should use cost_buffer_pts = 1.90 -> BE at 201.90
+    # Multi-lot Bank Nifty (qty=45): should use cost_buffer_pts = 3.50 -> BE at 203.50
     state_2lot = TrailingState(
         position_id="POS_MON_2LOT",
         symbol="NIFTY BANK",
@@ -349,13 +349,13 @@ def test_position_monitor_cost_buffer_recalibration_1lot_vs_legacy():
         current_sl=170.0,
         target=250.0,
         direction="bullish",
-        quantity=30,
+        quantity=45,
         tier="B",
     )
     pm.add_position(state_2lot)
     pm._process_tick(state_2lot, 218.0)
     assert state_2lot.breakeven_set is True
-    assert state_2lot.current_sl == pytest.approx(201.90, rel=1e-2)
+    assert state_2lot.current_sl == pytest.approx(203.50, rel=1e-2)
 
 
 def test_fill_simulator_missing_leg_quote_does_not_fill_fake_spread():
@@ -472,8 +472,8 @@ def test_zgl_integration_triggers_defensive_lock_on_adverse_boundary():
     tracker.health_engine = MagicMock()
     tracker.health_engine.evaluate_position_health.return_value = mock_report
 
-    # Gain +6.0 pts >= cost_buffer 4.50 + 1.0 = 5.50 pts. Since zgl_adverse and health <= 0, weak edge locks early
-    tracker._maybe_advance_trailing_stop(pos, 206.0)
+    # Gain +7.0 pts >= cost_buffer 5.50 + 1.0 = 6.50 pts. Since zgl_adverse and health <= 0, weak edge locks early
+    tracker._maybe_advance_trailing_stop(pos, 207.0)
     assert pos.breakeven_set is True
     assert pos.stop_loss == pytest.approx(204.50, rel=1e-2)
 

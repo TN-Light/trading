@@ -32,7 +32,7 @@ def test_regulatory_expiry_schedule_pre_and_post_cutover():
     assert get_expiry_date('NIFTY 50', post_cutover) == date(2026, 9, 8)  # Tuesday
 
 def test_credit_spread_uses_live_option_chain_pricing():
-    strategy = CreditSpreadStrategy()
+    strategy = CreditSpreadStrategy(max_days_to_expiry=None)
     
     # Mock candle data (sideways regime)
     rows = []

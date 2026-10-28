@@ -30,7 +30,7 @@ def test_low_vix_trailing_ladder():
     # 2. At 108 (+8% gain), triggers Low-VIX Breakeven
     monitor._process_tick(state, current_price=108.5)
     assert state.breakeven_set is True
-    assert state.current_sl == 101.5
+    assert state.current_sl == 102.0
     
     # 3. At 114.5 (+14.5% gain), triggers Low-VIX Stage 1 (Lock +8%)
     monitor._process_tick(state, current_price=114.5)
