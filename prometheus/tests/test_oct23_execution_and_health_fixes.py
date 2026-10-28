@@ -75,7 +75,7 @@ def test_slippage_aware_target_and_sl():
     sig = DummySignal(
         symbol="SENSEX",
         instrument="SENSEX26OCT73100PE",
-        direction=Direction.LONG,
+        direction=Direction.SHORT,
         entry_price_hint=557.45,
         stop_loss=376.85,  # 180.6 pts risk
         target=589.45,     # 32.0 pts gain
@@ -105,7 +105,7 @@ def test_cost_buffer_guarantees_net_green_breakeven():
         symbol="SENSEX",
         instrument="SENSEX26OCT72900PE",
         underlying="SENSEX",
-        direction=Direction.LONG,
+        direction=Direction.SHORT,
         quantity=20,
         entry_price=603.85,
         entry_time=datetime.now(IST),
@@ -143,7 +143,7 @@ def test_exit_reason_trailing_stop_vs_stop_loss():
         symbol="SENSEX",
         instrument="SENSEX26OCT72900PE",
         underlying="SENSEX",
-        direction=Direction.LONG,
+        direction=Direction.SHORT,
         quantity=20,
         entry_price=603.85,
         entry_time=datetime.now(IST),
@@ -260,7 +260,7 @@ def test_in_trade_heartbeat_60s_cadence():
         symbol="SENSEX",
         instrument="SENSEX26OCT72900PE",
         underlying="SENSEX",
-        direction=Direction.LONG,
+        direction=Direction.SHORT,
         quantity=20,
         entry_price=603.85,
         entry_time=datetime.now(IST),
