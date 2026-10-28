@@ -17,7 +17,7 @@
   - **Tier C (Scalps / Chop / Counter-Trend)**: Aggressive micro-locking at $\ge 12.0$ pts gain ($\text{SL} = \text{Entry} + \text{Cost Buffer}$) to harvest chop alpha and protect capital against mean reversion.
   - **Tier S / Tier B (Trend Runners)**: Strictly preserve wide breathing room ($\ge 18.0$ pt Bank Nifty / $\ge 20.0$ pt Sensex breakeven threshold) to capture multi-ATR runners.
 - **Single-Lot Rule**: Sizing is strictly capped at 1 lot (`max_lots_per_trade: 1`). Because partial profit-booking is impossible on 1 lot, runner preservation is mathematically essential to offset inevitable stop-outs.
-- **Single-Lot Statutory Cost Floor**: A breakeven trailing stop must never use an arbitrary flat buffer (e.g. 1.5 pts). It must equal or exceed the maximum observed round-trip statutory fee hurdle plus buffer (Sensex >= 4.50 pts, Bank Nifty >= 5.20 pts, Nifty >= 1.40 pts) so that a breakeven exit never realizes a negative net rupee return.
+- **Single-Lot Statutory Cost Floor**: A breakeven trailing stop must never use an arbitrary flat buffer (e.g. 1.5 pts). It must equal or exceed the maximum observed round-trip statutory fee hurdle plus buffer (Sensex >= 5.50 pts, Bank Nifty >= 5.50 pts, FinNifty >= 2.60 pts, Nifty >= 2.00 pts) so that a breakeven exit never realizes a negative net rupee return.
 
 ## 3. Regime-Aware Target Calibration
 - **Macro Alignment**: If higher-timeframe (1H) trend is `NEUTRAL` or conflicting with a 15-minute breakout, or if Dealer GEX is strongly positive (`LONG_GAMMA`), target gain must be compressed to scalp boundaries (Bank Nifty: 20–30 pts, Sensex: 22–32 pts, Nifty: 8–14 pts) and retest expansion bypassed.
