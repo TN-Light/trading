@@ -137,11 +137,8 @@ def _reference_calibrate_target_and_sl(
 
         sl_pts = max(structural_sl_pts, noise_floor, round(0.55 * eom, 1))
 
-        # Retest Breathing Room Protection: scale target UP for Tier S/B
-        if sl_pts > round(target_gain_pts * 1.2, 1):
-            target_gain_pts = max(target_gain_pts, round(sl_pts * 1.2, 1))
-            if opt_ltp > 0:
-                target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.50, 1))
+        # Anti-Inflation Invariant: targets anchored to EOM, bypass sl_pts * 1.2 inflation
+        pass
 
         if opt_ltp > 0:
             sl_pts = min(sl_pts, round(opt_ltp * 0.35, 1))
@@ -508,25 +505,25 @@ class TestTier1FeatureCoverage:
         assert comp is True
         assert tgt <= 14.0, f"Tier C Nifty target {tgt} must NOT expand to 33.6 pts"
 
-    def test_f3_tier_s_b_preserves_dynamic_retest_expansion(self):
-        """F3.4: Tier B setup with structural SL (89.8 pts) DOES scale target to >= 107.8 pts."""
+    def test_f3_tier_s_b_anchors_uncompressed_target_to_eom(self):
+        """F3.4: Tier B setup retains uncompressed expected move target without target inflation."""
         tgt, sl, _, _, comp = self.calibrator(
             symbol="NIFTY BANK", spot_price=56000.0, spot_atr=88.0, opt_ltp=450.0,
             edge_score=7.0, tier="B", is_htf_aligned=True, gamma_regime="SHORT_GAMMA", net_gex=-5e6,
             structural_sl_pts=89.8
         )
         assert comp is False
-        assert tgt >= 100.0, f"Tier B must retain dynamic retest expansion ({tgt} >= 100 pts)"
+        assert tgt == pytest.approx(37.4, rel=0.1)
 
     def test_f3_tier_b_institutional_trend_day_retest_expansion(self):
-        """F3.5: Institutional Trend Day Tier B breakout retains expected 107.8 pt target."""
+        """F3.5: Institutional Trend Day Tier B breakout retains uncompressed expected move target."""
         tgt, sl, _, _, comp = self.calibrator(
             symbol="NIFTY BANK", spot_price=54800.0, spot_atr=88.0, opt_ltp=1055.0,
             edge_score=7.2, tier="B", is_htf_aligned=True, gamma_regime="SHORT_GAMMA", net_gex=-1e6,
             structural_sl_pts=89.8
         )
         assert comp is False
-        assert tgt == pytest.approx(107.8, rel=0.05)
+        assert tgt == pytest.approx(37.4, rel=0.1)
 
     # ------------------------------------------------------------------------
     # F4: Live In-Memory OI Snapshot Cache
@@ -1051,11 +1048,11 @@ class TestTier2BoundaryAndCornerCases:
         _, sl, _, _, _ = self.calibrator("NIFTY BANK", 56000.0, 88.0, 450.0, 5.0, "C", False, structural_sl_pts=-10.0)
         assert sl >= 35.0
 
-    def test_b13_tier_b_massive_structural_sl_scales_target(self):
-        """B13: Tier B with structural SL (120 pts) scales target to >= 144 pts (capped by premium)."""
+    def test_b13_tier_b_massive_structural_sl_does_not_inflate_target(self):
+        """B13: Tier B with structural SL (120 pts) does not inflate target into fantasy territory."""
         tgt, sl, _, _, comp = self.calibrator("NIFTY BANK", 56000.0, 88.0, 500.0, 7.5, "B", True, structural_sl_pts=120.0)
         assert comp is False
-        assert tgt >= 100.0
+        assert tgt < 60.0
 
     def test_b14_structural_sl_exact_1_2_multiplier_boundary(self):
         """B14: Structural SL exactly at target * 1.2 boundary evaluates cleanly."""
@@ -1445,14 +1442,14 @@ class TestTier3CrossFeatureCombinations:
         cr = res["metrics"]["commitment_ratio"]
         assert cr == pytest.approx(0.50, abs=0.01)
 
-        # Step 2: Tier B calibrates target with retest expansion
+        # Step 2: Tier B calibrates target anchored to EOM
         tgt, sl, _, _, comp = self.calibrator(
             symbol="NIFTY BANK", spot_price=56000.0, spot_atr=88.0, opt_ltp=400.0,
             edge_score=7.0, tier="B", is_htf_aligned=True, gamma_regime="NEUTRAL", net_gex=0.0,
             structural_sl_pts=80.0
         )
         assert comp is False
-        assert tgt >= 96.0  # scaled up by 80 * 1.2
+        assert tgt == pytest.approx(37.4, rel=0.1)
 
     def test_c4_tier_c_scalp_rapid_gain_plus_sub_minute_wall_clock_exit(self):
         """

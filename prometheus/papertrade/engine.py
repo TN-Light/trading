@@ -96,6 +96,7 @@ class PaperTradeEngine:
         default_max_bars_swing: int = 96,
         max_concurrent_positions: int = 200,
         allow_duplicate_instrument: bool = False,
+        enforce_risk_ceiling: bool = False,
     ):
         self.feed = feed
         self.signal_source = signal_source
@@ -103,6 +104,7 @@ class PaperTradeEngine:
         self.lot_size_override = int(lot_size_override)
         self.max_concurrent_positions = int(max_concurrent_positions)
         self.allow_duplicate_instrument = bool(allow_duplicate_instrument)
+        self.enforce_risk_ceiling = bool(enforce_risk_ceiling)
         self.default_max_bars_intraday = int(default_max_bars_intraday)
         self.default_max_bars_swing = int(default_max_bars_swing)
 
@@ -148,6 +150,13 @@ class PaperTradeEngine:
                         f"{p.trade_id} on same instrument/underlying"
                     )
                     return None
+
+        # Whitelist / Blacklist Guard (Rule 1 & GEMINI.md Section 1 invariant)
+        sym_u = (signal.symbol or "").upper()
+        if self.enforce_risk_ceiling and ("FIN SERVICE" in sym_u or "FINNIFTY" in sym_u):
+            self.signals_skipped_other += 1
+            logger.info(f"[PAPER] skip {signal.instrument}: NIFTY FIN SERVICE is permanently blacklisted.")
+            return None
 
         # 3. Resolve entry fill
         # Single-leg option buying (both CE for bullish and PE for bearish) always BUYS
@@ -199,6 +208,19 @@ class PaperTradeEngine:
                 if signal.trade_mode == "intraday"
                 else self.default_max_bars_swing
             )
+
+        # Structural Risk Ceiling Guard (Anti-Inflation Invariant):
+        # Rejects directional option buying signals where stop loss distance exceeds maximum allowable risk
+        fill_px = float(fill.fill_price)
+        if self.enforce_risk_ceiling and not is_spread and signal.stop_loss > 0 and fill_px > 0:
+            raw_hint = float(getattr(signal, "entry_price_hint", 0.0) or 0.0)
+            hint_base = raw_hint if raw_hint > 0 else fill_px
+            sl_dist = hint_base - signal.stop_loss
+            max_sl = 25.0 if ("NIFTY" in sym_u and "BANK" not in sym_u) else (65.0 if "BANK" in sym_u else (55.0 if ("SENSEX" in sym_u or "BSX" in sym_u) else 30.0))
+            if sl_dist > max_sl:
+                self.signals_skipped_other += 1
+                logger.info(f"[PAPER] skip {signal.instrument}: excessive SL risk ({sl_dist:.1f} pts > {max_sl:.1f} pts max threshold). Trade rejected.")
+                return None
 
         # Defensive: skip signals missing SL/target — they'd be useless paper trades
         if signal.stop_loss <= 0 or signal.target <= 0:

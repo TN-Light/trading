@@ -875,10 +875,13 @@ class TelegramBot:
             rank = signal.get("leaderboard_rank")
             from prometheus.signals.tier_classifier import classify_signal_tier
             tier_info = classify_signal_tier(signal)
-            assigned_tier = tier_info.get("tier", "C")
-            tier_badge = tier_info["tier_badge"]
+            assigned_tier = signal.get("tier") or tier_info.get("tier", "C")
+            tier_badge = signal.get("tier_badge") or tier_info["tier_badge"]
             action_line = tier_info["action_instruction"]
-            is_live_eligible = bool(tier_info.get("is_live_eligible", False))
+            is_live_eligible = bool(signal.get("is_live_eligible", tier_info.get("is_live_eligible", False)))
+            is_martingale_locked = bool(signal.get("is_martingale_locked_out", False))
+            if is_martingale_locked:
+                is_live_eligible = False
             is_live_execution = is_live_eligible and (rank is None or rank == 1) and assigned_tier in ("S", "A", "B")
 
             if is_live_execution:
@@ -886,14 +889,22 @@ class TelegramBot:
                 spread_execution_box = copy_boxes
                 spread_notice = "💡 <i>How to Execute on Kite: Open Basket Order ➔ Add BUY Hedge leg FIRST (to unlock margin discount) ➔ Add SELL leg.</i>\n"
             else:
-                action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
                 spread_execution_box = copy_boxes
-                reasons_str = "; ".join(html.escape(str(r)) for r in tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
-                spread_notice = (
-                    f"📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy. Do NOT execute on Kite with real capital.</i>\n"
-                    f"💡 <i>Spread Guideline (when live): Add BUY Hedge leg FIRST (to unlock margin benefit) ➔ Add SELL leg.</i>\n"
-                    f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
-                )
+                if is_martingale_locked:
+                    action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — [MARTINGALE LOCKOUT ACTIVE]</b> 📝📝📝\n"
+                    spread_notice = (
+                        f"🛡️ <b>Directional Martingale Lockout:</b> <i>This symbol/direction suffered an intraday stop-out earlier today. "
+                        f"Per GEMINI.md Rule 4, re-entry is strictly locked out to eliminate rolling-strike martingale ladders.</i>\n"
+                    )
+                else:
+                    action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
+                    reasons_list = signal.get("classification_reasons") or tier_info.get("classification_reasons", [])
+                    reasons_str = "; ".join(html.escape(str(r)) for r in reasons_list) or "Standard statistical paper tracking"
+                    spread_notice = (
+                        f"📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy. Do NOT execute on Kite with real capital.</i>\n"
+                        f"💡 <i>Spread Guideline (when live): Add BUY Hedge leg FIRST (to unlock margin benefit) ➔ Add SELL leg.</i>\n"
+                        f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
+                    )
 
             if rank:
                 if rank == 1:
@@ -1086,10 +1097,13 @@ class TelegramBot:
         rank = signal.get("leaderboard_rank")
         from prometheus.signals.tier_classifier import classify_signal_tier
         tier_info = classify_signal_tier(signal)
-        tier_badge = tier_info["tier_badge"]
-        action_line = tier_info["action_instruction"]
-        assigned_tier = tier_info["tier"]
-        is_live_eligible = bool(tier_info.get("is_live_eligible", False))
+        tier_badge = signal.get("tier_badge") or tier_info["tier_badge"]
+        action_line = signal.get("action_instruction") or tier_info["action_instruction"]
+        assigned_tier = signal.get("tier") or tier_info.get("tier", "C")
+        is_live_eligible = bool(signal.get("is_live_eligible", tier_info.get("is_live_eligible", False)))
+        is_martingale_locked = bool(signal.get("is_martingale_locked_out", False))
+        if is_martingale_locked:
+            is_live_eligible = False
         is_live_execution = is_live_eligible and (rank is None or rank == 1) and assigned_tier in ("S", "A", "B")
 
         if is_live_execution:
@@ -1097,13 +1111,21 @@ class TelegramBot:
             execution_copy_box = copy_box
             execution_notice = ""
         else:
-            action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
             execution_copy_box = copy_box
-            reasons_str = "; ".join(html.escape(str(r)) for r in tier_info.get("classification_reasons", [])) or "Standard statistical paper tracking"
-            execution_notice = (
-                f"\n📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy & edge calibration. Do NOT trade live with real capital.</i>\n"
-                f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
-            )
+            if is_martingale_locked:
+                action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — [MARTINGALE LOCKOUT ACTIVE]</b> 📝📝📝\n"
+                execution_notice = (
+                    f"\n🛡️ <b>Directional Martingale Lockout:</b> <i>This symbol/direction suffered an intraday stop-out earlier today. "
+                    f"Per GEMINI.md Rule 4, re-entry is strictly locked out to eliminate rolling-strike martingale ladders.</i>\n"
+                )
+            else:
+                action_banner = "📝📝📝 <b>ACTION: PAPER ONLY — DO NOT EXECUTE LIVE</b> 📝📝📝\n"
+                reasons_list = signal.get("classification_reasons") or tier_info.get("classification_reasons", [])
+                reasons_str = "; ".join(html.escape(str(r)) for r in reasons_list) or "Standard statistical paper tracking"
+                execution_notice = (
+                    f"\n📊 <b>Paper Engine Tracking:</b> <i>Tracking statistical expectancy & edge calibration. Do NOT trade live with real capital.</i>\n"
+                    f"⚠️ <b>Why Paper Only:</b> <i>{reasons_str}</i>\n"
+                )
 
         if rank:
             if rank == 1:

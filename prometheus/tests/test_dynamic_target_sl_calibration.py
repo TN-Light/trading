@@ -270,10 +270,10 @@ def test_tier_c_wide_structural_sl_bypasses_retest_expansion():
     assert res.sl_pts == pytest.approx(89.8, rel=1e-2)
 
 
-def test_tier_b_retains_uncompressed_target_and_retest_expansion():
+def test_tier_b_uncompressed_target_without_sl_inflation():
     """
-    Verify that Tier B (e.g. Institutional Trend Day / Golden Setup) retains full uncompressed
-    multi-ATR target calculation and dynamic retest expansion up to 107.8 pts.
+    Verify that Tier B (e.g. Institutional Trend Day / Golden Setup) retains uncompressed
+    multi-ATR target calculation anchored to EOM without artificially inflating target to sl_pts * 1.2.
     """
     res = calibrate_target_and_sl(
         symbol="NIFTY BANK",
@@ -285,12 +285,58 @@ def test_tier_b_retains_uncompressed_target_and_retest_expansion():
         is_htf_aligned=True,
         gamma_regime="LONG_GAMMA",
         net_gex=12211530.95,
-        structural_sl_pts=89.8,
+        structural_sl_pts=38.0,
     )
     assert res.is_compressed is False
-    # Retest expansion MUST trigger: max(target, round(89.8 * 1.2, 1)) = 107.8 pts
-    assert res.target_gain_pts == pytest.approx(107.8, rel=1e-2)
-    assert res.sl_pts == pytest.approx(89.8, rel=1e-2)
+    assert res.is_rejected is False
+    # Target gain remains naturally anchored to EOM * quality_mult (44.0 * 0.85 = 37.4 pts)
+    assert res.target_gain_pts == pytest.approx(37.4, rel=1e-2)
+    assert res.sl_pts == pytest.approx(38.0, rel=1e-2)
+
+
+def test_excessive_sl_rejection_gate():
+    """
+    Verify that excessive structural SL risk is strictly REJECTED instead of inflating targets
+    into unreachable fantasy numbers (preventing capital destruction like Oct 29 Trade #6).
+    """
+    # 1. NIFTY 50 with 50.4 pt SL (today's Trade #6 condition): must reject (max SL = 25.0)
+    res_nifty = calibrate_target_and_sl(
+        symbol="NIFTY 50",
+        spot_price=22858.3,
+        spot_atr=25.0,
+        opt_ltp=171.45,
+        edge_score=6.5,
+        tier="B",
+        is_htf_aligned=True,
+        structural_sl_pts=50.4,
+    )
+    assert res_nifty.is_rejected is True
+    assert "Excessive SL risk" in res_nifty.rejection_reason
+    assert res_nifty.target_gain_pts < 25.0  # Must NOT inflate to 60.5 pts!
+
+    # 2. SENSEX with 75.7 pt SL (today's Trade #7 condition): must reject (max SL = 55.0)
+    res_sensex = calibrate_target_and_sl(
+        symbol="SENSEX",
+        spot_price=73500.0,
+        spot_atr=98.0,
+        opt_ltp=212.0,
+        edge_score=6.5,
+        tier="C",
+        structural_sl_pts=75.7,
+    )
+    assert res_sensex.is_rejected is True
+
+    # 3. BANK NIFTY with 89.8 pt SL: must reject (max SL = 65.0)
+    res_bnf = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=54778.90,
+        spot_atr=88.0,
+        opt_ltp=1055.05,
+        edge_score=6.5,
+        tier="B",
+        structural_sl_pts=89.8,
+    )
+    assert res_bnf.is_rejected is True
 
 
 def test_tier_s_perfect_storm_uncompressed_target():

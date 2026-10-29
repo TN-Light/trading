@@ -32,6 +32,15 @@ class TargetCalibrationResult(NamedTuple):
     tgt_price: float
     sl_price: float
     is_compressed: bool
+    is_rejected: bool = False
+    rejection_reason: str = ""
+
+    def __iter__(self):
+        # 5-tuple backwards compatibility for unpacking (target_gain_pts, sl_pts, tgt_price, sl_price, is_compressed)
+        return iter((self.target_gain_pts, self.sl_pts, self.tgt_price, self.sl_price, self.is_compressed))
+
+    def __len__(self):
+        return 5
 
     @property
     def breakeven_trigger_pts(self) -> float:
@@ -56,6 +65,8 @@ class TargetCalibrationResult(NamedTuple):
             "sl_price": self.sl_price,
             "is_compressed": self.is_compressed,
             "breakeven_trigger_pts": self.breakeven_trigger_pts,
+            "is_rejected": self.is_rejected,
+            "rejection_reason": self.rejection_reason,
         }
 
 
@@ -145,10 +156,13 @@ def calibrate_target_and_sl(
           - Retest expansion (sl_pts * 1.2) is strictly bypassed.
           - is_compressed = True
         - If tier in ("S", "B"):
-          - Uncompressed multi-ATR target calculation with full retest expansion retained.
+          - Uncompressed multi-ATR target calculation anchored to market volatility and EOM.
           - High-VIX (>18.0) applies a 1.25x expansion multiplier to prevent exits inside noise.
-          - Enforces minimum 1.3:1 Risk:Reward floor.
           - is_compressed = False
+        - Trade Rejection Gate (Anti-Inflation Invariant):
+          - Bypasses artificial target inflation (sl_pts * 1.2).
+          - If structural SL exceeds maximum risk threshold (Nifty > 25.0, Sensex > 55.0, Bank Nifty > 65.0),
+            marks is_rejected = True with explicit rejection_reason.
     """
     sym_u = symbol.upper()
     if spot_atr <= 0:
@@ -247,15 +261,36 @@ def calibrate_target_and_sl(
 
     sl_pts = max(clean_structural_sl, actual_noise_floor, round(0.55 * eom, 1))
 
-    # Retest Breathing Room Protection:
-    # If structural retest SL requires more room than target_gain_pts * 1.2,
-    # dynamically scale target_gain_pts UP for uncompressed Tier S / Tier B runners.
-    # CRITICALLY: Strictly BYPASS dynamic retest expansion for compressed Tier C signals!
-    if not is_compressed:
-        if sl_pts > round(target_gain_pts * 1.2, 1):
-            target_gain_pts = max(target_gain_pts, round(sl_pts * 1.2, 1))
-            if opt_ltp > 0:
-                target_gain_pts = min(target_gain_pts, round(opt_ltp * 0.50, 1))
+    # Structural Risk Ceiling & Trade Rejection Gate (Anti-Inflation Invariant):
+    # In auction microstructure, targets must reflect the market's capacity to move (EOM/ATR/Regime),
+    # never scaled up to artificially match an extended or sloppy entry stop-loss.
+    # If structural risk exceeds the maximum allowable threshold for the instrument,
+    # the setup is Risk/Reward Unfavorable and must be strictly REJECTED, not entered with fantasy targets.
+    if "BANK" in sym_u:
+        base_max_sl = 65.0
+    elif "SENSEX" in sym_u or "BSX" in sym_u:
+        base_max_sl = 55.0
+    elif "NIFTY" in sym_u:
+        base_max_sl = 25.0
+    else:
+        base_max_sl = round(eom * 1.5, 1)
+
+    # Adaptive Volatility Ceiling: On elevated volatility (VIX > 18.0), scale allowable SL with ATR
+    # to avoid rejecting genuine multi-ATR trend runners during high-volatility expansions.
+    max_allowable_sl = base_max_sl
+    if is_low_vix is False and vix and vix > 18.0 and spot_atr > 0:
+        vol_sl_cap = round(0.40 * spot_atr, 1)
+        max_allowable_sl = max(base_max_sl, vol_sl_cap)
+
+    is_rejected = False
+    rejection_reason = ""
+    effective_check_sl = max(clean_structural_sl, sl_pts)
+    if effective_check_sl > max_allowable_sl:
+        is_rejected = True
+        rejection_reason = (
+            f"Excessive SL risk: {effective_check_sl:.1f} pts exceeds maximum allowable threshold "
+            f"({max_allowable_sl:.1f} pts) for {symbol}. Trade rejected (Risk/Reward Unfavorable)."
+        )
 
     # Hard Safety Ceiling: risk cap should never compress sl_pts below the minimum noise floor
     if opt_ltp > 0:
@@ -280,4 +315,6 @@ def calibrate_target_and_sl(
         tgt_price=tgt_price,
         sl_price=sl_price,
         is_compressed=is_compressed,
+        is_rejected=is_rejected,
+        rejection_reason=rejection_reason,
     )

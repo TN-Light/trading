@@ -187,7 +187,6 @@ intraday:
   - NIFTY 50
   - NIFTY BANK
   - SENSEX
-  - NIFTY FIN SERVICE
   bar_interval: auto
   use_backtest_generator: false
   breakeven_ratio: 0.4
@@ -197,7 +196,6 @@ intraday:
   - NIFTY 50
   - NIFTY BANK
   - SENSEX
-  - NIFTY FIN SERVICE
   golden_setup:
     enabled: true
     htf_interval: '60minute'
@@ -466,6 +464,8 @@ position_monitor:
   poll_interval_seconds: 15
   time_stop_bars_daily: 7
 risk:
+  daily_alpha_goal_lock: 1500.0
+  max_consecutive_stopouts: 2
   atr_multiplier: 2.0
   consecutive_losses_pause: 3
   drawdown_halt_pct: 50.0

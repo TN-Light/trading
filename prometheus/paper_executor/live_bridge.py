@@ -265,6 +265,24 @@ class CaptureConfig:
         )
 
 
+class StoppedOutDirectionsDict(dict):
+    """Dictionary mapping (symbol, trade_type) -> set of stopped-out tiers.
+
+    Provides backward-compatibility with set operations like .add((symbol, trade_type))
+    and membership tests (key in self).
+    """
+    def add(self, item):
+        if len(item) == 2:
+            sym, d = item
+            tier = "C"
+        else:
+            sym, d, tier = item
+        key = (sym, d)
+        if key not in self:
+            self[key] = set()
+        self[key].add(str(tier).upper())
+
+
 class LivePaperCapture:
     """Single-instance adapter used by Prometheus.
 
@@ -296,7 +314,7 @@ class LivePaperCapture:
         # The wrapped process_bar (below) emits a callback per close.
         self._on_close_listeners = []
         self._today_closed_instruments = set()
-        self._today_stopped_out_symbol_directions = set()
+        self._today_stopped_out_symbol_directions = StoppedOutDirectionsDict()
 
         # Construct the recorder (CSV+SQLite) directory-safe.
         Path(config.csv_path).parent.mkdir(parents=True, exist_ok=True)
@@ -344,6 +362,7 @@ class LivePaperCapture:
             default_max_bars_swing=config.default_max_bars_swing,
             max_concurrent_positions=config.max_concurrent_positions,
             allow_duplicate_instrument=config.allow_duplicate_instrument,
+            enforce_risk_ceiling=True,
         )
         # Replace the engine's auto-constructed tracker with our own
         # configured one (PaperTradeEngine builds a default in __init__,
@@ -439,9 +458,10 @@ class LivePaperCapture:
         # Symbol-Level Lockout on Stop-Outs to Eliminate Martingale Ladders
         sig_symbol = notif.symbol or refined_signal.get("symbol", "")
         sig_direction = self._get_signal_trade_type(refined_signal, notif)
-        if (sig_symbol, sig_direction) in self._today_stopped_out_symbol_directions:
+        sig_tier = refined_signal.get("tier") or getattr(notif, "tier", "C")
+        if self.is_direction_stopped_out(sig_symbol, refined_signal=refined_signal, tier=sig_tier):
             logger.info(
-                f"Skipping re-entry on {sig_symbol} ({sig_direction}): already suffered an intraday stop-out today"
+                f"Skipping re-entry on {sig_symbol} ({sig_direction}, Tier {sig_tier}): already suffered an intraday stop-out today"
             )
             return None
 
@@ -493,6 +513,107 @@ class LivePaperCapture:
         except Exception as e:
             logger.error(f"[PaperCapture] on_signal error: {e}")
             return None
+
+    def is_direction_stopped_out(
+        self, symbol: str, refined_signal: dict = None, direction: str = None, tier: str = None
+    ) -> bool:
+        """Check if (symbol, trade_type) has already suffered an intraday stop-out today.
+
+        Tier Isolation Invariant:
+        - Tier C is an experimental, paper-only sandbox for observation. A Tier C stop-out
+          in chop locks out subsequent Tier C trades, but NEVER locks out high-conviction
+          institutional setups (Tier S / Tier B).
+        - A Tier S or Tier B stop-out indicates that the institutional trend thesis itself failed,
+          so it locks out ALL tiers (S, B, and C) in that direction for the day.
+        """
+        if not self.enabled:
+            return False
+        if direction:
+            trade_type = str(direction)
+        elif refined_signal:
+            trade_type = self._get_signal_trade_type(refined_signal)
+        else:
+            return False
+
+        key = (symbol, trade_type)
+        if key not in self._today_stopped_out_symbol_directions:
+            return False
+
+        stopped_tiers = self._today_stopped_out_symbol_directions.get(key, set())
+        if not stopped_tiers:
+            return False
+
+        candidate_tier = str(
+            tier or (refined_signal.get("tier") if refined_signal else "C") or "C"
+        ).upper()
+
+        # High-conviction institutional setups (Tier S / Tier B) are ONLY locked out
+        # if a prior Tier S or Tier B setup stopped out in that direction today.
+        # Low-conviction experimental paper setups (Tier C) NEVER veto Tier S or Tier B.
+        if candidate_tier in ("S", "B"):
+            return ("S" in stopped_tiers) or ("B" in stopped_tiers)
+
+        # Low-conviction setups (Tier C) are locked out if ANY setup stopped out in that direction.
+        return len(stopped_tiers) > 0
+
+    def get_today_realized_net_pnl(self) -> float:
+        """Return total realized net PnL from live_ledger.sqlite for today."""
+        try:
+            import sqlite3
+            from datetime import datetime
+            import pytz
+            from pathlib import Path
+            IST = pytz.timezone("Asia/Kolkata")
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            ledger_db = getattr(self.config, "sqlite_path", None)
+            if not ledger_db or not Path(ledger_db).exists():
+                ledger_db = Path("reports/papertrade/live_ledger.sqlite")
+            with sqlite3.connect(str(ledger_db)) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE entry_time LIKE ?",
+                    (f"{today_str}%",),
+                )
+                row = cur.fetchone()
+                return float(row[0] or 0.0) if row else 0.0
+        except Exception as e:
+            logger.debug(f"[PaperCapture] get_today_realized_net_pnl failed: {e}")
+            return 0.0
+
+    def get_today_consecutive_losses(self, tiers: tuple = None) -> int:
+        """Return count of consecutive losing trades at the end of today's session.
+        If tiers is provided (e.g. ('S', 'A', 'B')), only counts consecutive losses
+        among setups belonging to those tiers, preventing Tier C sandbox noise from halting the system.
+        """
+        try:
+            import sqlite3
+            from datetime import datetime
+            import pytz
+            from pathlib import Path
+            IST = pytz.timezone("Asia/Kolkata")
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            ledger_db = getattr(self.config, "sqlite_path", None)
+            if not ledger_db or not Path(ledger_db).exists():
+                ledger_db = Path("reports/papertrade/live_ledger.sqlite")
+            with sqlite3.connect(str(ledger_db)) as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT net_pnl, tier FROM paper_trades WHERE entry_time LIKE ? ORDER BY entry_time DESC",
+                    (f"{today_str}%",),
+                )
+                rows = cur.fetchall()
+                consec = 0
+                for net_pnl, tier in rows:
+                    if tiers and (not tier or str(tier).upper() not in tiers):
+                        continue
+                    if float(net_pnl or 0.0) < 0:
+                        consec += 1
+                    else:
+                        break
+                return consec
+        except Exception as e:
+            logger.debug(f"[PaperCapture] get_today_consecutive_losses failed: {e}")
+            return 0
 
     def _build_signal_notification(self, refined_signal: dict):
         """Convert a refined signal dict to a SignalNotification, with
@@ -839,9 +960,10 @@ class LivePaperCapture:
         is_actual_loss = float(getattr(trade, "net_pnl", 0.0) or 0.0) < 0
         if str(raw_reason).lower() == "stop_loss" and is_actual_loss:
             trade_type = getattr(trade, "trade_type", None) or self._get_trade_type(trade)
-            self._today_stopped_out_symbol_directions.add((trade.symbol, trade_type))
+            trade_tier = getattr(trade, "tier", None) or "C"
+            self._today_stopped_out_symbol_directions.add((trade.symbol, trade_type, trade_tier))
             logger.info(
-                f"[PaperCapture] Stop-out recorded for {trade.symbol} ({trade_type}) with net loss Rs {trade.net_pnl:.2f} - locked out from re-entry today"
+                f"[PaperCapture] Stop-out recorded for {trade.symbol} ({trade_type}, Tier {trade_tier}) with net loss Rs {trade.net_pnl:.2f} - locked out from re-entry today"
             )
 
         self._alert_position_closed(trade)

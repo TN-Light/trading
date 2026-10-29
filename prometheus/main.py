@@ -2040,6 +2040,13 @@ class Prometheus:
         execution_signal = None
         cs_sig = None
 
+        # Whitelist & Blacklist Gate:
+        # Permanently blacklist NIFTY FIN SERVICE from directional option buying (Rule 1 & GEMINI.md Section 1 invariant)
+        sym_upper = symbol.upper()
+        if "FIN SERVICE" in sym_upper or "FINNIFTY" in sym_upper:
+            logger.info(f"Blacklist Gate: Skipped {symbol} (permanently blacklisted from intraday trading).")
+            return None
+
         # 1. Check Price Action & Momentum Breakout first (fast intraday edge)
         try:
             from prometheus.signals.price_action_momentum import PriceActionMomentumScanner
@@ -2240,6 +2247,14 @@ class Prometheus:
                     sl_pts = calib_res.sl_pts
                     tgt_price = calib_res.tgt_price
                     sl_price = calib_res.sl_price
+
+                    # Structural Risk Ceiling & Trade Rejection Gate (Anti-Inflation Invariant):
+                    # Strictly reject entries with bloated stop losses where risk exceeds achievable bounds.
+                    if getattr(calib_res, "is_rejected", False):
+                        logger.info(
+                            f"Risk/Reward Veto Gate: Rejected {symbol} {opt_type} signal - {calib_res.rejection_reason}"
+                        )
+                        opt_ltp = 0.0
 
                     pa_sig["low_vix_mode"] = is_low_vix
                     pa_sig["target_gain_pts"] = target_gain_pts
@@ -5318,6 +5333,35 @@ class Prometheus:
                 # force-closed on a stray late quote.
                 self._paper_capture_feed_bars(intraday_instruments, bar_interval)
 
+                # ── DAILY ALPHA GOAL LOCK & CHOP BRAKE ──
+                daily_alpha_target = float(get("risk.daily_alpha_goal_lock", 1500.0) or 1500.0)
+                max_consec_stops = int(get("risk.max_consecutive_stopouts", 2) or 2)
+                if getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
+                    today_net_pnl = self.paper_capture.get_today_realized_net_pnl()
+                    today_consec_stops = self.paper_capture.get_today_consecutive_losses(tiers=('S', 'A', 'B'))
+
+                    if daily_alpha_target > 0 and today_net_pnl >= daily_alpha_target:
+                        logger.info(
+                            f"{mode_label}: [DAILY ALPHA GOAL LOCKED] Realized Net PnL +Rs {today_net_pnl:,.2f} >= "
+                            f"Rs {daily_alpha_target:,.2f} goal. Capital preserved for session; suppressing new entries."
+                        )
+                        self.dashboard.show_status_line(
+                            f"{mode_label}: Alpha Goal Locked (+Rs {today_net_pnl:,.2f}). Monitoring open positions."
+                        )
+                        time.sleep(scan_interval)
+                        continue
+
+                    if max_consec_stops > 0 and today_consec_stops >= max_consec_stops:
+                        logger.info(
+                            f"{mode_label}: [CONSECUTIVE STOPOUT BRAKE] {today_consec_stops} consecutive stop-outs hit today. "
+                            f"Suppressed new entries to prevent choppy day drawdown."
+                        )
+                        self.dashboard.show_status_line(
+                            f"{mode_label}: Stop-Out Brake Active ({today_consec_stops} stops). Monitoring open positions."
+                        )
+                        time.sleep(scan_interval)
+                        continue
+
                 allow_mult = bool(get("intraday.allow_multiple_trades_per_symbol", True))
                 active_pos_symbols = self._get_active_positions_symbols()
                 is_lunch_dead_zone = (lunch_start_time <= current_time < lunch_end_time)
@@ -5337,9 +5381,13 @@ class Prometheus:
                         strat_type = str(refined.get("strategy_type", "")).lower()
                         is_buying = "option_buying" in strat_type or "BUY" in str(refined.get("action", ""))
 
-                        # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Trend Day
+                        # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Tier (S/A/B) or Trend Day
                         if is_lunch_dead_zone and is_buying:
-                            is_trend_day = bool(refined.get("is_institutional_trend_day"))
+                            from prometheus.signals.tier_classifier import classify_signal_tier
+                            tier_info = classify_signal_tier(refined)
+                            candidate_tier = tier_info.get("tier", "C")
+
+                            is_trend_day = bool(refined.get("is_institutional_trend_day")) or (candidate_tier in ("S", "A", "B"))
                             # Spot-volume proxy fallback: if not confirmed via volume, evaluate via range expansion
                             if not is_trend_day:
                                 adx_val = float(refined.get("adx", 0.0) or 0.0)
@@ -5410,9 +5458,34 @@ class Prometheus:
                             continue
                         candidates.append(refined)
 
-                # 2. Sort by conviction/edge score descending (Option Buying >= 3.5 has natural priority)
+                # 2. Classify candidate tiers and pre-screen martingale lockouts
+                from prometheus.signals.tier_classifier import classify_signal_tier
+                for cand in candidates:
+                    tier_info = classify_signal_tier(cand)
+                    cand["tier"] = tier_info["tier"]
+                    cand["tier_name"] = tier_info["tier_name"]
+                    cand["tier_badge"] = tier_info["tier_badge"]
+                    cand["action_instruction"] = tier_info["action_instruction"]
+                    cand["classification_reasons"] = list(tier_info.get("classification_reasons", []))
+                    cand["is_live_eligible"] = tier_info["is_live_eligible"]
+
+                    sym = cand.get("symbol", "")
+                    cand_tier = cand["tier"]
+                    if getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
+                        if self.paper_capture.is_direction_stopped_out(sym, refined_signal=cand, tier=cand_tier):
+                            cand["is_martingale_locked_out"] = True
+                            cand["is_live_eligible"] = False
+                            cand["classification_reasons"].append(
+                                f"Directional Martingale Lockout ({sym} {cand.get('action')} stopped out earlier today)"
+                            )
+                            cand["action_instruction"] = "Statistical paper tracking only (Directional Martingale Lockout)"
+
+                # Sort by live execution eligibility first, then score descending
                 candidates.sort(
-                    key=lambda s: float(s.get("signal_score", 0.0) or s.get("confidence", 0.0) or 0.0),
+                    key=lambda s: (
+                        not s.get("is_martingale_locked_out", False),
+                        float(s.get("signal_score", 0.0) or s.get("confidence", 0.0) or 0.0)
+                    ),
                     reverse=True
                 )
 
@@ -5422,16 +5495,6 @@ class Prometheus:
                     score = float(refined.get("signal_score", 0.0) or 0.0)
                     strat = refined.get("strategy_type", refined.get("strategy", ""))
                     is_rank_1 = (rank_idx == 0)
-
-                    # Classify institutional signal tier (S, A, B, C, D)
-                    from prometheus.signals.tier_classifier import classify_signal_tier
-                    tier_info = classify_signal_tier(refined)
-                    refined["tier"] = tier_info["tier"]
-                    refined["tier_name"] = tier_info["tier_name"]
-                    refined["is_live_eligible"] = tier_info["is_live_eligible"]
-                    refined["tier_badge"] = tier_info["tier_badge"]
-                    refined["action_instruction"] = tier_info["action_instruction"]
-                    refined["classification_reasons"] = tier_info["classification_reasons"]
 
                     # Decorate with rank metadata
                     refined["leaderboard_rank"] = rank_idx + 1
@@ -5997,9 +6060,13 @@ class Prometheus:
                                     strat_type = str(refined.get("strategy_type", "")).lower()
                                     is_buying = "option_buying" in strat_type or "BUY" in str(refined.get("action", ""))
 
-                                    # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Trend Day
+                                    # Lunch Dead Zone Gate: block Option Buying between 11:30 and 13:15 UNLESS Institutional Tier (S/A/B) or Trend Day
                                     if (lunch_start_time <= current_time < lunch_end_time) and is_buying:
-                                        is_trend_day = bool(refined.get("is_institutional_trend_day"))
+                                        from prometheus.signals.tier_classifier import classify_signal_tier
+                                        tier_info = classify_signal_tier(refined)
+                                        candidate_tier = tier_info.get("tier", "C")
+
+                                        is_trend_day = bool(refined.get("is_institutional_trend_day")) or (candidate_tier in ("S", "A", "B"))
                                         # Spot-volume proxy fallback: if not confirmed via volume, evaluate via range expansion
                                         if not is_trend_day:
                                             adx_val = float(refined.get("adx", 0.0) or 0.0)
