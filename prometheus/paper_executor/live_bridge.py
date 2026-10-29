@@ -556,8 +556,11 @@ class LivePaperCapture:
         # Low-conviction setups (Tier C) are locked out if ANY setup stopped out in that direction.
         return len(stopped_tiers) > 0
 
-    def get_today_realized_net_pnl(self) -> float:
-        """Return total realized net PnL from live_ledger.sqlite for today."""
+    def get_today_realized_net_pnl(self, tiers: tuple = None) -> float:
+        """Return total realized net PnL from live_ledger.sqlite for today.
+        If tiers is provided (e.g. ('S', 'A', 'B')), calculates net PnL exclusively
+        for those tiers, segregating live capital from Tier C experimental sandbox telemetry.
+        """
         try:
             import sqlite3
             from datetime import datetime
@@ -570,10 +573,17 @@ class LivePaperCapture:
                 ledger_db = Path("reports/papertrade/live_ledger.sqlite")
             with sqlite3.connect(str(ledger_db)) as conn:
                 cur = conn.cursor()
-                cur.execute(
-                    "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE entry_time LIKE ?",
-                    (f"{today_str}%",),
-                )
+                if tiers:
+                    placeholders = ",".join("?" for _ in tiers)
+                    cur.execute(
+                        f"SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE entry_time LIKE ? AND tier IN ({placeholders})",
+                        (f"{today_str}%", *tiers),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE entry_time LIKE ?",
+                        (f"{today_str}%",),
+                    )
                 row = cur.fetchone()
                 return float(row[0] or 0.0) if row else 0.0
         except Exception as e:

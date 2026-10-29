@@ -76,14 +76,21 @@ class StrategyDriftSupervisor:
                 try:
                     conn = sqlite3.connect(str(p))
                     cursor = conn.cursor()
+                    # Check if tier column exists to segregate live execution from Tier C noise
+                    cursor.execute("PRAGMA table_info(paper_trades)")
+                    cols = [col[1] for col in cursor.fetchall()]
+                    has_tier = "tier" in cols
+                    tier_clause = " AND (tier IS NULL OR tier IN ('S', 'A', 'B'))" if has_tier else ""
+                    tier_where = " WHERE (tier IS NULL OR tier IN ('S', 'A', 'B'))" if has_tier else ""
+
                     if strategy:
                         cursor.execute(
-                            "SELECT net_pnl FROM paper_trades WHERE strategy = ? ORDER BY rowid DESC LIMIT ?",
+                            f"SELECT net_pnl FROM paper_trades WHERE strategy = ?{tier_clause} ORDER BY rowid DESC LIMIT ?",
                             (strategy, self.rolling_window),
                         )
                     else:
                         cursor.execute(
-                            "SELECT net_pnl FROM paper_trades ORDER BY rowid DESC LIMIT ?",
+                            f"SELECT net_pnl FROM paper_trades{tier_where} ORDER BY rowid DESC LIMIT ?",
                             (self.rolling_window,),
                         )
                     rows = cursor.fetchall()

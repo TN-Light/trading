@@ -252,14 +252,15 @@ class Prometheus:
                 if ledger_db.exists():
                     with sqlite3.connect(str(ledger_db)) as conn:
                         cur = conn.cursor()
-                        cur.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades")
+                        # Segregate live capital (Tier S, A, B) from Tier C experimental learning sandbox
+                        cur.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM paper_trades WHERE tier IN ('S', 'A', 'B')")
                         cum_pnl = float(cur.fetchone()[0] or 0.0)
                         baseline_cap = float(self.initial_capital)
                         self.initial_capital = max(1000.0, baseline_cap + cum_pnl)
                         logger.info(
-                            f"[CONTINUOUS CAPITAL] Persistent Paper Capital loaded from live_ledger.sqlite: "
+                            f"[CONTINUOUS CAPITAL] Persistent Paper Capital loaded from live_ledger.sqlite (Tier S/A/B Live Only): "
                             f"Baseline Rs {baseline_cap:,.2f} + Cumulative Net PnL Rs {cum_pnl:+,.2f} = "
-                            f"Rs {self.initial_capital:,.2f}"
+                            f"Rs {self.initial_capital:,.2f} (Tier C experimental paper sandbox segregated)"
                         )
             except Exception as e:
                 logger.warning(f"[CONTINUOUS CAPITAL] Could not load cumulative PnL from ledger: {e}")
@@ -5339,7 +5340,7 @@ class Prometheus:
                 today_net_pnl = 0.0
                 is_alpha_locked = False
                 if getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
-                    today_net_pnl = self.paper_capture.get_today_realized_net_pnl()
+                    today_net_pnl = self.paper_capture.get_today_realized_net_pnl(tiers=('S', 'A', 'B'))
                     today_consec_stops = self.paper_capture.get_today_consecutive_losses(tiers=('S', 'A', 'B'))
 
                     if daily_alpha_target > 0 and today_net_pnl >= daily_alpha_target:
@@ -5472,11 +5473,15 @@ class Prometheus:
 
                     # Daily Alpha Goal Lock:
                     if is_alpha_locked:
-                        if cand_tier == "C":
+                        if cand_tier in ("C", "D"):
+                            # Tier C is strictly for research telemetry / continuous learning and never touches live capital.
+                            # Never suppress Tier C; route to shadow paper-tracking so learning never stops!
+                            cand["is_live_eligible"] = False
+                            cand["is_shadow_observation"] = True
+                            cand["action_instruction"] = "Statistical paper tracking only (Alpha Goal Locked - Shadow Track)"
                             logger.info(
-                                f"{mode_label}: [Alpha Goal Locked] Suppressed Tier C candidate on {sym} to protect session gains (+Rs {today_net_pnl:,.2f})."
+                                f"{mode_label}: [Alpha Goal Locked - Continuous Learning] Tier C candidate on {sym} routed to background paper tracking."
                             )
-                            continue
                         else:
                             # Tier S / Tier B: Allow in the high-edge afternoon session (>= 13:00) or on institutional trend days
                             is_afternoon_or_trend = (current_time >= "13:00") or bool(cand.get("is_institutional_trend_day"))

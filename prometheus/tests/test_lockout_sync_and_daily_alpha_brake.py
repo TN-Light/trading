@@ -247,3 +247,38 @@ def test_tier_aware_consecutive_losses_ignores_tier_c():
     # NIFTY 50 Tier B was the last Tier B trade (which was stopped by inactivity kill)
     tier_sb_consec = capture.get_today_consecutive_losses(tiers=("S", "A", "B"))
     assert tier_sb_consec == 1
+
+
+def test_tier_segregated_realized_net_pnl(tmp_path):
+    """Verify get_today_realized_net_pnl segregates Tier C experimental losses from live tiers."""
+    import sqlite3
+    class DummyFeed:
+        def get_ltp(self, inst): return 100.0
+
+    test_db = tmp_path / "test_ledger.sqlite"
+    with sqlite3.connect(str(test_db)) as conn:
+        conn.execute("""
+            CREATE TABLE paper_trades (
+                entry_time TEXT,
+                tier TEXT,
+                net_pnl REAL
+            )
+        """)
+        from datetime import datetime
+        import pytz
+        today_str = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S")
+        # Live Tier B win
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'B', 3080.0)", (today_str,))
+        # Experimental Tier C loss
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'C', -5000.0)", (today_str,))
+        conn.commit()
+
+    cfg = CaptureConfig(enabled=True, sqlite_path=str(test_db))
+    capture = LivePaperCapture(ltp_source=DummyFeed(), config=cfg)
+
+    # Total blended includes Tier C (-1920.0)
+    assert capture.get_today_realized_net_pnl() == 3080.0 - 5000.0
+
+    # Live-only (S, A, B) preserves pure +3080.0 profit!
+    live_pnl = capture.get_today_realized_net_pnl(tiers=("S", "A", "B"))
+    assert live_pnl == 3080.0
