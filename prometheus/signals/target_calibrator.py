@@ -294,13 +294,25 @@ def calibrate_target_and_sl(
 
     # Hard Safety Ceiling: risk cap should never compress sl_pts below the minimum noise floor
     if opt_ltp > 0:
+        # Dynamic Risk Cap: 35% of premium, capped at instrument ceiling (base_max_sl)
         max_risk_pts = round(opt_ltp * 0.35, 1)
         # Preserve noise envelope: do not compress stop inside instrument noise floor (GEMINI.md Rule 2)
-        effective_max_risk = max(max_risk_pts, actual_noise_floor)
+        effective_max_risk = max(actual_noise_floor, min(max_risk_pts, base_max_sl))
         if math.isnan(sl_pts):
             sl_pts = effective_max_risk
+        elif clean_structural_sl > 0:
+            # Preserve structural SL passed for excessive SL rejection checks
+            sl_pts = max(clean_structural_sl, actual_noise_floor)
         else:
             sl_pts = min(sl_pts, effective_max_risk)
+
+        # Golden Balance: Minimum Reward-to-Risk Invariant
+        # When targets are compressed to scalp boundaries (Tier C / Long Gamma),
+        # stop-loss must ALSO be compressed to prevent inverted risk (Risk > Reward).
+        if is_compressed and not (clean_structural_sl > 0):
+            sl_pts = min(sl_pts, max(actual_noise_floor, round(target_gain_pts * 1.25, 1)))
+        elif sl_pts > round(target_gain_pts * 1.25, 1) and not (clean_structural_sl > 0):
+            sl_pts = round(target_gain_pts * 1.25, 1)
 
     if opt_ltp > 0:
         tgt_price = round(opt_ltp + target_gain_pts, 2)
