@@ -5336,24 +5336,21 @@ class Prometheus:
                 # ── DAILY ALPHA GOAL LOCK & CHOP BRAKE ──
                 daily_alpha_target = float(get("risk.daily_alpha_goal_lock", 1500.0) or 1500.0)
                 max_consec_stops = int(get("risk.max_consecutive_stopouts", 2) or 2)
+                today_net_pnl = 0.0
+                is_alpha_locked = False
                 if getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
                     today_net_pnl = self.paper_capture.get_today_realized_net_pnl()
                     today_consec_stops = self.paper_capture.get_today_consecutive_losses(tiers=('S', 'A', 'B'))
 
                     if daily_alpha_target > 0 and today_net_pnl >= daily_alpha_target:
-                        logger.info(
-                            f"{mode_label}: [DAILY ALPHA GOAL LOCKED] Realized Net PnL +Rs {today_net_pnl:,.2f} >= "
-                            f"Rs {daily_alpha_target:,.2f} goal. Capital preserved for session; suppressing new entries."
-                        )
+                        is_alpha_locked = True
                         self.dashboard.show_status_line(
-                            f"{mode_label}: Alpha Goal Locked (+Rs {today_net_pnl:,.2f}). Monitoring open positions."
+                            f"{mode_label}: Alpha Goal Locked (+Rs {today_net_pnl:,.2f}). Tier C suppressed; Tier S/B afternoon active."
                         )
-                        time.sleep(scan_interval)
-                        continue
 
                     if max_consec_stops > 0 and today_consec_stops >= max_consec_stops:
                         logger.info(
-                            f"{mode_label}: [CONSECUTIVE STOPOUT BRAKE] {today_consec_stops} consecutive stop-outs hit today. "
+                            f"{mode_label}: [CONSECUTIVE STOPOUT BRAKE] {today_consec_stops} consecutive stop-outs hit today on Tier S/B. "
                             f"Suppressed new entries to prevent choppy day drawdown."
                         )
                         self.dashboard.show_status_line(
@@ -5458,8 +5455,9 @@ class Prometheus:
                             continue
                         candidates.append(refined)
 
-                # 2. Classify candidate tiers and pre-screen martingale lockouts
+                # 2. Classify candidate tiers and pre-screen martingale lockouts / alpha goal locks
                 from prometheus.signals.tier_classifier import classify_signal_tier
+                valid_candidates = []
                 for cand in candidates:
                     tier_info = classify_signal_tier(cand)
                     cand["tier"] = tier_info["tier"]
@@ -5471,6 +5469,28 @@ class Prometheus:
 
                     sym = cand.get("symbol", "")
                     cand_tier = cand["tier"]
+
+                    # Daily Alpha Goal Lock:
+                    if is_alpha_locked:
+                        if cand_tier == "C":
+                            logger.info(
+                                f"{mode_label}: [Alpha Goal Locked] Suppressed Tier C candidate on {sym} to protect session gains (+Rs {today_net_pnl:,.2f})."
+                            )
+                            continue
+                        else:
+                            # Tier S / Tier B: Allow in the high-edge afternoon session (>= 13:00) or on institutional trend days
+                            is_afternoon_or_trend = (current_time >= "13:00") or bool(cand.get("is_institutional_trend_day"))
+                            if is_afternoon_or_trend and (today_net_pnl >= daily_alpha_target * 0.7):
+                                logger.info(
+                                    f"{mode_label}: [Alpha Goal Locked] Allowing Tier {cand_tier} Institutional Setup on {sym} "
+                                    f"(Afternoon Gamma Squeeze / Trend Day unlocked with +Rs {today_net_pnl:,.2f} profit buffer)."
+                                )
+                            else:
+                                logger.info(
+                                    f"{mode_label}: [Alpha Goal Locked] Preserving +Rs {today_net_pnl:,.2f} profit; Tier {cand_tier} outside afternoon window suppressed."
+                                )
+                                continue
+
                     if getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
                         if self.paper_capture.is_direction_stopped_out(sym, refined_signal=cand, tier=cand_tier):
                             cand["is_martingale_locked_out"] = True
@@ -5479,6 +5499,9 @@ class Prometheus:
                                 f"Directional Martingale Lockout ({sym} {cand.get('action')} stopped out earlier today)"
                             )
                             cand["action_instruction"] = "Statistical paper tracking only (Directional Martingale Lockout)"
+
+                    valid_candidates.append(cand)
+                candidates = valid_candidates
 
                 # Sort by live execution eligibility first, then score descending
                 candidates.sort(
