@@ -171,20 +171,39 @@ def test_target_calibrator_adaptive_volatility_ceiling():
     assert res_high_vix.sl_pts == 30.0
 
 
-def test_live_bridge_today_net_pnl_and_consecutive_losses():
+def test_live_bridge_today_net_pnl_and_consecutive_losses(tmp_path):
     """Verify get_today_realized_net_pnl and get_today_consecutive_losses query live ledger."""
+    import sqlite3
+    from datetime import datetime
+    import pytz
+
     class DummyFeed:
         def get_ltp(self, inst): return 100.0
 
-    cfg = CaptureConfig(enabled=True)
+    test_db = tmp_path / "test_live_ledger.sqlite"
+    with sqlite3.connect(str(test_db)) as conn:
+        conn.execute("""
+            CREATE TABLE paper_trades (
+                entry_time TEXT,
+                tier TEXT,
+                net_pnl REAL
+            )
+        """)
+        dt_prefix = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d")
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'B', 200.0)", (f"{dt_prefix} 10:00:00",))
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'B', -300.0)", (f"{dt_prefix} 11:00:00",))
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'B', -515.0)", (f"{dt_prefix} 12:00:00",))
+        conn.commit()
+
+    cfg = CaptureConfig(enabled=True, sqlite_path=str(test_db))
     capture = LivePaperCapture(ltp_source=DummyFeed(), config=cfg)
     pnl = capture.get_today_realized_net_pnl()
     consec = capture.get_today_consecutive_losses()
-    # Today Oct 29 has trades in live_ledger.sqlite
+
     assert isinstance(pnl, float)
     assert isinstance(consec, int)
     assert pnl == -615.0
-    assert consec == 1
+    assert consec == 2
 
 
 def test_tier_b_candidate_not_locked_out_by_tier_c_stopout():
@@ -231,20 +250,41 @@ def test_tier_b_candidate_not_locked_out_by_tier_c_stopout():
     assert is_locked_c is True
 
 
-def test_tier_aware_consecutive_losses_ignores_tier_c():
+def test_tier_aware_consecutive_losses_ignores_tier_c(tmp_path):
     """Verify get_today_consecutive_losses with tier filter ignores Tier C shadow trades."""
+    import sqlite3
+    from datetime import datetime
+    import pytz
+
     class DummyFeed:
         def get_ltp(self, inst): return 100.0
 
-    cfg = CaptureConfig(enabled=True)
-    capture = LivePaperCapture(ltp_source=DummyFeed(), config=cfg)
-    
-    # Across all trades, today has 1 consecutive loss at the end (FinNifty Tier C)
-    total_consec = capture.get_today_consecutive_losses()
-    assert total_consec == 1
+    test_db = tmp_path / "test_tier_ledger.sqlite"
+    with sqlite3.connect(str(test_db)) as conn:
+        conn.execute("""
+            CREATE TABLE paper_trades (
+                entry_time TEXT,
+                tier TEXT,
+                net_pnl REAL
+            )
+        """)
+        dt_prefix = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d")
+        # Earlier Tier B win
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'B', 500.0)", (f"{dt_prefix} 10:00:00",))
+        # Last Tier B loss
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'B', -300.0)", (f"{dt_prefix} 11:00:00",))
+        # Latest trade is Tier C loss
+        conn.execute("INSERT INTO paper_trades VALUES (?, 'C', -100.0)", (f"{dt_prefix} 12:00:00",))
+        conn.commit()
 
-    # But among Tier S / Tier A / Tier B trades, FinNifty Tier C is ignored!
-    # NIFTY 50 Tier B was the last Tier B trade (which was stopped by inactivity kill)
+    cfg = CaptureConfig(enabled=True, sqlite_path=str(test_db))
+    capture = LivePaperCapture(ltp_source=DummyFeed(), config=cfg)
+
+    # Across all trades, today has 2 consecutive losses at the end (Tier B + Tier C)
+    total_consec = capture.get_today_consecutive_losses()
+    assert total_consec == 2
+
+    # But among Tier S / Tier A / Tier B trades, Tier C is ignored, so consecutive losses = 1!
     tier_sb_consec = capture.get_today_consecutive_losses(tiers=("S", "A", "B"))
     assert tier_sb_consec == 1
 

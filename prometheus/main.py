@@ -10068,12 +10068,14 @@ class Prometheus:
             today_str = date.today().strftime("%Y-%m-%d")
             conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
             c = conn.cursor()
-            c.execute("SELECT net_pnl FROM paper_trades WHERE recorded_at >= ?", (today_str,))
+            c.execute("SELECT net_pnl, gross_pnl FROM paper_trades WHERE substr(entry_time, 1, 10) = ?", (today_str,))
             rows = c.fetchall()
             if rows:
                 total_trades = len(rows)
                 daily_pnl = sum(r[0] for r in rows if r[0] is not None)
                 winning = sum(1 for r in rows if r[0] is not None and r[0] > 0)
+                gross_prof = sum(r[1] for r in rows if r[1] is not None and r[1] > 0)
+                gross_los = sum(r[1] for r in rows if r[1] is not None and r[1] < 0)
             conn.close()
         except Exception as e:
             logger.debug(f"Failed to query SQLite for daily summary: {e}")
@@ -10108,20 +10110,21 @@ class Prometheus:
         try:
             from prometheus.papertrade.metrics import record_daily_performance
             today_str = datetime.now().strftime("%Y-%m-%d")
-            total_tr = int(state.trades_today)
+            total_tr = int(total_trades)
             wins_cnt = int(winning)
             losses_cnt = max(0, total_tr - wins_cnt)
-            net_pnl_val = float(state.realized_pnl_today)
+            net_pnl_val = float(daily_pnl)
+            current_cap = float(getattr(self, "capital", state.capital))
             record_daily_performance(
                 date_str=today_str,
                 total_trades=total_tr,
                 wins=wins_cnt,
                 losses=losses_cnt,
-                gross_profit=max(0.0, net_pnl_val),
-                gross_loss=min(0.0, net_pnl_val),
-                net_pnl=net_pnl_val,
-                capital=float(state.capital),
-                notes="Intraday paper trading session",
+                gross_profit=round(gross_prof, 2) if 'gross_prof' in locals() else max(0.0, net_pnl_val),
+                gross_loss=round(gross_los, 2) if 'gross_los' in locals() else min(0.0, net_pnl_val),
+                net_pnl=round(net_pnl_val, 2),
+                capital=round(current_cap, 2),
+                notes=f"Intraday paper trading session: {total_tr} trades ({wins_cnt}W / {losses_cnt}L), Net P&L: Rs {net_pnl_val:+,.2f}",
             )
         except Exception as e:
             logger.debug(f"Failed to update daily performance ledger: {e}")
@@ -10745,7 +10748,7 @@ class Prometheus:
             today_str = date.today().strftime("%Y-%m-%d")
             conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
             c = conn.cursor()
-            c.execute("SELECT net_pnl FROM paper_trades WHERE recorded_at >= ?", (today_str,))
+            c.execute("SELECT net_pnl, gross_pnl FROM paper_trades WHERE substr(entry_time, 1, 10) = ?", (today_str,))
             rows = c.fetchall()
             if rows:
                 trades_count = len(rows)

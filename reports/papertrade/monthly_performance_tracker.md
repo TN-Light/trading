@@ -2,8 +2,8 @@
 
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 41,726.28 (-278.18%)**  
-**Last Updated:** 2026-10-29 16:05:53 IST  
+**Current Realized Net P&L:** **🔴 -Rs 41,260.07 (-275.07%)**  
+**Last Updated:** 2026-10-30 16:27:03 IST  
 
 ---
 
@@ -11,14 +11,14 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 41,726.28** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-278.18%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **43** | 20–22 days | In Progress |
-| **Green / Red Days** | **11 Green / 20 Red / 12 BE** | > 65% Green | 25.6% |
-| **Total Trades** | **152** | ~3–5 / day | Tracked |
-| **Win Rate** | **37.5%** (57W / 95L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.62** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 50,981.47 | — | Winning Trades |
+| **Net Realized P&L** | **-Rs 41,260.07** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-275.07%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **44** | 20–22 days | In Progress |
+| **Green / Red Days** | **12 Green / 20 Red / 12 BE** | > 65% Green | 27.3% |
+| **Total Trades** | **154** | ~3–5 / day | Tracked |
+| **Win Rate** | **38.3%** (59W / 95L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.63** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 51,624.79 | — | Winning Trades |
 | **Gross Loss** | -Rs 81,939.20 | — | Losing Trades |
 
 ---
@@ -70,6 +70,7 @@
 | **2026-10-27** | 4 | 1W / 3L | 25% | +Rs 156 | -Rs 1,883 | **🔴 -Rs 2,085.1** | -2.4% | **-Rs 40,651.5** | Day 20: 4 trades executed (1 Win / 3 Losses, 25.0% WR). Gross -Rs 1726.93, Costs Rs 358.13, Net -Rs 2085.06. FINNIFTY 24500CE (Tier C) banked +Rs 76.15 net on defensive micro-lock. NIFTY 22750CE (-Rs 878.60 net) & SENSEX 73600CE (-Rs 870.13 net) Tier B calls stopped out into +102k Cr Long Gamma dealer supply absorption. FINNIFTY Bear Call Spread (-Rs 412.48 net) Tier A stopped out on 0-DTE gamma spike. |
 | **2026-10-28** | 4 | 2W / 2L | 50% | +Rs 461 | -Rs 567 | **🔴 -Rs 459.8** | -0.6% | **-Rs 41,111.3** | Day 21: 4 trades executed (2 Wins / 2 Losses, 50.0% WR). Gross -Rs 106.60, Costs Rs 353.22, Net -Rs 459.82. Morning Put Buying trades affected by in-memory target inversion defect. Patched and restarted at 11:35; afternoon session had 0 trades due to Lunch Dead Zone gate and Short Gamma spread protection saving capital against +921 pt SENSEX squeeze. |
 | **2026-10-29** | 9 | 6W / 3L | 67% | +Rs 3,053 | -Rs 2,623 | **🔴 -Rs 615.0** | -0.6% | **-Rs 41,726.3** | Automated session sync: 9 paper trades (Tier S/B isolated) |
+| **2026-10-30** | 2 | 2W / 0L | 100% | +Rs 643 | -Rs 0 | **🟢 +Rs 466.2** | +0.5% | **-Rs 41,260.1** | Day 22: 2 trades executed (2 Wins / 0 Losses, 100.0% WR). Gross +Rs 643.32, Costs Rs 177.11, Net +Rs 466.21. SENSEX 74400CE (+Rs 231.86 net) & NIFTY 23000CE (+Rs 234.35 net) banked on 11:15 ORB breakout. Afternoon chop avoided via Short Gamma spread veto. |
 
 ---
 
