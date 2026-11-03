@@ -84,6 +84,16 @@ class PriceActionMomentumScanner:
         if len(today_bars) < 3:
             return None
 
+        # Opening gap calculation relative to previous session close
+        opening_gap_pct = 0.0
+        if current_date is not None:
+            prev_day_bars = df[df["timestamp"].dt.date < current_date]
+            if len(prev_day_bars) > 0:
+                prev_close = float(prev_day_bars["close"].iloc[-1])
+                today_open = float(today_bars["open"].iloc[0])
+                if prev_close > 0:
+                    opening_gap_pct = (today_open - prev_close) / prev_close
+
         # ── 1. Calculate Technical Overlays ──
         close = float(current_row["close"])
         high = float(current_row["high"])
@@ -106,7 +116,13 @@ class PriceActionMomentumScanner:
                 vwap_val = float(vwap_df["vwap"].iloc[-1])
                 vwap = vwap_val if not np.isnan(vwap_val) and vwap_val > 0 else float(typical_price.iloc[-1])
             else:
-                vwap = float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
+                # Session-anchored typical price fallback for 0-volume index spot
+                if current_date is not None:
+                    today_mask = (df["timestamp"].dt.date == current_date)
+                    today_tp = typical_price[today_mask]
+                    vwap = float(today_tp.expanding(min_periods=1).mean().iloc[-1]) if len(today_tp) > 0 else float(typical_price.iloc[-1])
+                else:
+                    vwap = float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
         except Exception:
             vwap = close
 
@@ -398,6 +414,7 @@ class PriceActionMomentumScanner:
                 "body_displacement": round(body_displacement, 2),
                 "has_range_expansion": bool(has_session_bull_expansion),
                 "adx": round(adx_val, 1),
+                "opening_gap_pct": round(opening_gap_pct, 4),
             }
 
         elif bear_score >= min_threshold and net_edge <= -1.5:
@@ -457,6 +474,7 @@ class PriceActionMomentumScanner:
                 "body_displacement": round(body_displacement, 2),
                 "has_range_expansion": bool(has_session_bear_expansion),
                 "adx": round(adx_val, 1),
+                "opening_gap_pct": round(opening_gap_pct, 4),
             }
 
         return None
@@ -506,7 +524,13 @@ class PriceActionMomentumScanner:
                 vwap_val = float(vwap_df["vwap"].iloc[-1])
                 vwap = vwap_val if not np.isnan(vwap_val) and vwap_val > 0 else float(typical_price.iloc[-1])
             else:
-                vwap = float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
+                cur_d = current_ts.date() if hasattr(current_ts, "date") else None
+                if cur_d is not None and "timestamp" in df_5m.columns:
+                    d_mask = (df_5m["timestamp"].dt.date == cur_d)
+                    d_tp = typical_price[d_mask]
+                    vwap = float(d_tp.expanding(min_periods=1).mean().iloc[-1]) if len(d_tp) > 0 else float(typical_price.iloc[-1])
+                else:
+                    vwap = float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
         except Exception:
             vwap = close
 

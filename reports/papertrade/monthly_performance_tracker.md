@@ -3,7 +3,7 @@
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
 **Current Realized Net P&L:** **🔴 -Rs 41,260.07 (-275.07%)**  
-**Last Updated:** 2026-10-30 16:27:03 IST  
+**Last Updated:** 2026-11-03 16:00:10 IST  
 
 ---
 
@@ -13,8 +13,8 @@
 | :--- | :---: | :---: | :---: |
 | **Net Realized P&L** | **-Rs 41,260.07** | +Rs 5,000 / month | 🔴 |
 | **Month Return %** | **-275.07%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **44** | 20–22 days | In Progress |
-| **Green / Red Days** | **12 Green / 20 Red / 12 BE** | > 65% Green | 27.3% |
+| **Total Trading Days** | **46** | 20–22 days | In Progress |
+| **Green / Red Days** | **12 Green / 20 Red / 14 BE** | > 65% Green | 26.1% |
 | **Total Trades** | **154** | ~3–5 / day | Tracked |
 | **Win Rate** | **38.3%** (59W / 95L) | > 55.0% | ⚠️ Under Review |
 | **Profit Factor** | **0.63** | > 1.50 | ⚠️ Under Review |
@@ -71,6 +71,8 @@
 | **2026-10-28** | 4 | 2W / 2L | 50% | +Rs 461 | -Rs 567 | **🔴 -Rs 459.8** | -0.6% | **-Rs 41,111.3** | Day 21: 4 trades executed (2 Wins / 2 Losses, 50.0% WR). Gross -Rs 106.60, Costs Rs 353.22, Net -Rs 459.82. Morning Put Buying trades affected by in-memory target inversion defect. Patched and restarted at 11:35; afternoon session had 0 trades due to Lunch Dead Zone gate and Short Gamma spread protection saving capital against +921 pt SENSEX squeeze. |
 | **2026-10-29** | 9 | 6W / 3L | 67% | +Rs 3,053 | -Rs 2,623 | **🔴 -Rs 615.0** | -0.6% | **-Rs 41,726.3** | Automated session sync: 9 paper trades (Tier S/B isolated) |
 | **2026-10-30** | 2 | 2W / 0L | 100% | +Rs 643 | -Rs 0 | **🟢 +Rs 466.2** | +0.5% | **-Rs 41,260.1** | Day 22: 2 trades executed (2 Wins / 0 Losses, 100.0% WR). Gross +Rs 643.32, Costs Rs 177.11, Net +Rs 466.21. SENSEX 74400CE (+Rs 231.86 net) & NIFTY 23000CE (+Rs 234.35 net) banked on 11:15 ORB breakout. Afternoon chop avoided via Short Gamma spread veto. |
+| **2026-11-02** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 41,260.1** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
+| **2026-11-03** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 41,260.1** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
 
 ---
 

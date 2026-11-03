@@ -82,6 +82,53 @@ class TestAsymmetricGEXGate:
         assert res["tier_name"] == "PERFECT_STORM"
         assert res["is_live_eligible"] is True
 
+    def test_call_buying_large_gap_up_in_neutral_gamma_demoted_to_tier_c(self):
+        """Asymmetric GEX Gap Invariant: Call buying after >= +0.50% gap without Short Gamma is gated to Tier C."""
+        signal = {
+            "action": "BUY_CE",
+            "symbol": "NIFTY 50",
+            "strategy": "Golden_Setup (1H+VWAP+ORB)",
+            "is_golden_setup": True,
+            "edge_score": 8.0,
+            "bar_timestamp": "2026-11-02 10:15:00",
+            "net_gex": 0.0,
+            "gamma_regime": "NEUTRAL",
+            "opening_gap_pct": 0.0073,  # +0.73% gap-up
+            "reasons": [
+                "15M_ORB_High_Breakout",
+                "Session_VWAP_Bullish",
+                "1H_Trend_Bullish",
+            ],
+            "is_0dte": False,
+        }
+        res = classify_signal_tier(signal)
+        assert res["tier"] == "C"
+        assert res["is_live_eligible"] is False
+        assert any("Overnight Gap-and-Trap Protection" in r for r in res["classification_reasons"])
+
+    def test_call_buying_large_gap_up_in_short_gamma_permitted_tier_b(self):
+        """Asymmetric GEX Gap Invariant: Call buying after >= +0.50% gap WITH Short Gamma is live eligible (Tier B)."""
+        signal = {
+            "action": "BUY_CE",
+            "symbol": "NIFTY 50",
+            "strategy": "Golden_Setup (1H+VWAP+ORB)",
+            "is_golden_setup": True,
+            "edge_score": 8.0,
+            "bar_timestamp": "2026-11-03 10:15:00",
+            "net_gex": -281000000000.0,  # Deep Short Gamma
+            "gamma_regime": "SHORT_GAMMA",
+            "opening_gap_pct": 0.0060,  # +0.60% gap-up
+            "reasons": [
+                "15M_ORB_High_Breakout",
+                "Session_VWAP_Bullish",
+                "1H_Trend_Bullish",
+            ],
+            "is_0dte": False,
+        }
+        res = classify_signal_tier(signal)
+        assert res["tier"] in ("S", "B")
+        assert res["is_live_eligible"] is True
+
     def test_gex_regime_tagging_in_papertrade_and_position(self):
         """PaperTrade and Position dataclasses must automatically infer gex_regime."""
         pos_long = Position(

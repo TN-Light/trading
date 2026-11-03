@@ -211,7 +211,15 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         )
         gamma_reg = str(signal.get("gamma_regime", "")).upper()
         is_dealer_long_gamma = (net_gex_cr > 1.5) or (gamma_reg == "LONG_GAMMA" and net_gex_cr > 0.5)
-        is_gex_gated_call = is_dealer_long_gamma and is_call
+
+        # Asymmetric GEX Gap Invariant (GEMINI.md Section 1):
+        # Following an overnight gap >= +0.50% (50 bps), Call Buying is strictly gated to Tier C
+        # UNLESS Dealer Short Gamma (gamma squeeze runner regime where dealers delta-hedge by buying) is confirmed.
+        opening_gap = float(signal.get("opening_gap_pct", 0.0) or 0.0)
+        is_large_gap_up = opening_gap >= 0.0050
+        is_gap_trapped_call = is_large_gap_up and is_call and (is_dealer_long_gamma or gamma_reg != "SHORT_GAMMA")
+
+        is_gex_gated_call = (is_dealer_long_gamma or is_gap_trapped_call) and is_call
 
         # Time Window Validation (60-day Angel One empirical tick distribution):
         # Window A (Morning): 09:30 - 11:30 IST (Primary ORB & momentum impulses)
@@ -363,11 +371,12 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         if score >= 3.5:
             missing = []
             if is_gex_gated_call:
-                missing.append(
-                    f"Asymmetric GEX Gate: Call Buying (LONG) strictly gated in Positive Dealer Gamma "
-                    f"(+{net_gex_cr:.1f}Cr >= +1.5Cr). Institutional dealers absorb upside momentum "
-                    f"(Empirical 12.5% WR, -Rs 5,882 loss across 8 historical trades; routed to Tier C Paper Only)"
+                reason_detail = (
+                    f"Overnight Gap-and-Trap Protection (Gap +{opening_gap*100:.2f}% >= +0.50% without Short Gamma squeeze confirmation; routed to Tier C Paper Only)"
+                    if is_gap_trapped_call and not is_dealer_long_gamma
+                    else f"Asymmetric GEX Gate: Call Buying (LONG) strictly gated in Positive Dealer Gamma (+{net_gex_cr:.1f}Cr >= +1.5Cr). Institutional dealers absorb upside momentum (Empirical 12.5% WR, -Rs 5,882 loss across 8 historical trades; routed to Tier C Paper Only)"
                 )
+                missing.append(reason_detail)
             if not is_htf_aligned:
                 missing.append("1H HTF Trend is NEUTRAL or Conflicting (Chop Risk)")
             if not has_orb:
