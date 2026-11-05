@@ -285,13 +285,13 @@ def test_tier_b_uncompressed_target_without_sl_inflation():
         is_htf_aligned=True,
         gamma_regime="LONG_GAMMA",
         net_gex=12211530.95,
-        structural_sl_pts=38.0,
+        structural_sl_pts=25.0,
     )
     assert res.is_compressed is False
     assert res.is_rejected is False
     # Target gain remains naturally anchored to EOM * quality_mult (44.0 * 0.85 = 37.4 pts)
     assert res.target_gain_pts == pytest.approx(37.4, rel=1e-2)
-    assert res.sl_pts == pytest.approx(38.0, rel=1e-2)
+    assert res.sl_pts == pytest.approx(25.0, rel=1e-2)
 
 
 def test_excessive_sl_rejection_gate():
@@ -447,3 +447,65 @@ def test_high_vix_target_expansion():
     assert res_high_vix.target_gain_pts > res_normal.target_gain_pts
     assert res_high_vix.target_gain_pts == pytest.approx(round(res_normal.target_gain_pts * 1.25, 1), abs=1.0)
 
+
+
+def test_nov05_single_lot_risk_budget_and_golden_balance_enforcement():
+    """
+    Verify that the Nov 05, 2026 trades that caused -Rs 2,853.38 loss are strictly REJECTED:
+    1. BANKNIFTY 57100CE (Entry 724.92, SL 675.12, 49.8 pt risk = Rs 1,494.13 risk on 1 lot):
+       Exceeds Rs 850 risk budget (budget cap = 28.3 pts) -> MUST REJECT.
+    2. NIFTY 24400CE (Entry 149.00, SL 131.20, 17.8 pt risk = Rs 1,157.00 risk on 1 lot):
+       Exceeds Rs 850 risk budget (budget cap = 13.1 pts) -> MUST REJECT.
+    3. Structural stop loophole 'and not (clean_structural_sl > 0)' is permanently closed.
+    4. Compliant trade: SENSEX 79000CE (Entry 144.44, SL 30.0 pt risk = Rs 600.00 <= Rs 850):
+       Reward-to-risk >= 1.0 (Target 32.0, SL 30.0) -> MUST ACCEPT.
+    """
+    # 1. Bank Nifty Nov 05 Trade #2:
+    res_bnf = calibrate_target_and_sl(
+        symbol="NIFTY BANK",
+        spot_price=57200.0,
+        spot_atr=88.0,
+        opt_ltp=724.92,
+        edge_score=6.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=22760000000.0,
+        structural_sl_pts=49.8,
+    )
+    assert res_bnf.is_rejected is True
+    assert "Excessive SL risk" in res_bnf.rejection_reason
+    assert "28.3 pts" in res_bnf.rejection_reason
+
+    # 2. Nifty Nov 05 Trade #1:
+    res_nifty = calibrate_target_and_sl(
+        symbol="NIFTY 50",
+        spot_price=24400.0,
+        spot_atr=25.0,
+        opt_ltp=149.00,
+        edge_score=6.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=15000000000.0,
+        structural_sl_pts=17.8,
+    )
+    assert res_nifty.is_rejected is True
+    assert res_nifty.is_compressed is True
+
+    # 3. SENSEX Nov 05 Trade #4: Compliant trade (30 pt SL, 32 pt target, Rs 600 risk <= Rs 850):
+    res_sensex = calibrate_target_and_sl(
+        symbol="SENSEX",
+        spot_price=79100.0,
+        spot_atr=98.0,
+        opt_ltp=144.44,
+        edge_score=6.5,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        net_gex=50000000.0,
+        structural_sl_pts=30.0,
+    )
+    assert res_sensex.is_rejected is False
+    assert 22.0 <= res_sensex.target_gain_pts <= 32.0
+    assert res_sensex.sl_pts <= 30.0

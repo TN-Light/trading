@@ -363,7 +363,7 @@ class TestTier1FeatureCoverage:
         assert comp is True, "Tier C counter-trend or positive gamma must set is_compressed=True"
         assert 20.0 <= tgt <= 30.0, f"Bank Nifty compressed target {tgt} must be in [20, 30] pts"
         assert tgt_px == round(415.0 + tgt, 2)
-        assert sl >= 35.0, "SL must respect Bank Nifty noise floor (>= 35 pts)"
+        assert sl >= 20.0, "SL must respect Bank Nifty noise floor (>= 20 pts)"
 
     def test_f1_tier_c_sensex_target_compression(self):
         """F1.2: Sensex Tier C signals compress targets strictly into [22.0, 32.0] pts."""
@@ -374,7 +374,7 @@ class TestTier1FeatureCoverage:
         assert comp is True
         assert 22.0 <= tgt <= 32.0, f"Sensex compressed target {tgt} must be in [22, 32] pts"
         assert tgt_px == round(350.0 + tgt, 2)
-        assert sl >= 30.0, "SL must respect Sensex noise floor (>= 30 pts)"
+        assert sl >= 22.0, "SL must respect Sensex noise floor (>= 22 pts)"
 
     def test_f1_tier_c_nifty_target_compression(self):
         """F1.3: NIFTY 50 Tier C signals compress targets strictly into [8.0, 14.0] pts."""
@@ -385,7 +385,7 @@ class TestTier1FeatureCoverage:
         assert comp is True
         assert 8.0 <= tgt <= 14.0, f"Nifty compressed target {tgt} must be in [8, 14] pts"
         assert tgt_px == round(120.0 + tgt, 2)
-        assert sl >= 10.0, "SL must respect Nifty noise floor (>= 10 pts)"
+        assert sl >= 8.0, "SL must respect Nifty noise floor (>= 8 pts)"
 
     def test_f1_tier_c_counter_trend_triggers_compression(self):
         """F1.4: Tier C with is_htf_aligned=False triggers compression even if net_gex=0."""
@@ -1046,7 +1046,7 @@ class TestTier2BoundaryAndCornerCases:
     def test_b12_tier_c_zero_and_negative_structural_sl(self):
         """B12: Tier C with structural SL <= 0 clamps sl_pts to noise floor."""
         _, sl, _, _, _ = self.calibrator("NIFTY BANK", 56000.0, 88.0, 450.0, 5.0, "C", False, structural_sl_pts=-10.0)
-        assert sl >= 35.0
+        assert sl >= 20.0
 
     def test_b13_tier_b_massive_structural_sl_does_not_inflate_target(self):
         """B13: Tier B with structural SL (120 pts) does not inflate target into fantasy territory."""

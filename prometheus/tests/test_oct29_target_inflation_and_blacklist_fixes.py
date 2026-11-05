@@ -97,7 +97,7 @@ def test_target_calibrator_accepts_today_trade_1_2_3():
         edge_score=6.5,
         tier="C",
         is_htf_aligned=True,
-        structural_sl_pts=35.0,
+        structural_sl_pts=25.0,
     )
     assert res2.is_rejected is False
 

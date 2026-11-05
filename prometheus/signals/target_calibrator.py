@@ -23,6 +23,7 @@ Market Microstructure Rationale:
 """
 
 from typing import NamedTuple, Dict, Any, Optional, Tuple
+from prometheus.utils.indian_market import get_lot_size
 
 
 class TargetCalibrationResult(NamedTuple):
@@ -89,11 +90,11 @@ def calculate_structural_sl(
     sym_u = symbol.upper()
     if noise_floor is None:
         if "BANK" in sym_u:
-            noise_floor = 35.0
+            noise_floor = 20.0
         elif "SENSEX" in sym_u or "BSX" in sym_u:
-            noise_floor = 30.0
+            noise_floor = 22.0
         else:
-            noise_floor = 10.0
+            noise_floor = 8.0
 
     # Instrument Retest Buffer:
     # Minimum buffer below/above breakout line to absorb normal retest wicks
@@ -191,14 +192,15 @@ def calibrate_target_and_sl(
         quality_mult *= 1.25  # High-VIX (> 18.0) runner expansion multiplier
 
     # Default Instrument Noise Floors & Min Targets
+    # Option noise floor matches bid-ask + 1-min candle noise: BNF 18-20 pts, Sensex 22 pts, Nifty 8 pts
     if "BANK" in sym_u:
-        default_noise_floor = 35.0
+        default_noise_floor = 20.0
         default_min_target = 25.0
     elif "SENSEX" in sym_u or "BSX" in sym_u:
-        default_noise_floor = 30.0
+        default_noise_floor = 22.0
         default_min_target = 22.0
     else:
-        default_noise_floor = 10.0
+        default_noise_floor = 8.0
         default_min_target = 8.0
 
     actual_noise_floor = noise_floor if noise_floor is not None else default_noise_floor
@@ -261,11 +263,7 @@ def calibrate_target_and_sl(
 
     sl_pts = max(clean_structural_sl, actual_noise_floor, round(0.55 * eom, 1))
 
-    # Structural Risk Ceiling & Trade Rejection Gate (Anti-Inflation Invariant):
-    # In auction microstructure, targets must reflect the market's capacity to move (EOM/ATR/Regime),
-    # never scaled up to artificially match an extended or sloppy entry stop-loss.
-    # If structural risk exceeds the maximum allowable threshold for the instrument,
-    # the setup is Risk/Reward Unfavorable and must be strictly REJECTED, not entered with fantasy targets.
+    # Base allowable SL per instrument
     if "BANK" in sym_u:
         base_max_sl = 65.0
     elif "SENSEX" in sym_u or "BSX" in sym_u:
@@ -274,6 +272,23 @@ def calibrate_target_and_sl(
         base_max_sl = 25.0
     else:
         base_max_sl = round(eom * 1.5, 1)
+
+    # Single-Lot Absolute Rupee Risk Ceiling (GEMINI.md Section 7):
+    # On single-lot option buying (max_lots_per_trade: 1), the maximum allowable rupee risk
+    # on any single entry must never exceed a hard risk budget (<= Rs 800–Rs 850).
+    # Stop loss points are strictly capped by Max SL Points = min(base_max_sl, Rs 850 / lot_size).
+    lot_size = get_lot_size(symbol)
+    if lot_size <= 1:
+        if "BANK" in sym_u:
+            lot_size = 30
+        elif "SENSEX" in sym_u or "BSX" in sym_u:
+            lot_size = 20
+        elif "NIFTY" in sym_u:
+            lot_size = 65
+
+    if lot_size > 0:
+        budget_sl_cap = round(850.0 / lot_size, 1)
+        base_max_sl = min(base_max_sl, budget_sl_cap)
 
     # Adaptive Volatility Ceiling: On elevated volatility (VIX > 18.0), scale allowable SL with ATR
     # to avoid rejecting genuine multi-ATR trend runners during high-volatility expansions.
@@ -284,8 +299,18 @@ def calibrate_target_and_sl(
 
     is_rejected = False
     rejection_reason = ""
+
+    # Rejection Check 1: Compressed Target < Instrument Noise Floor (GEMINI.md Section 7)
+    if is_compressed and target_gain_pts < actual_noise_floor:
+        is_rejected = True
+        rejection_reason = (
+            f"Compressed target ({target_gain_pts:.1f} pts) < noise floor ({actual_noise_floor:.1f} pts) "
+            f"for {symbol}. Trade structurally unviable (Reward/Risk Inverted)."
+        )
+
+    # Rejection Check 2: Structural Risk Ceiling (GEMINI.md Section 7)
     effective_check_sl = max(clean_structural_sl, sl_pts)
-    if effective_check_sl > max_allowable_sl:
+    if not is_rejected and effective_check_sl > max_allowable_sl:
         is_rejected = True
         rejection_reason = (
             f"Excessive SL risk: {effective_check_sl:.1f} pts exceeds maximum allowable threshold "
@@ -306,13 +331,15 @@ def calibrate_target_and_sl(
         else:
             sl_pts = min(sl_pts, effective_max_risk)
 
-        # Golden Balance: Minimum Reward-to-Risk Invariant
+        # Golden Balance: Minimum Reward-to-Risk Invariant (GEMINI.md Section 7)
         # When targets are compressed to scalp boundaries (Tier C / Long Gamma),
         # stop-loss must ALSO be compressed to prevent inverted risk (Risk > Reward).
-        if is_compressed and not (clean_structural_sl > 0):
-            sl_pts = min(sl_pts, max(actual_noise_floor, round(target_gain_pts * 1.25, 1)))
-        elif sl_pts > round(target_gain_pts * 1.25, 1) and not (clean_structural_sl > 0):
-            sl_pts = round(target_gain_pts * 1.25, 1)
+        # Removed loophole 'and not (clean_structural_sl > 0)' which allowed bloated stops.
+        if not is_rejected:
+            if is_compressed:
+                sl_pts = min(sl_pts, max(actual_noise_floor, round(target_gain_pts * 1.25, 1)))
+            elif sl_pts > round(target_gain_pts * 1.25, 1):
+                sl_pts = round(target_gain_pts * 1.25, 1)
 
     if opt_ltp > 0:
         tgt_price = round(opt_ltp + target_gain_pts, 2)

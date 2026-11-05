@@ -33,6 +33,8 @@ LOT_SIZES = {
     "BANKNIFTY": 30,
     "FINNIFTY": 60,
     "SENSEX": 20,
+    "BSX": 20,
+    "BANKEX": 30,
 
     "NIFTY MIDCAP SELECT": 120,
     "NIFTY NEXT 50": 25,

@@ -87,6 +87,7 @@ def fake_chain():
     fetcher = _FakeFetcher(obj)
     chain = AngelOneOptionChain(fetcher)
     chain._min_interval = 0.0  # Disable rate-limiting sleeps for fast unit tests
+    chain._lookup_previous_oi_baseline = MagicMock(return_value=None)
     return chain, obj
 
 

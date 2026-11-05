@@ -2,8 +2,8 @@
 
 **Tracking Period:** August 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 41,260.07 (-275.07%)**  
-**Last Updated:** 2026-11-03 16:00:10 IST  
+**Current Realized Net P&L:** **🔴 -Rs 44,079.23 (-293.86%)**  
+**Last Updated:** 2026-11-05 16:00:21 IST  
 
 ---
 
@@ -11,15 +11,15 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 41,260.07** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-275.07%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **46** | 20–22 days | In Progress |
-| **Green / Red Days** | **12 Green / 20 Red / 14 BE** | > 65% Green | 26.1% |
-| **Total Trades** | **154** | ~3–5 / day | Tracked |
-| **Win Rate** | **38.3%** (59W / 95L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.63** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 51,624.79 | — | Winning Trades |
-| **Gross Loss** | -Rs 81,939.20 | — | Losing Trades |
+| **Net Realized P&L** | **-Rs 44,079.23** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-293.86%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **47** | 20–22 days | In Progress |
+| **Green / Red Days** | **12 Green / 21 Red / 14 BE** | > 65% Green | 25.5% |
+| **Total Trades** | **158** | ~3–5 / day | Tracked |
+| **Win Rate** | **38.0%** (60W / 98L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 51,845.39 | — | Winning Trades |
+| **Gross Loss** | -Rs 84,590.26 | — | Losing Trades |
 
 ---
 
@@ -73,6 +73,7 @@
 | **2026-10-30** | 2 | 2W / 0L | 100% | +Rs 643 | -Rs 0 | **🟢 +Rs 466.2** | +0.5% | **-Rs 41,260.1** | Day 22: 2 trades executed (2 Wins / 0 Losses, 100.0% WR). Gross +Rs 643.32, Costs Rs 177.11, Net +Rs 466.21. SENSEX 74400CE (+Rs 231.86 net) & NIFTY 23000CE (+Rs 234.35 net) banked on 11:15 ORB breakout. Afternoon chop avoided via Short Gamma spread veto. |
 | **2026-11-02** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 41,260.1** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
 | **2026-11-03** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 41,260.1** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
+| **2026-11-05** | 4 | 1W / 3L | 25% | +Rs 221 | -Rs 2,651 | **🔴 -Rs 2,819.2** | -2.8% | **-Rs 44,079.2** | Intraday paper trading session: 4 trades (1W / 3L), Net P&L: Rs -2,819.16 |
 
 ---
 
