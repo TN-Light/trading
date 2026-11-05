@@ -266,8 +266,8 @@ def test_tier_c_wide_structural_sl_bypasses_retest_expansion():
     assert 20.0 <= res.target_gain_pts <= 30.0
     assert res.target_gain_pts == pytest.approx(24.2, rel=1e-2)
     assert res.target_gain_pts < 35.0  # Must NOT inflate to 107.8 pts!
-    # SL preserves structural protection
-    assert res.sl_pts == pytest.approx(89.8, rel=1e-2)
+    # SL preserves structural protection clamped by single-lot risk ceiling (850 / 30 = 28.3 pts)
+    assert res.sl_pts == pytest.approx(28.3, rel=1e-2)
 
 
 def test_tier_b_uncompressed_target_without_sl_inflation():
@@ -294,12 +294,13 @@ def test_tier_b_uncompressed_target_without_sl_inflation():
     assert res.sl_pts == pytest.approx(25.0, rel=1e-2)
 
 
-def test_excessive_sl_rejection_gate():
+def test_excessive_sl_clamping_and_noise_protection():
     """
-    Verify that excessive structural SL risk is strictly REJECTED instead of inflating targets
-    into unreachable fantasy numbers (preventing capital destruction like Oct 29 Trade #6).
+    Verify that excessive structural SL risk is strictly CLAMPED to the Rs 850 budget ceiling
+    instead of inflating targets into unreachable fantasy numbers, while rejecting trades
+    where compressed target is smaller than the instrument noise floor.
     """
-    # 1. NIFTY 50 with 50.4 pt SL (today's Trade #6 condition): must reject (max SL = 25.0)
+    # 1. NIFTY 50 with 50.4 pt SL: clamped to 13.1 pts (Rs 850 budget) without rejection
     res_nifty = calibrate_target_and_sl(
         symbol="NIFTY 50",
         spot_price=22858.3,
@@ -310,11 +311,11 @@ def test_excessive_sl_rejection_gate():
         is_htf_aligned=True,
         structural_sl_pts=50.4,
     )
-    assert res_nifty.is_rejected is True
-    assert "Excessive SL risk" in res_nifty.rejection_reason
+    assert res_nifty.is_rejected is False
+    assert res_nifty.sl_pts == 13.1  # Clamped to Rs 850 budget ceiling (13.1 pts)
     assert res_nifty.target_gain_pts < 25.0  # Must NOT inflate to 60.5 pts!
 
-    # 2. SENSEX with 75.7 pt SL (today's Trade #7 condition): must reject (max SL = 55.0)
+    # 2. SENSEX with 75.7 pt SL: clamped to 42.5 pts (Rs 850 budget) without rejection
     res_sensex = calibrate_target_and_sl(
         symbol="SENSEX",
         spot_price=73500.0,
@@ -324,9 +325,10 @@ def test_excessive_sl_rejection_gate():
         tier="C",
         structural_sl_pts=75.7,
     )
-    assert res_sensex.is_rejected is True
+    assert res_sensex.is_rejected is False
+    assert res_sensex.sl_pts == 33.8  # Golden balance: 27.0 * 1.25 <= 42.5
 
-    # 3. BANK NIFTY with 89.8 pt SL: must reject (max SL = 65.0)
+    # 3. BANK NIFTY with 89.8 pt SL: clamped to 28.3 pts (Rs 850 budget) without rejection
     res_bnf = calibrate_target_and_sl(
         symbol="NIFTY BANK",
         spot_price=54778.90,
@@ -336,7 +338,23 @@ def test_excessive_sl_rejection_gate():
         tier="B",
         structural_sl_pts=89.8,
     )
-    assert res_bnf.is_rejected is True
+    assert res_bnf.is_rejected is False
+    assert res_bnf.sl_pts == 28.3
+
+    # 4. Truly unviable setup: Compressed Target < Noise Floor -> Strictly REJECTED
+    res_unviable = calibrate_target_and_sl(
+        symbol="SENSEX",
+        spot_price=73500.0,
+        spot_atr=20.0,
+        opt_ltp=50.0,
+        edge_score=5.0,
+        tier="C",
+        is_htf_aligned=False,
+        gamma_regime="LONG_GAMMA",
+        noise_floor=35.0,
+    )
+    assert res_unviable.is_rejected is True
+    assert "Compressed target" in res_unviable.rejection_reason
 
 
 def test_tier_s_perfect_storm_uncompressed_target():
@@ -413,9 +431,9 @@ def test_interface_contract_5tuple_unpacking():
     )
     target_gain_pts, sl_pts, tgt_price, sl_price, is_compressed = res
     assert target_gain_pts == pytest.approx(24.2, rel=1e-2)
-    assert sl_pts == pytest.approx(35.0, rel=1e-2)
+    assert sl_pts == pytest.approx(28.3, rel=1e-2)
     assert tgt_price == pytest.approx(439.2, rel=1e-2)
-    assert sl_price == pytest.approx(380.0, rel=1e-2)
+    assert sl_price == pytest.approx(386.7, rel=1e-2)
     assert is_compressed is True
     assert res["target_gain_pts"] == target_gain_pts
     assert res.to_dict()["is_compressed"] is True
@@ -460,7 +478,7 @@ def test_nov05_single_lot_risk_budget_and_golden_balance_enforcement():
     4. Compliant trade: SENSEX 79000CE (Entry 144.44, SL 30.0 pt risk = Rs 600.00 <= Rs 850):
        Reward-to-risk >= 1.0 (Target 32.0, SL 30.0) -> MUST ACCEPT.
     """
-    # 1. Bank Nifty Nov 05 Trade #2:
+    # 1. Bank Nifty Nov 05 Trade #2: SL clamped to Rs 850 budget (28.3 pts) without rejection
     res_bnf = calibrate_target_and_sl(
         symbol="NIFTY BANK",
         spot_price=57200.0,
@@ -473,11 +491,10 @@ def test_nov05_single_lot_risk_budget_and_golden_balance_enforcement():
         net_gex=22760000000.0,
         structural_sl_pts=49.8,
     )
-    assert res_bnf.is_rejected is True
-    assert "Excessive SL risk" in res_bnf.rejection_reason
-    assert "28.3 pts" in res_bnf.rejection_reason
+    assert res_bnf.is_rejected is False
+    assert res_bnf.sl_pts == 28.3
 
-    # 2. Nifty Nov 05 Trade #1:
+    # 2. Nifty Nov 05 Trade #1: SL clamped to Rs 850 budget (13.1 pts) without rejection
     res_nifty = calibrate_target_and_sl(
         symbol="NIFTY 50",
         spot_price=24400.0,
@@ -490,7 +507,8 @@ def test_nov05_single_lot_risk_budget_and_golden_balance_enforcement():
         net_gex=15000000000.0,
         structural_sl_pts=17.8,
     )
-    assert res_nifty.is_rejected is True
+    assert res_nifty.is_rejected is False
+    assert res_nifty.sl_pts == 11.8  # Golden balance: 9.4 * 1.25 <= 13.1
     assert res_nifty.is_compressed is True
 
     # 3. SENSEX Nov 05 Trade #4: Compliant trade (30 pt SL, 32 pt target, Rs 600 risk <= Rs 850):

@@ -109,7 +109,7 @@ def test_post_exit_tracker_put_option_buying_shakeout_logic():
 
 
 def test_target_calibrator_preserves_noise_floor_under_premium_cap():
-    """Verify that Bank Nifty SL is not capped below the 35.0 pt noise floor on cheap options."""
+    """Verify that Bank Nifty SL preserves the 20.0 pt noise floor and Rs 850 budget ceiling on cheap options."""
     # Cheap option at Rs 80 on Bank Nifty: 80 * 0.35 = 28.0 pts
     res = calibrate_target_and_sl(
         symbol="NIFTY BANK",
@@ -122,8 +122,9 @@ def test_target_calibrator_preserves_noise_floor_under_premium_cap():
         structural_sl_pts=38.0,
     )
 
-    # sl_pts must preserve the 35.0 pt noise floor rather than compressing to 28.0 pts
-    assert res.sl_pts >= 35.0, f"Bank Nifty SL must not be compressed inside 35 pt noise floor, got {res.sl_pts}"
+    # sl_pts must preserve the 20.0 pt noise floor while respecting Rs 850 budget cap (28.3 pts)
+    assert res.sl_pts >= 20.0, f"Bank Nifty SL must not be compressed inside 20 pt noise floor, got {res.sl_pts}"
+    assert res.sl_pts <= 28.3, f"Bank Nifty SL must respect Rs 850 single-lot risk ceiling (28.3 pts), got {res.sl_pts}"
 
 
 def test_settings_yaml_consistency():

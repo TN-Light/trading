@@ -308,38 +308,49 @@ def calibrate_target_and_sl(
             f"for {symbol}. Trade structurally unviable (Reward/Risk Inverted)."
         )
 
-    # Rejection Check 2: Structural Risk Ceiling (GEMINI.md Section 7)
-    effective_check_sl = max(clean_structural_sl, sl_pts)
-    if not is_rejected and effective_check_sl > max_allowable_sl:
+    # Rejection Check 2: Risk budget below instrument noise floor (GEMINI.md Rule 2 & 7)
+    # If the single-lot risk ceiling is tighter than the instrument's 1-min noise envelope,
+    # placing an SL inside noise would cause immediate chop stop-outs.
+    if not is_rejected and max_allowable_sl < actual_noise_floor:
         is_rejected = True
         rejection_reason = (
-            f"Excessive SL risk: {effective_check_sl:.1f} pts exceeds maximum allowable threshold "
-            f"({max_allowable_sl:.1f} pts) for {symbol}. Trade rejected (Risk/Reward Unfavorable)."
+            f"Risk budget cap ({max_allowable_sl:.1f} pts) < noise floor ({actual_noise_floor:.1f} pts) "
+            f"for {symbol}. Trade structurally unviable (Noise Floor Breach)."
         )
+
+    # Zero-Sacrifice Clamping Invariant (GEMINI.md Section 7):
+    # Instead of discarding high-conviction setups when structural SL exceeds the risk budget,
+    # strictly CLAMP the stop-loss to max_allowable_sl (<= Rs 850 budget / lot_size).
+    if not is_rejected:
+        sl_pts = min(sl_pts, max_allowable_sl)
+        if clean_structural_sl > 0:
+            clean_structural_sl = min(clean_structural_sl, max_allowable_sl)
 
     # Hard Safety Ceiling: risk cap should never compress sl_pts below the minimum noise floor
     if opt_ltp > 0:
         # Dynamic Risk Cap: 35% of premium, capped at instrument ceiling (base_max_sl)
         max_risk_pts = round(opt_ltp * 0.35, 1)
         # Preserve noise envelope: do not compress stop inside instrument noise floor (GEMINI.md Rule 2)
-        effective_max_risk = max(actual_noise_floor, min(max_risk_pts, base_max_sl))
+        effective_max_risk = max(actual_noise_floor, min(max_risk_pts, max_allowable_sl))
         if math.isnan(sl_pts):
             sl_pts = effective_max_risk
         elif clean_structural_sl > 0:
-            # Preserve structural SL passed for excessive SL rejection checks
-            sl_pts = max(clean_structural_sl, actual_noise_floor)
+            # Clamp structural SL to max_allowable_sl and preserve noise floor
+            sl_pts = max(actual_noise_floor, min(clean_structural_sl, max_allowable_sl))
         else:
             sl_pts = min(sl_pts, effective_max_risk)
 
         # Golden Balance: Minimum Reward-to-Risk Invariant (GEMINI.md Section 7)
         # When targets are compressed to scalp boundaries (Tier C / Long Gamma),
         # stop-loss must ALSO be compressed to prevent inverted risk (Risk > Reward).
-        # Removed loophole 'and not (clean_structural_sl > 0)' which allowed bloated stops.
         if not is_rejected:
             if is_compressed:
                 sl_pts = min(sl_pts, max(actual_noise_floor, round(target_gain_pts * 1.25, 1)))
             elif sl_pts > round(target_gain_pts * 1.25, 1):
-                sl_pts = round(target_gain_pts * 1.25, 1)
+                sl_pts = max(actual_noise_floor, round(target_gain_pts * 1.25, 1))
+
+    if not is_rejected:
+        sl_pts = max(actual_noise_floor, min(sl_pts, max_allowable_sl))
 
     if opt_ltp > 0:
         tgt_price = round(opt_ltp + target_gain_pts, 2)

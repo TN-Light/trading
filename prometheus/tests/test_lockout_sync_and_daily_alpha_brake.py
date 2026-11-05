@@ -152,8 +152,9 @@ def test_target_calibrator_adaptive_volatility_ceiling():
         vix=15.5,
         structural_sl_pts=30.0,
     )
-    # SL 30.0 > 25.0 cap in normal VIX -> Rejected
-    assert res_normal.is_rejected is True
+    # Under normal VIX, SL is strictly clamped to Rs 850 budget ceiling (13.1 pts) without rejection
+    assert res_normal.is_rejected is False
+    assert res_normal.sl_pts == 13.1
 
     # High VIX (24.0) with spot_atr=90.0:
     # vol_sl_cap = 0.40 * 90.0 = 36.0 pts. SL 30.0 <= 36.0 cap -> Accepted!

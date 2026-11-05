@@ -33,12 +33,12 @@ def test_finnifty_removed_from_settings_yaml():
     assert "FINNIFTY" not in instruments
 
 
-def test_target_calibrator_rejects_today_trade_6_and_7():
+def test_target_calibrator_clamps_today_trade_6_and_7():
     """
-    Verify target calibrator strictly REJECTS setups matching today's Trade #6 and Trade #7
-    where bloated structural stops caused massive drawdowns and inactivity kill switches.
+    Verify target calibrator strictly CLAMPS setups matching today's Trade #6 and Trade #7
+    to the single-lot Rs 850 risk ceiling (preventing runaway loss while avoiding trade sacrifice).
     """
-    # Trade #6: NIFTY 50 Golden Setup with 50.4 pt SL
+    # Trade #6: NIFTY 50 Golden Setup with 50.4 pt SL -> clamped to 13.1 pts (Rs 850 budget)
     res6 = calibrate_target_and_sl(
         symbol="NIFTY 50",
         spot_price=22858.3,
@@ -49,11 +49,11 @@ def test_target_calibrator_rejects_today_trade_6_and_7():
         is_htf_aligned=True,
         structural_sl_pts=50.4,
     )
-    assert res6.is_rejected is True
-    assert "Excessive SL risk" in res6.rejection_reason
+    assert res6.is_rejected is False
+    assert res6.sl_pts == 13.1
     assert res6.target_gain_pts < 25.0  # Must NOT be 60.5 pts!
 
-    # Trade #7: SENSEX PriceAction Momentum with 75.7 pt SL
+    # Trade #7: SENSEX PriceAction Momentum with 75.7 pt SL -> clamped to 42.5 pts (Rs 850 budget)
     res7 = calibrate_target_and_sl(
         symbol="SENSEX",
         spot_price=73500.0,
@@ -63,8 +63,8 @@ def test_target_calibrator_rejects_today_trade_6_and_7():
         tier="C",
         structural_sl_pts=75.7,
     )
-    assert res7.is_rejected is True
-    assert "Excessive SL risk" in res7.rejection_reason
+    assert res7.is_rejected is False
+    assert res7.sl_pts == 33.8  # Golden balance: 27.0 * 1.25 <= 42.5
 
 
 def test_target_calibrator_accepts_today_trade_1_2_3():
