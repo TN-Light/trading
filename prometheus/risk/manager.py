@@ -405,13 +405,15 @@ class RiskManager:
         if position_cost > max_cost:
             lots = int(max_cost / (entry_price * lot_size))
             if lots < 1:
-                # If small account 1-lot floor applies and risk is within 6%, allow 1 lot if cost <= 50% capital
+                # Single-lot option buying floor: allow 1 lot if single-lot risk <= budget cap (<= Rs 850)
+                # and total cost <= 50% capital (prevents rejecting valid options on Rs 100k accounts)
                 one_lot_risk = risk_per_unit * lot_size
                 one_lot_cost = entry_price * lot_size
+                single_lot_risk_ceiling = min(self.current_capital * 0.06, 850.0)
                 if (
-                    self.current_capital < 50000
-                    and one_lot_risk <= min(self.current_capital * 0.06, 850.0)
+                    one_lot_risk <= single_lot_risk_ceiling
                     and one_lot_cost <= (self.current_capital * 0.50)
+                    and dd_mult > 0.0
                 ):
                     lots = 1
                 else:

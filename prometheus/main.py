@@ -2092,11 +2092,28 @@ class Prometheus:
                 except Exception as syn_e:
                     logger.debug(f"Could not synthesize 1H bars for {symbol}: {syn_e}")
 
+            # Fetch options chain / OI telemetry upfront for Check G (OI Wall Veto) & Check F (Option Volume)
+            oi_data = None
+            atm_option_vol = 0.0
+            prefetched_chain = None
+            try:
+                spot_est = float(intra_df["close"].iloc[-1]) if intra_df is not None and not intra_df.empty else 0.0
+                if spot_est > 0:
+                    prefetched_chain = self.data.fetch_options_chain(symbol)
+                    if prefetched_chain is not None and not prefetched_chain.empty and hasattr(self, "oi_analyzer") and self.oi_analyzer:
+                        oi_res = self.oi_analyzer.analyze(prefetched_chain, spot_est)
+                        if oi_res and "metrics" in oi_res:
+                            oi_data = oi_res["metrics"]
+                            atm_option_vol = float(oi_data.get("atm_option_volume", 0.0) or 0.0)
+            except Exception as oi_err:
+                logger.debug(f"OI pre-fetch error for {symbol}: {oi_err}")
+
             pa_sig = None
             is_exp = is_weekly_expiry_day(symbol)
             if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
                 pa_sig = self._pa_momentum_scanner.evaluate_bar(
-                    intra_df, symbol=symbol, is_expiry_day=is_exp, df_1h=df_1h, golden_mode=True
+                    intra_df, symbol=symbol, is_expiry_day=is_exp, df_1h=df_1h, golden_mode=True,
+                    oi_data=oi_data, atm_option_volume=atm_option_vol
                 )
 
             # Option C: 5-Minute Expiry Fast-Trigger (disabled by default to prevent afternoon theta traps)
@@ -8643,62 +8660,13 @@ class Prometheus:
         # For daily backtests >730 days: also compute bias from daily data as fallback
         hourly_bias_map = {}  # date_str -> "bullish" / "bearish" / "neutral"
 
-        # Compute from hourly data (covers last ~730 days)
-        if not data_hourly.empty and len(data_hourly) >= 10:
-            hourly_vwap = calculate_vwap(data_hourly.copy())
-            for i in range(10, len(data_hourly)):
-                chunk = data_hourly.iloc[max(0, i-20):i+1]
-                date_key = str(chunk["timestamp"].iloc[-1])[:10]
-
-                # Structure: compare last 5 hourly candles
-                recent_h = chunk.tail(5)
-                highs = recent_h["high"].values
-                lows = recent_h["low"].values
-
-                # Higher highs and higher lows count
-                hh_count = sum(1 for j in range(1, len(highs)) if highs[j] > highs[j-1])
-                hl_count = sum(1 for j in range(1, len(lows)) if lows[j] > lows[j-1])
-                lh_count = sum(1 for j in range(1, len(highs)) if highs[j] < highs[j-1])
-                ll_count = sum(1 for j in range(1, len(lows)) if lows[j] < lows[j-1])
-
-                # VWAP position
-                close_val = recent_h["close"].iloc[-1]
-                vwap_val = hourly_vwap["vwap"].iloc[i] if "vwap" in hourly_vwap.columns and i < len(hourly_vwap) else close_val
-
-                bull_points = hh_count + hl_count + (1 if close_val > vwap_val else 0)
-                bear_points = lh_count + ll_count + (1 if close_val < vwap_val else 0)
-
-                if bull_points >= 4 and bull_points > bear_points + 1:
-                    hourly_bias_map[target_session_date] = "bullish"
-                elif bear_points >= 4 and bear_points > bull_points + 1:
-                    hourly_bias_map[target_session_date] = "bearish"
-                else:
-                    hourly_bias_map[target_session_date] = "neutral"
-
-        logger.info(f"Hourly bias computed for {len(hourly_bias_map)} sessions")
-
-        # For long backtests: fill gaps with bias from daily data (5-day structure)
+        # Compute from hourly data (covers last ~730 days) with daily fallback (zero lookahead)
+        hourly_bias_map = self._compute_intraday_bias(data_hourly)
         if use_daily_primary and len(data_daily) >= 10:
-            for i in range(5, len(data_daily)):
-                date_key = str(data_daily["timestamp"].iloc[i])[:10]
-                if date_key in hourly_bias_map:
-                    continue  # hourly data already covers this date
-                recent_d = data_daily.iloc[max(0, i-5):i+1]
-                d_highs = recent_d["high"].values
-                d_lows = recent_d["low"].values
-                d_hh = sum(1 for j in range(1, len(d_highs)) if d_highs[j] > d_highs[j-1])
-                d_hl = sum(1 for j in range(1, len(d_lows)) if d_lows[j] > d_lows[j-1])
-                d_lh = sum(1 for j in range(1, len(d_highs)) if d_highs[j] < d_highs[j-1])
-                d_ll = sum(1 for j in range(1, len(d_lows)) if d_lows[j] < d_lows[j-1])
-                d_bull = d_hh + d_hl
-                d_bear = d_lh + d_ll
-                if d_bull >= 3 and d_bull > d_bear + 1:
-                    hourly_bias_map[date_key] = "bullish"
-                elif d_bear >= 3 and d_bear > d_bull + 1:
-                    hourly_bias_map[date_key] = "bearish"
-                else:
-                    hourly_bias_map[date_key] = "neutral"
-            logger.info(f"Bias map expanded to {len(hourly_bias_map)} sessions (daily fallback)")
+            daily_bias_map = self._compute_daily_bias(data_daily)
+            for k, v in daily_bias_map.items():
+                hourly_bias_map.setdefault(k, v)
+        logger.info(f"Bias map computed for {len(hourly_bias_map)} sessions")
 
         # ================================================================
         # PROFESSIONAL SIGNAL GENERATOR (adapts to primary timeframe)

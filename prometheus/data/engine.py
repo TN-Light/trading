@@ -376,6 +376,9 @@ class NSEDirectFeed:
         df = pd.DataFrame(parsed)
         if not df.empty:
             df["timestamp"] = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            df.attrs["is_contracts"] = True
+            df["source"] = "nse_direct"
+            df["unit"] = "contracts"
         return df
 
     def get_india_vix(self) -> Optional[float]:
@@ -809,6 +812,12 @@ class DataEngine:
         # Persist-friendly text fields.
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
         df["timestamp"] = df["timestamp"].fillna(pd.Timestamp.now(tz=IST))
+        if getattr(df, "attrs", {}).get("is_contracts", False) or ("source" in df.columns and (df["source"] == "nse_direct").any()):
+            df.attrs["is_contracts"] = True
+            if "source" not in df.columns:
+                df["source"] = "nse_direct"
+            if "unit" not in df.columns:
+                df["unit"] = "contracts"
         df["timestamp"] = df["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
         df["expiry"] = df["expiry"].astype(str)
 
@@ -1058,14 +1067,29 @@ class DataEngine:
                 return prices[symbol]
 
         # Try Angel One second before falling back to delayed yfinance
-        try:
-            from prometheus.data.angelone_options import AngelOneOptionChain
-            ao = AngelOneOptionChain()
-            ao_spot = ao.get_spot_price(symbol)
-            if ao_spot and ao_spot > 0:
-                return float(ao_spot)
-        except Exception:
-            pass
+        if self.angelone and hasattr(self.angelone, "_ensure_connected") and self.angelone._ensure_connected():
+            try:
+                from prometheus.data.rate_limiter import EndpointCategory, PriorityTier
+                lookup_sym = "NIFTY 50" if symbol == "NIFTY" else ("NIFTY BANK" if symbol in ("BANKNIFTY", "NIFTY BANK") else ("NIFTY FIN SERVICE" if symbol in ("FINNIFTY", "NIFTY FIN SERVICE") else symbol))
+                token = (
+                    self.angelone.INDEX_TOKENS.get(lookup_sym)
+                    or self.angelone.INDEX_TOKENS.get(symbol)
+                    or self.angelone.STOCK_TOKENS.get(symbol)
+                )
+                exchange = self.angelone.INDEX_EXCHANGES.get(lookup_sym) or self.angelone.INDEX_EXCHANGES.get(symbol, "NSE")
+                if token and hasattr(self.angelone, "rate_limiter") and self.angelone.rate_limiter:
+                    if self.angelone.rate_limiter.acquire(
+                        endpoint=EndpointCategory.QUOTES,
+                        priority=PriorityTier.P2_POSITION_MONITOR,
+                        timeout=5.0,
+                    ):
+                        res = self.angelone._obj.ltpData(exchange, lookup_sym, token)
+                        if res and res.get("status") and res.get("data"):
+                            ltp = float(res["data"].get("ltp", 0.0) or 0.0)
+                            if ltp > 0:
+                                return ltp
+            except Exception as e:
+                logger.debug(f"get_spot_price: Angel One ltpData failed for {symbol}: {e}")
 
         # yfinance fallback
         return self.yf.get_current_price(symbol)

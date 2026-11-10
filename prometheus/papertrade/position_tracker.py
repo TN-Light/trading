@@ -78,7 +78,7 @@ class CostModel:
         buy_turnover = exit_notional if is_spread else entry_notional
         
         stt = sell_turnover * 0.0015  # 0.15% on sell turnover (2026 statutory rate)
-        txn_charges = (buy_turnover + sell_turnover) * 0.00053  # 0.053% NSE exchange fee
+        txn_charges = (buy_turnover + sell_turnover) * 0.0003503  # 0.03503% NSE/BSE options exchange fee
         sebi_charges = (buy_turnover + sell_turnover) * 0.000001  # Rs 10 per crore
         stamp_duty = buy_turnover * 0.00003  # 0.003% on buy side
         
@@ -271,9 +271,11 @@ class PositionTracker:
             exit_price = fill.fill_price
         is_spread = "/" in pos.instrument or "SPREAD" in getattr(pos, "strategy", "").upper() or "SPREAD" in pos.instrument.upper()
         if hasattr(self.cost_model, "calculate_trade_cost"):
+            # For credit spreads, turnover is based on the gross sum of both legs (~3.5x net credit), not net price
+            notional_mult = 3.5 if is_spread else 1.0
             costs = self.cost_model.calculate_trade_cost(
-                entry_notional=pos.entry_price * pos.quantity,
-                exit_notional=exit_price * pos.quantity,
+                entry_notional=pos.entry_price * pos.quantity * notional_mult,
+                exit_notional=exit_price * pos.quantity * notional_mult,
                 is_spread=is_spread,
             )
         else:

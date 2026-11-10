@@ -154,7 +154,7 @@ class ZerodhaCostModel:
         self.brokerage_per_order = cfg.get("options_brokerage", 20)
         # Correct Zerodha STT rates (options 0.15%, futures 0.02% - statutory 2024-2026)
         self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.15) / 100
-        self.stt_futures_pct = cfg.get("stt_futures", 0.02) / 100
+        self.stt_futures_pct = cfg.get("stt_futures", 0.05) / 100
         self.transaction_charges_pct = cfg.get("transaction_charges", 0.053) / 100
         self.transaction_charges_futures_pct = cfg.get("transaction_charges_futures", 0.0019) / 100
         self.gst_pct = cfg.get("gst", 18.0) / 100

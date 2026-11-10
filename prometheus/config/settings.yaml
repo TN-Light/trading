@@ -38,7 +38,7 @@ backtest:
     stamp_duty: 0.003
     stt_futures: 0.05
     stt_options_sell: 0.15
-    transaction_charges: 0.053
+    transaction_charges: 0.03503
   end_date: '2025-12-31'
   initial_capital: 15000
   start_date: '2022-01-01'

@@ -303,11 +303,15 @@ def calibrate_target_and_sl(
     is_rejected = False
     rejection_reason = ""
 
-    # Rejection Check 1: Compressed Target < Instrument Noise Floor (GEMINI.md Section 7)
-    if is_compressed and target_gain_pts <= actual_noise_floor:
+    # Rejection Check 1: Target <= Instrument Noise Floor (GEMINI.md Section 7)
+    # Applies to BOTH compressed and uncompressed setups:
+    # If target is smaller than or equal to the noise floor (e.g. Target 18.0 pts <= Noise Floor 22.0 pts on SENSEX),
+    # the trade cannot overcome 1-minute candle noise and is structurally unviable.
+    if target_gain_pts <= actual_noise_floor:
         is_rejected = True
+        prefix = "Compressed target" if is_compressed else "Target"
         rejection_reason = (
-            f"Compressed target ({target_gain_pts:.1f} pts) < noise floor ({actual_noise_floor:.1f} pts) "
+            f"{prefix} ({target_gain_pts:.1f} pts) <= noise floor ({actual_noise_floor:.1f} pts) "
             f"for {symbol}. Trade structurally unviable (Reward/Risk Inverted)."
         )
 
@@ -344,9 +348,9 @@ def calibrate_target_and_sl(
             sl_pts = min(sl_pts, effective_max_risk)
 
         # Golden Balance: Minimum Reward-to-Risk Invariant (GEMINI.md Section 7)
-        # When targets are compressed to scalp boundaries (Tier C / Long Gamma),
+        # When targets are compressed to scalp boundaries (Tier C / Long Gamma) or capped by premium,
         # stop-loss must ALSO be compressed to prevent inverted risk (Risk > Reward).
-        # Requires SL <= Target * 0.80 (Reward-to-Risk >= 1.25:1 gross, >= 1.0:1 net).
+        # Requires SL <= Target * 0.80 (Reward-to-Risk >= 1.25:1 gross, >= 1.0:1 net) while preserving noise floor.
         if not is_rejected:
             golden_sl_cap = round(target_gain_pts * 0.80, 1)
             effective_golden_sl = max(actual_noise_floor, golden_sl_cap)

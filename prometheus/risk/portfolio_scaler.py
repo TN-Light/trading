@@ -81,8 +81,8 @@ def calculate_net_pnl_india(gross_pnl, product_type, entry_price, exit_price, qt
     exchange_txn = 0.0
     # Assuming standard NIFTY indices multiplier parameters
     if product_type == "FUTURES":
-        # STT applied on sell side turnover
-        stt = exit_price * qty * 0.0125 / 100 
+        # STT applied on sell side turnover (0.05% Finance Act statutory rate)
+        stt = exit_price * qty * 0.05 / 100
         exchange_txn = turnover * 0.00002
     elif product_type == "OPTIONS":
         # STT on premium sell-side (0.15% statutory April 2026 rate).

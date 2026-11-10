@@ -381,12 +381,48 @@ class OIAnalyzer:
         strongest_support = support_levels[0] if support_levels else spot * 0.98
         strongest_resistance = resistance_levels[0] if resistance_levels else spot * 1.02
 
+        # Delta OI for Opposing Wall Veto (Check G Rule 1)
+        call_wall_delta_oi = 0.0
+        if not calls_above.empty:
+            c_row = calls_above.iloc[0]
+            call_wall_delta_oi = float(c_row.get("oi_change", c_row.get("delta_oi", 0.0)) or 0.0)
+
+        put_wall_delta_oi = 0.0
+        if not puts_below.empty:
+            p_row = puts_below.iloc[0]
+            put_wall_delta_oi = float(p_row.get("oi_change", p_row.get("delta_oi", 0.0)) or 0.0)
+
+        # ATM Delta OI & Volume for Trapped Writer & Volume Surge (Check G Rule 2 & Check F)
+        atm_ce_delta_oi = 0.0
+        atm_pe_delta_oi = 0.0
+        atm_option_volume = 0.0
+        if not calls.empty:
+            closest_c_idx = (calls["strike"] - spot).abs().idxmin()
+            c_atm_row = calls.loc[closest_c_idx]
+            atm_ce_delta_oi = float(c_atm_row.get("oi_change", c_atm_row.get("delta_oi", 0.0)) or 0.0)
+            atm_option_volume = max(atm_option_volume, float(c_atm_row.get("volume", 0.0) or 0.0))
+        if not puts.empty:
+            closest_p_idx = (puts["strike"] - spot).abs().idxmin()
+            p_atm_row = puts.loc[closest_p_idx]
+            atm_pe_delta_oi = float(p_atm_row.get("oi_change", p_atm_row.get("delta_oi", 0.0)) or 0.0)
+            atm_option_volume = max(atm_option_volume, float(p_atm_row.get("volume", 0.0) or 0.0))
+
+        writer_trapping_bull = bool(atm_pe_delta_oi > 0 or atm_ce_delta_oi < 0)
+        writer_trapping_bear = bool(atm_ce_delta_oi > 0 or atm_pe_delta_oi < 0)
+
         return {
             "oi_support_levels": support_levels,
             "oi_resistance_levels": resistance_levels,
             "strongest_support": strongest_support,
             "strongest_resistance": strongest_resistance,
             "range_width": strongest_resistance - strongest_support,
+            "call_wall_delta_oi": call_wall_delta_oi,
+            "put_wall_delta_oi": put_wall_delta_oi,
+            "atm_ce_delta_oi": atm_ce_delta_oi,
+            "atm_pe_delta_oi": atm_pe_delta_oi,
+            "atm_option_volume": atm_option_volume,
+            "writer_trapping_bull": writer_trapping_bull,
+            "writer_trapping_bear": writer_trapping_bear,
         }
 
     def _interpret_support_resistance(

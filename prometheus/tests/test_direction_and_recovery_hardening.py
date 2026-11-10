@@ -147,7 +147,7 @@ def test_crash_recovery_order_side_for_put_buying():
     assert placed_order.side == OrderSide.SELL
 
     # 3. PnL must be positive: (180 - 150) * 50 = +1500 gross, net after statutory fees
-    assert pnl > 0 and pnl == pytest.approx(1410.92, abs=1.0)
+    assert pnl > 0 and pnl == pytest.approx(1415.29, abs=1.0)
 
 
 def test_crash_recovery_order_side_for_credit_spread():

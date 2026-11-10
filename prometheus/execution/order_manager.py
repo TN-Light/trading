@@ -127,23 +127,34 @@ class OrderManager:
 
         # Step 1: Position sizing via risk-based calculation (must precede risk check)
         lot_size = get_lot_size(symbol)
-        sizing = self.risk.calculate_position_size(entry, sl, lot_size)
-        quantity = sizing.get("quantity", lot_size)
-        if quantity <= 0:
-            self.last_execution_error = (
-                f"Risk budget insufficient ({sizing.get('error', 'sizing failed')})"
-            )
-            logger.warning(f"Trade REJECTED: {self.last_execution_error}")
-            return None
+        is_spread = (
+            action in ("BEAR_CALL_SPREAD", "BULL_PUT_SPREAD", "SELL_BEAR_CALL_SPREAD", "SELL_BULL_PUT_SPREAD", "SELL_CALL_SPREAD", "SELL_PUT_SPREAD")
+            or signal.get("strategy_type") == "credit_spread"
+            or "credit_spread" in signal.get("strategy", "").lower()
+            or "spread" in signal.get("strategy", "").lower()
+        )
+        if is_spread:
+            quantity = signal.get("quantity") or (signal.get("lots", 1) * lot_size)
+            trade_cost = float(signal.get("margin_required") or 60000.0)
+        else:
+            sizing = self.risk.calculate_position_size(entry, sl, lot_size)
+            quantity = sizing.get("quantity", lot_size)
+            trade_cost = entry * quantity
+            if quantity <= 0:
+                self.last_execution_error = (
+                    f"Risk budget insufficient ({sizing.get('error', 'sizing failed')})"
+                )
+                logger.warning(f"Trade REJECTED: {self.last_execution_error}")
+                return None
 
-        # Step 2: Risk pre-check with true size/cost
+        # Step 2: Risk pre-check with true size/cost (margin_required for spreads, premium cost for buying)
         risk_check = self.risk.pre_trade_check({
             "symbol": symbol,
             "direction": direction,
             "entry_price": entry,
             "stop_loss": sl,
             "quantity": quantity,
-            "cost": entry * quantity,
+            "cost": trade_cost,
         })
 
         if not risk_check.approved:

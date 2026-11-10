@@ -196,7 +196,7 @@ def test_bug18_backtest_engine_stt_statutory_rates():
     """Verify CostModel defaults to statutory 0.15% options STT and 0.02% futures STT."""
     cm = ZerodhaCostModel()
     assert math.isclose(cm.stt_options_sell_pct, 0.0015, rel_tol=1e-5), "STT options sell must be 0.15% (0.0015)"
-    assert math.isclose(cm.stt_futures_pct, 0.0002, rel_tol=1e-5), "STT futures sell must be 0.02% (0.0002)"
+    assert math.isclose(cm.stt_futures_pct, 0.0005, rel_tol=1e-5), "STT futures sell must be 0.05% (0.0005)"
 
 
 # =====================================================================
