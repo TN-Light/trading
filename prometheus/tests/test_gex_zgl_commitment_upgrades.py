@@ -167,16 +167,16 @@ def test_pillar3_commitment_ratio_reinforcement_and_churn_penalty():
     assert "Retail churn warning" in threat_c
     assert "50,000 contracts" in threat_c
 
-    # Case C: Aggressive buildup (+70) PLUS institutional commitment (+25) -> Capped at +95
+    # Case C: Short-covering (+70) PLUS institutional commitment (+25) -> Capped at +95
     score_combo, doi_cb, threat_cb, favor_cb = engine._eval_pillar_oi(
         symbol="NIFTY BANK",
         tradingsymbol="BANKNIFTY55000CE",
         trade_is_bullish=True,
-        override={"delta_oi": 30000, "commitment_ratio": 0.40},
+        override={"delta_oi": -15000, "commitment_ratio": 0.40},
     )
     assert score_combo == +95.0
     assert favor_cb is not None
-    assert "aggressive buildup" in favor_cb
+    assert "short-covering" in favor_cb
     assert "strong institutional commitment (0.40)" in favor_cb
 
 

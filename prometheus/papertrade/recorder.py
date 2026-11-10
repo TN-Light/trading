@@ -351,6 +351,9 @@ class TradeRecorder:
                 entry_spot REAL DEFAULT 0,
                 atr REAL DEFAULT 0,
                 target_gain_pts REAL DEFAULT 0,
+                initial_sl REAL DEFAULT 0,
+                initial_risk_distance REAL DEFAULT 0,
+                half_risk_set INTEGER DEFAULT 0,
                 recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -364,6 +367,9 @@ class TradeRecorder:
             ("target_gain_pts", "REAL"),
             ("is_short_gamma_squeeze", "INTEGER DEFAULT 0"),
             ("gex_regime", "TEXT DEFAULT 'NEUTRAL'"),
+            ("initial_sl", "REAL DEFAULT 0"),
+            ("initial_risk_distance", "REAL DEFAULT 0"),
+            ("half_risk_set", "INTEGER DEFAULT 0"),
         ]:
             try:
                 self._db.execute(f"ALTER TABLE paper_open_positions ADD COLUMN {col_name} {col_type}")
@@ -389,7 +395,7 @@ class TradeRecorder:
             "trailing_floor", "high_water_mark", "strategy",
             "signal_score", "signal_confidence", "trade_mode",
             "commitment_ratio", "net_gex", "zgl", "tier",
-            "entry_spot", "atr", "target_gain_pts", "is_short_gamma_squeeze", "gex_regime",
+            "entry_spot", "atr", "target_gain_pts", "is_short_gamma_squeeze", "gex_regime", "initial_sl", "initial_risk_distance", "half_risk_set",
         ]
         try:
             self._db.execute(
@@ -427,6 +433,9 @@ class TradeRecorder:
                     float(position_dict.get("target_gain_pts") or 0.0),
                     int(position_dict.get("is_short_gamma_squeeze") or 0),
                     str(position_dict.get("gex_regime") or "NEUTRAL"),
+                    float(position_dict.get("initial_sl") or 0.0),
+                    float(position_dict.get("initial_risk_distance") or 0.0),
+                    int(bool(position_dict.get("half_risk_set"))),
                 ],
             )
             self._db.commit()

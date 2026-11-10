@@ -77,7 +77,7 @@ class CostModel:
         sell_turnover = entry_notional if is_spread else exit_notional
         buy_turnover = exit_notional if is_spread else entry_notional
         
-        stt = sell_turnover * 0.0010  # 0.10% on sell turnover
+        stt = sell_turnover * 0.0015  # 0.15% on sell turnover (2026 statutory rate)
         txn_charges = (buy_turnover + sell_turnover) * 0.00053  # 0.053% NSE exchange fee
         sebi_charges = (buy_turnover + sell_turnover) * 0.000001  # Rs 10 per crore
         stamp_duty = buy_turnover * 0.00003  # 0.003% on buy side
@@ -153,7 +153,7 @@ class PositionTracker:
         trend_aware: bool = True,
         max_stagnation_bars: int = 6,
         on_heartbeat: Optional[Callable] = None,
-        heartbeat_interval_seconds: int = 60,
+        heartbeat_interval_seconds: int = 300,
     ):
         self.heartbeat_interval_seconds = int(heartbeat_interval_seconds)
         self.fill_sim = fill_sim
@@ -618,6 +618,15 @@ class PositionTracker:
                 is_stagnant = True
 
             if is_stagnant:
+                premium_decay_pct = (pos.entry_price - snap.close) / max(pos.entry_price, 1e-4) if (snap.close > 0 and pos.entry_price > 0) else 0.0
+                if premium_decay_pct >= 0.28:
+                    logger.warning(
+                        f"[TRACKER] Inactivity Kill-Switch triggered for {pos.trade_id}: "
+                        f"Premium decayed {premium_decay_pct*100:.1f}% >= 28% during consolidation "
+                        f"(LTP {snap.close:.2f} vs Entry {pos.entry_price:.2f}). Bypassing consolidation hold."
+                    )
+                    return snap.close, ExitReason.INACTIVITY_KILL_SWITCH
+
                 trend_intact = False
                 health_report = None
                 if getattr(self, "health_engine", None):
@@ -739,7 +748,7 @@ class PositionTracker:
                 is_trailing = bool(pos.breakeven_set or (pos.stop_loss >= pos.entry_price))
                 sl_reason = ExitReason.TRAILING_STOP if is_trailing else ExitReason.STOP_LOSS
                 if sl > 0 and ltp <= sl:
-                    return sl, sl_reason
+                    return ltp, sl_reason
                 if tgt > 0 and ltp >= tgt:
                     return ltp, ExitReason.TARGET
 
@@ -808,6 +817,15 @@ class PositionTracker:
                 is_stagnant = True
 
             if is_stagnant:
+                premium_decay_pct = (pos.entry_price - ltp) / max(pos.entry_price, 1e-4) if (ltp > 0 and pos.entry_price > 0) else 0.0
+                if premium_decay_pct >= 0.28:
+                    logger.warning(
+                        f"[TRACKER-FEED] Inactivity Kill-Switch triggered for {pos.trade_id}: "
+                        f"Premium decayed {premium_decay_pct*100:.1f}% >= 28% during consolidation "
+                        f"(LTP {ltp:.2f} vs Entry {pos.entry_price:.2f}). Bypassing consolidation hold."
+                    )
+                    return ltp, ExitReason.INACTIVITY_KILL_SWITCH
+
                 trend_intact = False
                 health_report = None
                 if getattr(self, "health_engine", None):
@@ -859,7 +877,7 @@ class PositionTracker:
         # Time stop: check max_bars (order matters: SL/target already checked above)
         max_bars = pos.max_bars_allowed or pos.max_bars
         if max_bars and pos.bars_held >= max_bars:
-            return max(ltp, pos.entry_price if pos.entry_price > 0 else 0.0), ExitReason.TIME_STOP
+            return (ltp if ltp > 0 else (pos.entry_price if pos.entry_price > 0 else 0.0)), ExitReason.TIME_STOP
 
         # Square-off and end-of-day force-closes still fire (the LTP we
         # recovered — or fall back to ``fill_sim`` at fill time — supplies
@@ -1191,11 +1209,14 @@ class PositionTracker:
                     except Exception as e:
                         logger.error(f"on_sl_update half_risk callback failed: {e}")
 
-        # Stage 4 — high-water-trail (beyond 3.5R, never below 70% floor)
-        elif pos.breakeven_set and progress >= 3.5:
-            hwm_floor = pos.entry_price + 0.70 * risk_distance
-            trail_buf = 0.02 * risk_distance if is_weak_edge else (0.08 * risk_distance if is_strong_edge else 0.05 * risk_distance)
-            trail_candidate = pos.high_water_mark - trail_buf
+        # Stage 4 — high-water-trail (beyond 3.5R, never below 75% floor)
+        elif (pos.breakeven_set or progress >= 1.0) and progress >= 3.5:
+            pos.breakeven_set = True
+            pos.half_risk_set = True
+            hwm_floor = pos.entry_price + 0.75 * risk_distance
+            trail_mult = 0.15 if is_weak_edge else (0.40 if is_strong_edge else 0.30)
+            trail_offset = (pos.high_water_mark - pos.entry_price) * trail_mult
+            trail_candidate = pos.high_water_mark - trail_offset
             new_sl = max(pos.stop_loss, hwm_floor, trail_candidate)
             if new_sl > pos.stop_loss:
                 old_sl = pos.stop_loss
@@ -1212,7 +1233,9 @@ class PositionTracker:
                         logger.error(f"on_sl_update hwm callback failed: {e}")
 
         # Stage 3 — lock 75% profit at 2.5R
-        elif pos.breakeven_set and progress >= 2.5 and pos.trailing_floor < 0.75:
+        elif (pos.breakeven_set or progress >= 1.0) and progress >= 2.5 and pos.trailing_floor < 0.75:
+            pos.breakeven_set = True
+            pos.half_risk_set = True
             lock = 0.75
             new_sl = round(pos.entry_price + lock * risk_distance, 2)
             if new_sl > pos.stop_loss:
@@ -1235,7 +1258,9 @@ class PositionTracker:
                         logger.error(f"on_sl_update lock_75pct callback failed: {e}")
 
         # Stage 2 — lock 65% profit at 1.75R
-        elif pos.breakeven_set and progress >= 1.75 and pos.trailing_floor < 0.65:
+        elif (pos.breakeven_set or progress >= 1.0) and progress >= 1.75 and pos.trailing_floor < 0.65:
+            pos.breakeven_set = True
+            pos.half_risk_set = True
             lock = 0.65
             new_sl = round(pos.entry_price + lock * risk_distance, 2)
             if new_sl > pos.stop_loss:
@@ -1258,7 +1283,9 @@ class PositionTracker:
                         logger.error(f"on_sl_update lock_65pct callback failed: {e}")
 
         # Stage 1 — lock 50% profit at 1.0R
-        elif pos.breakeven_set and progress >= 1.0 and pos.trailing_floor < 0.50:
+        elif (pos.breakeven_set or progress >= 1.0) and progress >= 1.0 and pos.trailing_floor < 0.50:
+            pos.breakeven_set = True
+            pos.half_risk_set = True
             lock = 0.50
             new_sl = round(pos.entry_price + lock * risk_distance, 2)
             if new_sl > pos.stop_loss:
@@ -1281,7 +1308,9 @@ class PositionTracker:
                         logger.error(f"on_sl_update lock_50pct callback failed: {e}")
 
         # Stage 0.5 — lock 35% profit at 0.65R (bridges the 0.4R to 1.0R dead zone)
-        elif pos.breakeven_set and progress >= 0.65 and pos.trailing_floor < 0.35:
+        elif (pos.breakeven_set or progress >= 0.65) and progress >= 0.65 and pos.trailing_floor < 0.35:
+            pos.breakeven_set = True
+            pos.half_risk_set = True
             lock = 0.35
             new_sl = round(pos.entry_price + lock * risk_distance, 2)
             if new_sl > pos.stop_loss:

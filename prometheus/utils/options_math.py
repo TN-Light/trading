@@ -30,6 +30,8 @@ def black_scholes_price(
     Black-Scholes option pricing.
     Returns theoretical option price.
     """
+    if isinstance(option_type, str):
+        option_type = OptionType.CALL if option_type.upper() in ("CE", "CALL") else OptionType.PUT
     if T <= 0:
         # At expiry — intrinsic value only
         if option_type == OptionType.CALL:
@@ -60,6 +62,8 @@ def calculate_greeks(
 
     Returns dict with: delta, gamma, theta, vega, rho
     """
+    if isinstance(option_type, str):
+        option_type = OptionType.CALL if option_type.upper() in ("CE", "CALL") else OptionType.PUT
     if T <= 0:
         intrinsic = max(S - K, 0) if option_type == OptionType.CALL else max(K - S, 0)
         itm = intrinsic > 0

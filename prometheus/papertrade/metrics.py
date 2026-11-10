@@ -224,10 +224,20 @@ def _generate_monthly_tracker_md(df, md_path: str):
     total_losses = int(df["Losses"].sum())
     win_rate = (total_wins / total_trades * 100.0) if total_trades > 0 else 0.0
 
+    from prometheus.config import get
+    base_capital = float(get("risk.max_capital", 100000.0) or 100000.0)
+    if "Capital" in df.columns and len(df) > 0:
+        try:
+            first_cap = float(df["Capital"].iloc[0] or 0)
+            if first_cap > 0:
+                base_capital = first_cap
+        except Exception:
+            pass
+
     total_gross_profit = float(df["Gross_Profit"].sum())
     total_gross_loss = float(df["Gross_Loss"].sum())
     total_net_pnl = float(df["Net_PnL"].sum())
-    total_return_pct = (total_net_pnl / 15000.0 * 100.0)
+    total_return_pct = (total_net_pnl / base_capital * 100.0) if base_capital > 0 else 0.0
 
     green_days = int((df["Net_PnL"] > 0).sum())
     red_days = int((df["Net_PnL"] < 0).sum())
@@ -237,11 +247,13 @@ def _generate_monthly_tracker_md(df, md_path: str):
     net_pnl_str = f"+Rs {total_net_pnl:,.2f}" if total_net_pnl >= 0 else f"-Rs {abs(total_net_pnl):,.2f}"
     status_emoji = "🟢" if total_net_pnl >= 0 else "🔴"
 
+    current_period = datetime.now().strftime("%B %Y")
+
     lines = [
         "# 📊 PROMETHEUS — Monthly Performance Tracker",
         "",
-        "**Tracking Period:** August 2026  ",
-        "**Initial Base Capital:** Rs 15,000  ",
+        f"**Tracking Period:** {current_period}  ",
+        f"**Initial Base Capital:** Rs {base_capital:,.0f}  ",
         f"**Current Realized Net P&L:** **{status_emoji} {net_pnl_str} ({total_return_pct:+.2f}%)**  ",
         f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}  ",
         "",

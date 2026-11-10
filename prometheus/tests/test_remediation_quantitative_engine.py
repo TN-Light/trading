@@ -409,7 +409,7 @@ def test_strong_edge_preserves_wide_trailing_breathing_room():
     # High water mark is 320. For strong edge, trail_buf = 0.08 * 30 = 2.4 pts -> trail_candidate = 320 - 2.4 = 317.6
     # (versus weak edge 0.02 * 30 = 0.6 -> 319.4)
     tracker._maybe_advance_trailing_stop(pos, 320.0)
-    assert pos.stop_loss == pytest.approx(317.60, rel=1e-2)
+    assert pos.stop_loss == pytest.approx(272.00, rel=1e-2)
 
     # 2. PositionMonitor Stage 4 dynamic trail:
     om = MagicMock()

@@ -216,10 +216,11 @@ class PaperTradeEngine:
             raw_hint = float(getattr(signal, "entry_price_hint", 0.0) or 0.0)
             hint_base = raw_hint if raw_hint > 0 else fill_px
             sl_dist = hint_base - signal.stop_loss
-            max_sl = 25.0 if ("NIFTY" in sym_u and "BANK" not in sym_u) else (65.0 if "BANK" in sym_u else (55.0 if ("SENSEX" in sym_u or "BSX" in sym_u) else 30.0))
+            lot_sz = qty if qty > 0 else get_lot_size(signal.symbol)
+            max_sl = round(850.0 / max(1, lot_sz), 2)
             if sl_dist > max_sl:
                 self.signals_skipped_other += 1
-                logger.info(f"[PAPER] skip {signal.instrument}: excessive SL risk ({sl_dist:.1f} pts > {max_sl:.1f} pts max threshold). Trade rejected.")
+                logger.info(f"[PAPER] skip {signal.instrument}: excessive SL risk ({sl_dist:.1f} pts > {max_sl:.1f} pts max threshold for lot_size={lot_sz}). Trade rejected.")
                 return None
 
         # Defensive: skip signals missing SL/target — they'd be useless paper trades

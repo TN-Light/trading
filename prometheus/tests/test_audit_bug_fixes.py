@@ -51,7 +51,7 @@ def test_order_manager_routes_sensex_to_bfo():
     assert placed_order.exchange == "BFO"
     assert placed_order.tradingsymbol == "SENSEX2691075300CE"
 
-    sl_calls = [c for c in calls if c[0][0].order_type == OrderType.SL_M]
+    sl_calls = [c for c in calls if c[0][0].order_type == OrderType.SL]
     assert len(sl_calls) == 1
     assert sl_calls[0][0][0].exchange == "BFO"
 

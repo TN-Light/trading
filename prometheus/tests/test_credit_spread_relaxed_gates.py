@@ -343,7 +343,7 @@ def test_credit_spread_0dte_strike_placement_bear_call():
     interval = get_strike_interval("NIFTY 50")
 
     expected_strike = max(
-        strategy.get_atm_strike(today_high + interval, "NIFTY 50"),
+        strategy.get_atm_strike(today_high + 150.0, "NIFTY 50"),
         atm_strike + (2 * interval),
     )
     assert sig["short_strike"] == expected_strike, f"Expected {expected_strike}, got {sig['short_strike']}"
@@ -382,7 +382,7 @@ def test_credit_spread_0dte_strike_placement_bull_put():
     interval = get_strike_interval("NIFTY 50")
 
     expected_strike = min(
-        strategy.get_atm_strike(today_low - interval, "NIFTY 50"),
+        strategy.get_atm_strike(today_low - 150.0, "NIFTY 50"),
         atm_strike - (2 * interval),
     )
     assert sig["short_strike"] == expected_strike, f"Expected {expected_strike}, got {sig['short_strike']}"
@@ -408,7 +408,8 @@ def test_credit_spread_0dte_strike_placement_anchoring_above_high_when_gap_ran()
     # 24280 + 50 = 24330 -> get_atm_strike(24330) = 24350
     # atm_strike = 24000, atm_strike + 2*50 = 24100
     # short_strike should be max(24350, 24100) = 24350!
-    assert sig["short_strike"] == 24350.0, f"Expected 24350.0 anchored above session high, got {sig['short_strike']}"
+    # 24280 + sigma_buffer(150) = 24430 -> get_atm_strike(24430) = 24450
+    assert sig["short_strike"] == 24450.0, f"Expected 24450.0 anchored above session high with sigma buffer, got {sig['short_strike']}"
 
 
 # ============================================================================
@@ -429,9 +430,9 @@ def test_credit_spread_0dte_5pct_credit_hurdle_accepted():
     class ThinCreditChain:
         def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
             if strike > 24000:
-                return {"ltp": 10.0 if strike > 24100 else 18.0, "tradingsymbol": f"NIFTY{int(strike)}CE"}
+                return {"ltp": 10.0 if strike > 24200 else 18.0, "tradingsymbol": f"NIFTY{int(strike)}CE"}
             else:
-                return {"ltp": 10.0 if strike < 23900 else 18.0, "tradingsymbol": f"NIFTY{int(strike)}PE"}
+                return {"ltp": 10.0 if strike < 23800 else 18.0, "tradingsymbol": f"NIFTY{int(strike)}PE"}
 
     with patch("prometheus.strategies.credit_spread.get_expiry_date", return_value=today_dt):
         sig = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=100000, option_chain=ThinCreditChain())
@@ -450,9 +451,9 @@ def test_credit_spread_0dte_sub_5pct_credit_hurdle_rejected():
     class Sub5PctChain:
         def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
             if strike > 24000:
-                return {"ltp": 10.0 if strike > 24100 else 16.0, "tradingsymbol": f"NIFTY{int(strike)}CE"}
+                return {"ltp": 10.0 if strike > 24200 else 16.0, "tradingsymbol": f"NIFTY{int(strike)}CE"}
             else:
-                return {"ltp": 10.0 if strike < 23900 else 16.0, "tradingsymbol": f"NIFTY{int(strike)}PE"}
+                return {"ltp": 10.0 if strike < 23800 else 16.0, "tradingsymbol": f"NIFTY{int(strike)}PE"}
 
     with patch("prometheus.strategies.credit_spread.get_expiry_date", return_value=today_dt):
         sig = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=100000, option_chain=Sub5PctChain())
@@ -470,8 +471,8 @@ def test_credit_spread_0dte_exact_boundary_hurdle():
     class Exact750Chain:
         def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
             if strike > 24000:
-                return {"ltp": 10.0 if strike > 24100 else 17.50, "tradingsymbol": f"NIFTY{int(strike)}CE"}
-            return {"ltp": 10.0 if strike < 23900 else 17.50, "tradingsymbol": f"NIFTY{int(strike)}PE"}
+                return {"ltp": 10.0 if strike > 24200 else 17.50, "tradingsymbol": f"NIFTY{int(strike)}CE"}
+            return {"ltp": 10.0 if strike < 23800 else 17.50, "tradingsymbol": f"NIFTY{int(strike)}PE"}
 
     with patch("prometheus.strategies.credit_spread.get_expiry_date", return_value=today_dt):
         sig_exact = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=100000, option_chain=Exact750Chain())
@@ -482,8 +483,8 @@ def test_credit_spread_0dte_exact_boundary_hurdle():
     class Sub750Chain:
         def get_real_premium(self, symbol, strike, option_type, expiry=None, spot_price=None):
             if strike > 24000:
-                return {"ltp": 10.0 if strike > 24100 else 17.49, "tradingsymbol": f"NIFTY{int(strike)}CE"}
-            return {"ltp": 10.0 if strike < 23900 else 17.49, "tradingsymbol": f"NIFTY{int(strike)}PE"}
+                return {"ltp": 10.0 if strike > 24200 else 17.49, "tradingsymbol": f"NIFTY{int(strike)}CE"}
+            return {"ltp": 10.0 if strike < 23800 else 17.49, "tradingsymbol": f"NIFTY{int(strike)}PE"}
 
     with patch("prometheus.strategies.credit_spread.get_expiry_date", return_value=today_dt):
         sig_sub = strategy.evaluate_spread(df, symbol="NIFTY 50", capital=100000, option_chain=Sub750Chain())

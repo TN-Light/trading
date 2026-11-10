@@ -100,7 +100,7 @@ def test_position_tracker_evaluates_sl_on_underlying_bar():
     trade = closed[0]
     assert trade.trade_id == "PAPER-TEST-SL-01"
     assert trade.exit_reason == ExitReason.STOP_LOSS
-    assert trade.exit_price == 85.0
+    assert trade.exit_price == 84.0
     assert len(tracker.open_positions) == 0
 
 

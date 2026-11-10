@@ -21,12 +21,12 @@ class SignalEvaluator:
         self._initialized = False
         self._last_close = None  # Cache latest close for position pricing
     
-    def initialize(self, scan_data: ScanData):
+    def initialize(self, scan_data: ScanData, force: bool = False):
         """Create the signal generator using initial scan data.
         
-        Called once on first scan. The generator persists across subsequent scans.
+        Called once on first scan or refreshed when new hourly bars form.
         """
-        if self._initialized and self._generator is not None:
+        if self._initialized and self._generator is not None and not force:
             return
         
         p = self._prometheus
@@ -81,6 +81,14 @@ class SignalEvaluator:
         # Initialize on first call
         if not self._initialized:
             self.initialize(scan_data)
+            self._last_hourly_len = len(scan_data.hourly) if hasattr(scan_data, 'hourly') and not scan_data.hourly.empty else 0
+        elif self._interval != 'day' and hasattr(scan_data, 'hourly') and not scan_data.hourly.empty:
+            # Bug 16: Dynamic midday bias update when new hourly bars form
+            curr_h_len = len(scan_data.hourly)
+            if hasattr(self, '_last_hourly_len') and curr_h_len > self._last_hourly_len:
+                logger.info(f"SignalEvaluator: {self._symbol} hourly bars advanced ({self._last_hourly_len} -> {curr_h_len}), refreshing bias map")
+                self.initialize(scan_data, force=True)
+            self._last_hourly_len = curr_h_len
         
         if self._generator is None:
             logger.warning(f"SignalEvaluator: {symbol} — generator not initialized")

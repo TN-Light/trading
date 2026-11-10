@@ -142,7 +142,7 @@ def test_settings_yaml_consistency():
     # 2. FINNIFTY is present in lot sizes
     lot_sizes = conf.get("market", {}).get("lot_sizes", {})
     assert "NIFTY FIN SERVICE" in lot_sizes, "NIFTY FIN SERVICE missing from market.lot_sizes"
-    assert lot_sizes["NIFTY FIN SERVICE"] == 65
+    assert lot_sizes["NIFTY FIN SERVICE"] == 60
 
     # 3. Expiry debit spreads are disabled
     expiry_conf = conf.get("strategies", {}).get("expiry", {})

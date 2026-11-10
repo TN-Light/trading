@@ -112,6 +112,7 @@ class ExecutableSignal:
     confidence: float = 0.0
     bar_timestamp: str = ""
     trade_mode: str = "swing"
+    bar_interval: str = "15minute"
     regime: str = ""
     strategy: str = ""
     reasons: List[str] = field(default_factory=list)

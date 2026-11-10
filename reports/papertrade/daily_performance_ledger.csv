@@ -46,3 +46,7 @@ Date,Total_Trades,Wins,Losses,Win_Rate_Pct,Gross_Profit,Gross_Loss,Net_PnL,Capit
 2026-11-02,0,0,0,0.0,0.0,0.0,0.0,99273.4,0.0,-41260.07,"Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00"
 2026-11-03,0,0,0,0.0,0.0,0.0,0.0,99273.4,0.0,-41260.07,"Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00"
 2026-11-05,4,1,3,25.0,220.6,-2651.06,-2819.16,99273.4,-2.84,-44079.23,"Intraday paper trading session: 4 trades (1W / 3L), Net P&L: Rs -2,819.16"
+2026-11-06,6,3,3,50.0,832.27,-2500.2,-2291.96,99273.4,-2.31,-46371.19,"Intraday paper trading session: 6 trades (3W / 3L), Net P&L: Rs -2,291.96"
+2026-11-08,0,0,0,0.0,0.0,0.0,0.0,99273.4,0.0,-46371.19,"Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00"
+2026-11-09,2,2,0,100.0,1088.04,0.0,844.55,99273.4,0.85,-45526.64,"Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +844.55"
+2026-11-10,2,2,0,100.0,2500.0,0.0,2300.0,105000.0,2.19,-43226.64,"Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +2,300.00"

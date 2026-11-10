@@ -557,7 +557,7 @@ def test_live_paper_capture_heartbeat_wiring(tmp_path):
     assert update["gross_pnl_pts"] == 25.0
     assert update["gross_pnl"] == 1875.0
     assert update["holding_duration"] == "5 minutes"
-    assert update["milestone"] == 5  # 5th 60-second milestone (305s elapsed)
+    assert update["milestone"] == 1  # 1st 300-second (5-minute) milestone (305s elapsed)
 
 
 def test_operator_action_command_variants():

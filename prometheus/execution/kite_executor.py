@@ -94,6 +94,44 @@ class KiteExecutor(BrokerBase):
         if elapsed < self._min_order_interval:
             time.sleep(self._min_order_interval - elapsed)
 
+        # Auto-correct exchange based on underlying (GEMINI.md Rule 2 & 2026 Audit)
+        sym_u = (order.tradingsymbol or "").upper()
+        if "SENSEX" in sym_u or "BSX" in sym_u or "BANKEX" in sym_u:
+            order.exchange = "BFO"
+        elif not order.exchange:
+            order.exchange = "NFO"
+
+        # Cross-Broker LTP Divergence Guard:
+        # Protect against cross-broker feed lag between Angel One and Zerodha Kite
+        if self.kite and order.order_type == OrderType.LIMIT and order.price > 0:
+            try:
+                inst = f"{order.exchange}:{order.tradingsymbol}"
+                quote = self.kite.quote([inst])
+                kite_ltp = float(quote.get(inst, {}).get("last_price", 0.0) or 0.0)
+                if kite_ltp > 0:
+                    divergence = abs(kite_ltp - order.price) / order.price
+                    if divergence > 0.05:
+                        is_adverse = (order.side == OrderSide.BUY and kite_ltp > order.price) or \
+                                     (order.side == OrderSide.SELL and kite_ltp < order.price)
+                        if is_adverse:
+                            logger.warning(
+                                f"[KITE-SKEW] High adverse LTP divergence on {order.tradingsymbol}: "
+                                f"Kite LTP={kite_ltp:.2f} vs Limit={order.price:.2f} ({divergence*100:.1f}% adverse). "
+                                f"Preserving limit price with max 1.5% slippage cap to prevent chasing."
+                            )
+                            if order.side == OrderSide.BUY:
+                                order.price = round(round(min(kite_ltp, order.price * 1.015) / 0.05) * 0.05, 2)
+                            else:
+                                order.price = round(round(max(kite_ltp, order.price * 0.985) / 0.05) * 0.05, 2)
+                        else:
+                            logger.info(
+                                f"[KITE-SKEW] Favorable LTP divergence on {order.tradingsymbol}: "
+                                f"Kite LTP={kite_ltp:.2f} vs Limit={order.price:.2f}. Adjusting to favorable market price."
+                            )
+                            order.price = round(round(kite_ltp / 0.05) * 0.05, 2)
+            except Exception as e:
+                logger.debug(f"Kite quote check skipped: {e}")
+
         params = {
             "tradingsymbol": order.tradingsymbol,
             "exchange": order.exchange,
@@ -363,10 +401,15 @@ def generate_tradingsymbol(
         return f"{symbol}{yy}{m}{dd}{strike_str}{option_type}"
 
 
-def _is_monthly_expiry(d) -> bool:
-    """Check if date is the last occurrence of its weekday in its month."""
-    from datetime import timedelta
-    # If adding 7 days pushes us into the next month, this is the last one
-    next_week = d + timedelta(days=7)
-    return next_week.month != d.month
+def _is_monthly_expiry(d, symbol: str = "NIFTY 50") -> bool:
+    """Check if date is the actual monthly expiry for the underlying (holiday-aware)."""
+    try:
+        from prometheus.utils.indian_market import get_monthly_expiry, _resolve_weekly_expiry_day_name
+        weekday = _resolve_weekly_expiry_day_name(symbol, on_date=d)
+        monthly_exp = get_monthly_expiry(d.year, d.month, weekday)
+        return d == monthly_exp
+    except Exception:
+        from datetime import timedelta
+        next_week = d + timedelta(days=7)
+        return next_week.month != d.month
 

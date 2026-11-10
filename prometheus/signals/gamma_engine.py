@@ -190,6 +190,18 @@ class GammaEngine:
         # Compute GEX at current spot:
         # Rupee Notional Gamma per 1% spot move: GEX_INR = Q * Gamma * S^2 * 0.01
         # Angel One SmartAPI opnInterest (Q) is already in total underlying shares.
+        # Defect 41 fix: When option chain reports OI in contracts/lots (e.g. NSE direct feed),
+        # scale OI by lot size so Rupee Notional GEX is calculated on total underlying shares.
+        lot_sz = get_lot_size(symbol)
+        is_contracts_mode = (
+            getattr(chain_df, "attrs", {}).get("is_contracts", False)
+            or ("unit" in chain_df.columns and (chain_df["unit"] == "contracts").any())
+            or (chain_df.get("source", pd.Series()).eq("nse_direct").any() if "source" in chain_df.columns else False)
+        )
+        if is_contracts_mode and lot_sz > 1:
+            for itm in strikes_data:
+                itm["oi"] = itm["oi"] * lot_sz
+
         call_gex_tot = 0.0
         put_gex_tot = 0.0
         s_factor = (spot_price ** 2) * 0.01

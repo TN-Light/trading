@@ -152,9 +152,9 @@ class ZerodhaCostModel:
     def __init__(self, config: Optional[Dict] = None):
         cfg = config or {}
         self.brokerage_per_order = cfg.get("options_brokerage", 20)
-        # Correct Zerodha STT rates (options 0.10%, futures 0.01%)
-        self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.10) / 100
-        self.stt_futures_pct = cfg.get("stt_futures", 0.01) / 100
+        # Correct Zerodha STT rates (options 0.15%, futures 0.02% - statutory 2024-2026)
+        self.stt_options_sell_pct = cfg.get("stt_options_sell", 0.15) / 100
+        self.stt_futures_pct = cfg.get("stt_futures", 0.02) / 100
         self.transaction_charges_pct = cfg.get("transaction_charges", 0.053) / 100
         self.transaction_charges_futures_pct = cfg.get("transaction_charges_futures", 0.0019) / 100
         self.gst_pct = cfg.get("gst", 18.0) / 100
@@ -1018,6 +1018,16 @@ class BacktestEngine:
                 adjusted_premium = max(adjusted_premium, 1.0)
                 adjusted_signal = signal.copy()
                 adjusted_signal["entry_price"] = adjusted_premium
+                # Symmetrically shift SL and target to prevent inverted risk or bloated stop losses
+                prem_diff = adjusted_premium - original_premium
+                if "stop_loss" in signal and signal["stop_loss"] > 0:
+                    raw_sl = max(1.0, round(signal["stop_loss"] + prem_diff, 2))
+                    lot_sz = signal.get("lot_size", 0) or 75
+                    max_sl_pts = round(850.0 / max(1, lot_sz), 2)
+                    adjusted_signal["stop_loss"] = max(raw_sl, round(adjusted_premium - max_sl_pts, 2))
+                    adjusted_signal["stop_loss"] = min(adjusted_signal["stop_loss"], round(adjusted_premium - 2.0, 2))
+                if "target" in signal and signal["target"] > 0:
+                    adjusted_signal["target"] = max(adjusted_premium + 5.0, round(signal["target"] + prem_diff, 2))
                 return self._open_position(adjusted_signal, bar, timestamp)
 
         return self._open_position(signal, bar, timestamp)
@@ -1218,6 +1228,17 @@ class BacktestEngine:
         adjusted_signal = signal.copy()
         adjusted_signal["entry_price"] = adjusted_premium
         adjusted_signal["_entry_type"] = entry_type
+
+        # Symmetrically shift SL and target to prevent inverted risk
+        prem_diff = adjusted_premium - original_premium
+        if "stop_loss" in signal and signal["stop_loss"] > 0:
+            raw_sl = max(1.0, round(signal["stop_loss"] + prem_diff, 2))
+            lot_sz = signal.get("lot_size", 0) or 75
+            max_sl_pts = round(850.0 / max(1, lot_sz), 2)
+            adjusted_signal["stop_loss"] = max(raw_sl, round(adjusted_premium - max_sl_pts, 2))
+            adjusted_signal["stop_loss"] = min(adjusted_signal["stop_loss"], round(adjusted_premium - 2.0, 2))
+        if "target" in signal and signal["target"] > 0:
+            adjusted_signal["target"] = max(adjusted_premium + 5.0, round(signal["target"] + prem_diff, 2))
 
         position = self._open_position(adjusted_signal, bar, timestamp)
         position["entry_type"] = entry_type

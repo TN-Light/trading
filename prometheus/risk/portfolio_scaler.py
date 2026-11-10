@@ -85,9 +85,11 @@ def calculate_net_pnl_india(gross_pnl, product_type, entry_price, exit_price, qt
         stt = exit_price * qty * 0.0125 / 100 
         exchange_txn = turnover * 0.00002
     elif product_type == "OPTIONS":
-        # STT on premium sell-side. Buy-to-close incurs no STT. Let's assume average.
-        sold_premium = exit_price if gross_pnl < 0 else entry_price 
-        stt = sold_premium * qty * 0.0625 / 100
+        # STT on premium sell-side (0.15% statutory April 2026 rate).
+        # For option buyers (long premium), sell leg is exit_price.
+        # For option sellers (credit spread), sell leg is entry_price.
+        sold_premium = exit_price
+        stt = sold_premium * qty * 0.15 / 100
         exchange_txn = turnover * 0.0005
         
     gst = (brokerage_flat + exchange_txn) * 0.18

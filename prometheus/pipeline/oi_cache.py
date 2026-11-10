@@ -345,6 +345,9 @@ class OICache:
             "pcr": pcr,
             "support": support,
             "resistance": resistance,
+            "strongest_support": support,
+            "strongest_resistance": resistance,
+            "spot_price": entry.spot_price,
             "signals": signal_details[:3],  # Top 3 signals
             "summary": " | ".join(summary_parts),
             "stale": False,

@@ -45,6 +45,8 @@ class PriceActionMomentumScanner:
         is_expiry_day: bool = False,
         df_1h: Optional[pd.DataFrame] = None,
         golden_mode: bool = True,
+        oi_data: Optional[Dict] = None,
+        atm_option_volume: float = 0.0,
     ) -> Optional[Dict]:
         """Evaluate latest candle for price action / momentum breakout or Golden Setup.
 
@@ -72,7 +74,7 @@ class PriceActionMomentumScanner:
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
         min_start_time = dtime(9, 35) if golden_mode else dtime(9, 50)
-        if current_time < min_start_time or current_time > dtime(14, 15):
+        if current_time < min_start_time or current_time > dtime(14, 30):
             return None
 
         # Extract today's bars
@@ -158,20 +160,41 @@ class PriceActionMomentumScanner:
         current_bull_expansion = (bar_range >= 2.0 * atr) and ((close - open_p) >= 0.5 * bar_range)
         current_bear_expansion = (bar_range >= 2.0 * atr) and ((open_p - close) >= 0.5 * bar_range)
 
+        # Check recent 2 bars for immediate volume/range expansion proxy (Defect 43: avoid latching all day)
+        recent_bars = today_bars.iloc[-2:] if len(today_bars) >= 2 else today_bars
+        recent_bull_expansion = any(
+            (float(r["high"]) - float(r["low"]) >= 2.0 * atr) and ((float(r["close"]) - float(r["open"])) >= 0.5 * (float(r["high"]) - float(r["low"])))
+            for _, r in recent_bars.iterrows()
+        ) if len(recent_bars) > 0 else current_bull_expansion
+
+        recent_bear_expansion = any(
+            (float(r["high"]) - float(r["low"]) >= 2.0 * atr) and ((float(r["open"]) - float(r["close"])) >= 0.5 * (float(r["high"]) - float(r["low"])))
+            for _, r in recent_bars.iterrows()
+        ) if len(recent_bars) > 0 else current_bear_expansion
+
         has_session_bull_expansion = current_bull_expansion
         has_session_bear_expansion = current_bear_expansion
 
-        if len(today_bars) > 0 and not (has_session_bull_expansion and has_session_bear_expansion):
+        has_post_orb_bull_expansion = False
+        has_post_orb_bear_expansion = False
+        if len(today_bars) > 0:
             for _, r in today_bars.iterrows():
+                b_ts = r["timestamp"]
+                b_time = b_ts.time() if hasattr(b_ts, "time") else dtime(9, 15)
+                # Defect #2: Skip 09:15 opening volatility candle from latching trend day all session
+                if b_time <= dtime(9, 30):
+                    continue
                 b_range = float(r["high"]) - float(r["low"])
                 b_open = float(r["open"])
                 b_close = float(r["close"])
                 if b_range >= 2.0 * atr:
                     if (b_close - b_open) >= 0.5 * b_range:
-                        has_session_bull_expansion = True
+                        has_post_orb_bull_expansion = True
                     if (b_open - b_close) >= 0.5 * b_range:
-                        has_session_bear_expansion = True
+                        has_post_orb_bear_expansion = True
 
+        has_session_bull_expansion = bool(current_bull_expansion or recent_bull_expansion or has_post_orb_bull_expansion)
+        has_session_bear_expansion = bool(current_bear_expansion or recent_bear_expansion or has_post_orb_bear_expansion)
         has_session_range_expansion = has_session_bull_expansion or has_session_bear_expansion
         is_spot_proxy = has_session_range_expansion
 
@@ -192,28 +215,45 @@ class PriceActionMomentumScanner:
         is_orb_breakout = is_orb_bull_breakout or is_orb_bear_breakout
 
         # Institutional trend day requires ORB breakout, ADX >= 25, and volume or aligned directional range expansion
-        is_trend_day_bull = is_orb_bull_breakout and (adx_val >= 25.0) and (has_inst_volume or has_session_bull_expansion)
-        is_trend_day_bear = is_orb_bear_breakout and (adx_val >= 25.0) and (has_inst_volume or has_session_bear_expansion)
+        # Institutional trend day requires ORB breakout, ADX >= 25, and volume or post-ORB directional range expansion
+        is_trend_day_bull = is_orb_bull_breakout and (adx_val >= 25.0) and (has_inst_volume or has_post_orb_bull_expansion or recent_bull_expansion)
+        is_trend_day_bear = is_orb_bear_breakout and (adx_val >= 25.0) and (has_inst_volume or has_post_orb_bear_expansion or recent_bear_expansion)
         is_institutional_trend_day = bool(is_trend_day_bull or is_trend_day_bear)
 
-        # Session Time Gate:
-        # Golden Setup: Active 09:35 to 11:45; hard cutoff at 12:00 for normal days.
-        # Bypass: If Institutional Trend Day is confirmed (ORB + ADX >= 25 + Vol >= 1.5x SMA20),
-        # allow continuation setups through the lunch window (11:30 - 13:15 IST).
-        cutoff_time = dtime(11, 45) if golden_mode else dtime(12, 0)
-        is_lunch_window = (dtime(11, 30) <= current_time <= dtime(13, 15))
+        # ── 3. Higher Timeframe (1-Hour) Trend Alignment ──
+        htf_trend = self.evaluate_htf_trend(df_1h, current_ts)
+        has_1h_data = (df_1h is not None and not df_1h.empty)
+        has_1h_trend = has_1h_data and htf_trend in ("BULLISH", "BEARISH")
 
-        if current_time > cutoff_time:
-            if not (is_lunch_window and is_institutional_trend_day):
+        # Session Time Gates:
+        # 1. Morning Window: 09:35 to 11:45 IST (Golden Setup & Primary Momentum)
+        # 2. Lunch Window: 11:30 to 13:15 IST (Midday theta chop & volume drop ~60%).
+        #    Option buying is strictly gated UNLESS Institutional Trend Day is confirmed.
+        # 3. Afternoon Power Session: 13:15 to 14:30 IST (GEMINI.md Rule 7: 11-Year Benchmark 65.6% WR, +Rs 5.88L profit).
+        #    On non-expiry days, allows confirmed trend continuation setups
+        #    (Institutional Trend Day or 1H Macro Trend Aligned).
+        #    On expiry days, afternoon option buying is strictly blocked to eliminate terminal theta decay traps.
+        # 4. Hard Cutoff: Past 14:30 IST, all new entries blocked.
+        cutoff_morning = dtime(11, 45) if golden_mode else dtime(12, 0)
+        is_lunch_window = (dtime(11, 30) <= current_time < dtime(13, 15))
+        is_afternoon_window = (dtime(13, 15) <= current_time <= dtime(14, 30))
+
+        if current_time > cutoff_morning:
+            if is_lunch_window:
+                if not is_institutional_trend_day:
+                    return None
+            elif is_afternoon_window:
+                if is_expiry_day:
+                    return None
+                if not (is_institutional_trend_day or has_1h_trend):
+                    return None
+            else:
                 return None
 
         # Dead zone check: 11:45 - 13:00 (lunchtime chop) for legacy non-expiry mode
         if not golden_mode and not is_expiry_day and (dtime(11, 45) <= current_time <= dtime(13, 0)):
             if not is_institutional_trend_day:
                 return None
-
-        # ── 3. Higher Timeframe (1-Hour) Trend Alignment ──
-        htf_trend = self.evaluate_htf_trend(df_1h, current_ts)
 
         # ── 4. Momentum & Golden Setup Detection ──
         buffer = atr * self.min_atr_buffer
@@ -240,18 +280,43 @@ class PriceActionMomentumScanner:
             bear_score += 1.0
             bear_reasons.append("1H_Trend_Emerging_Bearish(Lost_EMAs)")
 
-        # Check A: ORB Breakout
+        # Check A: ORB Breakout (Fresh Breakout vs Retest vs Stale Continuation)
         is_orb_bull = False
         is_orb_bear = False
         if orb_high is not None and orb_low is not None:
+            prev_close = float(today_bars.iloc[-2]["close"]) if len(today_bars) >= 2 else close
             if close > (orb_high + buffer):
-                bull_score += 2.0
-                bull_reasons.append(f"ORB_Breakout_High({orb_high:.1f})")
-                is_orb_bull = True
+                if prev_close <= (orb_high + buffer):
+                    # Fresh breakout on current bar
+                    bull_score += 2.0
+                    bull_reasons.append(f"ORB_Breakout_High({orb_high:.1f})")
+                    is_orb_bull = True
+                elif low <= (orb_high + buffer + (0.5 * atr)) and close > (orb_high + buffer):
+                    # Valid retest of ORB high followed by bounce
+                    bull_score += 1.5
+                    bull_reasons.append(f"ORB_Retest_High({orb_high:.1f})")
+                    is_orb_bull = True
+                else:
+                    # Stale continuation: price already extended above ORB for multiple bars
+                    bull_score += 1.0
+                    bull_reasons.append(f"ORB_Continuation_High({orb_high:.1f})")
+                    is_orb_bull = True
             elif close < (orb_low - buffer):
-                bear_score += 2.0
-                bear_reasons.append(f"ORB_Breakdown_Low({orb_low:.1f})")
-                is_orb_bear = True
+                if prev_close >= (orb_low - buffer):
+                    # Fresh breakdown on current bar
+                    bear_score += 2.0
+                    bear_reasons.append(f"ORB_Breakdown_Low({orb_low:.1f})")
+                    is_orb_bear = True
+                elif high >= (orb_low - buffer - (0.5 * atr)) and close < (orb_low - buffer):
+                    # Valid retest of ORB low followed by rejection
+                    bear_score += 1.5
+                    bear_reasons.append(f"ORB_Retest_Low({orb_low:.1f})")
+                    is_orb_bear = True
+                else:
+                    # Stale continuation: price already extended below ORB for multiple bars
+                    bear_score += 1.0
+                    bear_reasons.append(f"ORB_Continuation_Low({orb_low:.1f})")
+                    is_orb_bear = True
 
         # Check B: VWAP Positioning & Slope
         is_vwap_bull = False
@@ -301,8 +366,18 @@ class PriceActionMomentumScanner:
                     bear_score += 1.5
                     bear_reasons.append("Consolidation_Breakdown_Down")
 
-        # Check F: Volume Surge Expansion (or Directional Range Expansion Proxy on spot feeds)
+        # Check F: Volume Surge Expansion (or Live ATM Option Volume / Directional Range Expansion Proxy on spot feeds)
         has_volume_surge = False
+        if atm_option_volume > 0 and ("volume" not in df.columns or float(current_row.get("volume", 0.0)) == 0.0):
+            # Rule 3: Use Live ATM Option Volume to Replace Missing Spot Volume on 0-Volume Feeds
+            if atm_option_volume >= 25000:
+                has_volume_surge = True
+                if is_orb_bull or is_vwap_bull:
+                    bull_score += 1.0
+                    bull_reasons.append("Option_Volume_Surge_Confirmed")
+                if is_orb_bear or is_vwap_bear:
+                    bear_score += 1.0
+                    bear_reasons.append("Option_Volume_Surge_Confirmed")
         if "volume" in df.columns and len(df) >= 10:
             avg_vol = float(df["volume"].iloc[-11:-1].mean())
             curr_vol = float(current_row["volume"]) if "volume" in current_row else 0.0
@@ -315,23 +390,58 @@ class PriceActionMomentumScanner:
                     bear_score += 1.0
                     bear_reasons.append("Volume_Surge_Confirmed")
             elif avg_vol == 0 and curr_vol == 0:
-                if (is_orb_bull or is_vwap_bull) and has_session_bull_expansion:
+                if (is_orb_bull or is_vwap_bull) and (current_bull_expansion or recent_bull_expansion):
                     has_volume_surge = True
                     bull_score += 1.0
                     bull_reasons.append("Range_Expansion_Proxy_Confirmed")
-                if (is_orb_bear or is_vwap_bear) and has_session_bear_expansion:
+                if (is_orb_bear or is_vwap_bear) and (current_bear_expansion or recent_bear_expansion):
                     has_volume_surge = True
                     bear_score += 1.0
                     bear_reasons.append("Range_Expansion_Proxy_Confirmed")
         else:
-            if (is_orb_bull or is_vwap_bull) and has_session_bull_expansion:
+            if (is_orb_bull or is_vwap_bull) and (current_bull_expansion or recent_bull_expansion):
                 has_volume_surge = True
                 bull_score += 1.0
                 bull_reasons.append("Range_Expansion_Proxy_Confirmed")
-            if (is_orb_bear or is_vwap_bear) and has_session_bear_expansion:
+            if (is_orb_bear or is_vwap_bear) and (current_bear_expansion or recent_bear_expansion):
                 has_volume_surge = True
                 bear_score += 1.0
                 bear_reasons.append("Range_Expansion_Proxy_Confirmed")
+
+        # Check G: Open Interest (OI) Institutional Supply Veto & Writer-Trapping Boost
+        writer_trapping_bull = False
+        writer_trapping_bear = False
+        if oi_data and isinstance(oi_data, dict):
+            # Rule 1: Opposing OI Wall Veto (Stop Buying Into Institutional Supply)
+            call_wall = float(oi_data.get("strongest_resistance") or oi_data.get("resistance") or 0.0)
+            call_wall_delta_oi = float(oi_data.get("call_wall_delta_oi", 0.0))
+            if call_wall > close:
+                call_wall_dist = call_wall - close
+                if call_wall_dist < (0.8 * atr) and call_wall_delta_oi > 0:
+                    bull_score = -999.0
+                    bull_reasons.append(f"Veto_Opposing_Call_Wall({call_wall:.0f}_Dist={call_wall_dist:.1f}<0.8ATR_Defended)")
+
+            put_wall = float(oi_data.get("strongest_support") or oi_data.get("support") or 0.0)
+            put_wall_delta_oi = float(oi_data.get("put_wall_delta_oi", 0.0))
+            if put_wall > 0 and put_wall < close:
+                put_wall_dist = close - put_wall
+                if put_wall_dist < (0.8 * atr) and put_wall_delta_oi > 0:
+                    bear_score = -999.0
+                    bear_reasons.append(f"Veto_Opposing_Put_Wall({put_wall:.0f}_Dist={put_wall_dist:.1f}<0.8ATR_Defended)")
+
+            # Rule 2: Institutional Short-Covering / Writer-Trapping Boost (+1.5 Confluence)
+            atm_pe_delta_oi = float(oi_data.get("atm_pe_delta_oi", 0.0))
+            atm_ce_delta_oi = float(oi_data.get("atm_ce_delta_oi", 0.0))
+            writer_trapping_bull = bool(oi_data.get("writer_trapping_bull") or (atm_pe_delta_oi > 0 or atm_ce_delta_oi < 0))
+            writer_trapping_bear = bool(oi_data.get("writer_trapping_bear") or (atm_ce_delta_oi > 0 or atm_pe_delta_oi < 0))
+
+            if writer_trapping_bull and bull_score > 0:
+                bull_score += 1.5
+                bull_reasons.append("Writer_Trapping_Confirmed(PE_Writing_or_CE_Unwinding)")
+
+            if writer_trapping_bear and bear_score > 0:
+                bear_score += 1.5
+                bear_reasons.append("Writer_Trapping_Confirmed(CE_Writing_or_PE_Unwinding)")
 
         # ── 5. Decision & Trade Structuring ──
         # Strict Golden Setup requires TRUE 1-Hour Trend Alignment when 1H data is available
@@ -413,6 +523,7 @@ class PriceActionMomentumScanner:
                 "bar_range": round(bar_range, 2),
                 "body_displacement": round(body_displacement, 2),
                 "has_range_expansion": bool(has_session_bull_expansion),
+                "has_volume_surge": bool(has_volume_surge),
                 "adx": round(adx_val, 1),
                 "opening_gap_pct": round(opening_gap_pct, 4),
             }
@@ -473,6 +584,7 @@ class PriceActionMomentumScanner:
                 "bar_range": round(bar_range, 2),
                 "body_displacement": round(body_displacement, 2),
                 "has_range_expansion": bool(has_session_bear_expansion),
+                "has_volume_surge": bool(has_volume_surge),
                 "adx": round(adx_val, 1),
                 "opening_gap_pct": round(opening_gap_pct, 4),
             }

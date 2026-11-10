@@ -159,21 +159,21 @@ def test_pillar2_volume_institutional_surge():
 def test_pillar3_oi_buildup_and_unwinding():
     engine = PositionHealthEngine()
     
-    # Call buildup
+    # Call buildup (aggressive writing ceiling - threat)
     score, doi, threat, favor = engine._eval_pillar_oi(
         "NIFTY BANK", "BANKNIFTY55000CE", trade_is_bullish=True, override={"delta_oi": 30000}
     )
-    assert score > 0
-    assert favor is not None
-    assert "aggressive buildup" in favor
+    assert score < 0
+    assert threat is not None
+    assert "overhead supply" in threat or "writing" in threat
 
-    # Call unwinding / liquidation
+    # Call unwinding / short-covering (trapped writers covering - favor)
     score_unwind, doi_u, threat_u, favor_u = engine._eval_pillar_oi(
         "NIFTY BANK", "BANKNIFTY55000CE", trade_is_bullish=True, override={"delta_oi": -15000}
     )
-    assert score_unwind < 0
-    assert threat_u is not None
-    assert "unwinding" in threat_u
+    assert score_unwind > 0
+    assert favor_u is not None
+    assert "short-covering" in favor_u
 
 
 def test_pillar4_dealer_short_gamma_squeeze():
@@ -244,7 +244,7 @@ def test_composite_real_threat_pre_sl_bailout():
         current_premium=985.0,
         spot_override=54720.0,
         underlying_df_override=df,
-        oi_metrics_override={"delta_oi": -20000},
+        oi_metrics_override={"delta_oi": 35000},
     )
     
     assert report.real_threat is True
@@ -284,7 +284,7 @@ def test_composite_real_favor_target_expansion():
         current_premium=1035.0,
         spot_override=55300.0,
         underlying_df_override=df,
-        oi_metrics_override={"delta_oi": 45000},
+        oi_metrics_override={"delta_oi": -25000},
     )
     
     assert report.real_favor is True

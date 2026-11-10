@@ -128,7 +128,7 @@ This framework governs ALL trading strategies, execution engines, market regimes
 
 - **The Golden Balance & Asymmetric Payoff Invariant (Reward-Over-Risk Mandate)**:
   - Directional option buying must NEVER enter a trade where potential risk exceeds potential reward (Reward-to-Risk < 1.0).
-  - When profit targets are compressed to scalp boundaries (e.g. 22–32 pts on SENSEX, 8–14 pts on NIFTY) due to chop or positive Dealer GEX, the stop-loss MUST also be compressed to $\le \text{Target} \times 1.25$ while preserving the instrument noise floor.
+  - When profit targets are compressed to scalp boundaries (e.g. 22–32 pts on SENSEX, 8–14 pts on NIFTY) due to chop or positive Dealer GEX, the stop-loss MUST also be compressed to $\le \text{Target} \times 0.80$ ($\text{Target} \ge 1.25 \times \text{SL}$, ensuring $\text{Gross R:R} \ge 1.25:1$ and $\text{Net R:R} \ge 1.0:1$) while preserving the instrument noise floor.
   - If a compressed target is smaller than the instrument's noise floor (e.g. Target 27 pts < Noise Floor 30 pts on SENSEX), the trade is structurally unviable and MUST be strictly REJECTED (`is_rejected = True`).
   - Historical Forensic Proof: In `live_ledger.sqlite`, 38 trades entered with inverted Risk/Reward (SL > Target), resulting in 14 mega-losses (< -Rs 1,000) that destroyed -Rs 21,800.56 (more than the entire database deficit). Enforcing the Golden Balance eliminates this structural leakage.
 
@@ -148,7 +148,8 @@ This framework governs ALL trading strategies, execution engines, market regimes
   - Continuous Learning Mandate: Tier C is NEVER suppressed by daily alpha goal locks or session targets. It paper-tracks 24/7 in the background to continuously record market microstructure telemetry without risking operational capital.
 
 - **The 11-Year Benchmark Invariant (1,159 Trades across 2015–2026)**:
-  - All strategy evaluations, expectancy claims, and risk rules are benchmarked against the 11-year empirical NIFTY dataset (`reports/swing_15m_trades_2026-05-04_NIFTY_50_base.csv`):
+  - All multi-year macro evaluations and liquidity sweep rules are benchmarked against the 11-year empirical NIFTY dataset (`reports/swing_15m_trades_2026-05-04_NIFTY_50_base.csv`):
+    - **Architectural Attribution Disclosure**: This dataset originates from the unconstrained multi-day Swing ICT engine (`intraday_session=False`, mean holding duration `12.72 hours`, `30.8%` overnight gap holds) utilizing `pro_LiqSweep + VP + FVG`. While it demonstrates institutional multi-year macro expectancy, it must NEVER be cited as proof of intraday option buying performance (`intraday_session=True`, forced `15:15 IST` square-off).
     - Population: 1,159 trades, 61.35% Win Rate (711 Wins / 448 Losses).
     - Gross P&L: Rs 10,95,087.66 | Statutory Costs: Rs 82,960.71 | Net P&L: +Rs 10,12,126.95.
     - Profit Factor: 12.55 | Max Drawdown: -Rs 9,264.45 | Recovery Factor: 109.25 | Annualized Sharpe: 4.77.

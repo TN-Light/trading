@@ -167,8 +167,9 @@ class TestTrimHistoricalScanWindow:
 
     def test_data_bridge_calls_fetch_historical_with_5_days(self):
         """Primary intraday scan data must request days=5, not days=60."""
+        now_dt = datetime.now()
         recent_data = pd.DataFrame({
-            "timestamp": [datetime.now() - timedelta(minutes=i * 15) for i in range(120, 0, -1)],
+            "timestamp": [now_dt - timedelta(minutes=(i - 1) * 15) for i in range(120, 0, -1)],
             "open": range(120),
             "high": range(120),
             "low": range(120),

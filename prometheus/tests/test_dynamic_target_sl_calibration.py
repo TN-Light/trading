@@ -267,7 +267,7 @@ def test_tier_c_wide_structural_sl_bypasses_retest_expansion():
     assert res.target_gain_pts == pytest.approx(24.2, rel=1e-2)
     assert res.target_gain_pts < 35.0  # Must NOT inflate to 107.8 pts!
     # SL preserves structural protection clamped by single-lot risk ceiling (850 / 30 = 28.3 pts)
-    assert res.sl_pts == pytest.approx(28.3, rel=1e-2)
+    assert res.sl_pts == pytest.approx(20.0, rel=1e-2)  # Golden balance: max(noise_floor 20.0, 24.2 * 0.80) <= 28.3
 
 
 def test_tier_b_uncompressed_target_without_sl_inflation():
@@ -312,7 +312,7 @@ def test_excessive_sl_clamping_and_noise_protection():
         structural_sl_pts=50.4,
     )
     assert res_nifty.is_rejected is False
-    assert res_nifty.sl_pts == 13.1  # Clamped to Rs 850 budget ceiling (13.1 pts)
+    assert res_nifty.sl_pts == 8.5  # Golden balance: round(10.6 * 0.80, 1) = 8.5 pts <= 13.1
     assert res_nifty.target_gain_pts < 25.0  # Must NOT inflate to 60.5 pts!
 
     # 2. SENSEX with 75.7 pt SL: clamped to 42.5 pts (Rs 850 budget) without rejection
@@ -326,7 +326,7 @@ def test_excessive_sl_clamping_and_noise_protection():
         structural_sl_pts=75.7,
     )
     assert res_sensex.is_rejected is False
-    assert res_sensex.sl_pts == 33.8  # Golden balance: 27.0 * 1.25 <= 42.5
+    assert res_sensex.sl_pts == 22.0  # Golden balance: max(noise_floor 22.0, 27.0 * 0.80) <= 42.5
 
     # 3. BANK NIFTY with 89.8 pt SL: clamped to 28.3 pts (Rs 850 budget) without rejection
     res_bnf = calibrate_target_and_sl(
@@ -339,7 +339,7 @@ def test_excessive_sl_clamping_and_noise_protection():
         structural_sl_pts=89.8,
     )
     assert res_bnf.is_rejected is False
-    assert res_bnf.sl_pts == 28.3
+    assert res_bnf.sl_pts == 28.3  # Clamped to Rs 850 budget (28.3 pts) while Target is 37.4 pts
 
     # 4. Truly unviable setup: Compressed Target < Noise Floor -> Strictly REJECTED
     res_unviable = calibrate_target_and_sl(
@@ -431,9 +431,9 @@ def test_interface_contract_5tuple_unpacking():
     )
     target_gain_pts, sl_pts, tgt_price, sl_price, is_compressed = res
     assert target_gain_pts == pytest.approx(24.2, rel=1e-2)
-    assert sl_pts == pytest.approx(28.3, rel=1e-2)
+    assert sl_pts == pytest.approx(20.0, rel=1e-2)  # Golden balance: max(noise_floor 20.0, 24.2 * 0.80)
     assert tgt_price == pytest.approx(439.2, rel=1e-2)
-    assert sl_price == pytest.approx(386.7, rel=1e-2)
+    assert sl_price == pytest.approx(395.0, rel=1e-2)  # 415.0 - 20.0 = 395.0
     assert is_compressed is True
     assert res["target_gain_pts"] == target_gain_pts
     assert res.to_dict()["is_compressed"] is True
@@ -492,7 +492,7 @@ def test_nov05_single_lot_risk_budget_and_golden_balance_enforcement():
         structural_sl_pts=49.8,
     )
     assert res_bnf.is_rejected is False
-    assert res_bnf.sl_pts == 28.3
+    assert res_bnf.sl_pts == 20.0  # Golden balance: max(noise_floor 20.0, 24.2 * 0.80)
 
     # 2. Nifty Nov 05 Trade #1: SL clamped to Rs 850 budget (13.1 pts) without rejection
     res_nifty = calibrate_target_and_sl(
@@ -508,7 +508,7 @@ def test_nov05_single_lot_risk_budget_and_golden_balance_enforcement():
         structural_sl_pts=17.8,
     )
     assert res_nifty.is_rejected is False
-    assert res_nifty.sl_pts == 11.8  # Golden balance: 9.4 * 1.25 <= 13.1
+    assert res_nifty.sl_pts == 8.0  # Golden balance: max(noise_floor 8.0, 9.4 * 0.80) <= 13.1
     assert res_nifty.is_compressed is True
 
     # 3. SENSEX Nov 05 Trade #4: Compliant trade (30 pt SL, 32 pt target, Rs 600 risk <= Rs 850):

@@ -877,7 +877,7 @@ class TelegramBot:
             tier_info = classify_signal_tier(signal)
             assigned_tier = signal.get("tier") or tier_info.get("tier", "C")
             tier_badge = signal.get("tier_badge") or tier_info["tier_badge"]
-            action_line = tier_info["action_instruction"]
+            action_line = signal.get("action_instruction") or tier_info["action_instruction"]
             is_live_eligible = bool(signal.get("is_live_eligible", tier_info.get("is_live_eligible", False)))
             is_martingale_locked = bool(signal.get("is_martingale_locked_out", False))
             if is_martingale_locked:
@@ -931,7 +931,12 @@ class TelegramBot:
             vpr_val = signal.get("vpr60")
             vpr_str = f" | VPR₆₀: {float(vpr_val):.0%}" if vpr_val is not None else ""
             gex_val = signal.get("net_gex")
-            gex_str = f" | GEX: {float(gex_val)/1e7:+.1f}Cr" if gex_val is not None and abs(float(gex_val)) > 0 else ""
+            if gex_val is not None and abs(float(gex_val)) > 0:
+                g_num = float(gex_val)
+                g_cr = g_num / 1e7 if abs(g_num) >= 1e5 else g_num
+                gex_str = f" | GEX: {g_cr:+.1f}Cr" if abs(g_cr) > 0.01 else ""
+            else:
+                gex_str = ""
             zgl_val = signal.get("zgl")
             zgl_str = f" | ZGL: {float(zgl_val):.0f}" if zgl_val is not None and float(zgl_val) > 0 else ""
 
@@ -981,8 +986,15 @@ class TelegramBot:
                 strike_str = str(int(float(strike)))
                 mon = d.strftime("%b").upper()
                 
-                next_week = d + timedelta(days=7)
-                is_monthly = next_week.month != d.month
+                try:
+                    from prometheus.utils.indian_market import get_monthly_expiry, _resolve_weekly_expiry_day_name
+                    target_dt = d.date() if isinstance(d, dt) else d
+                    expiry_day_name = _resolve_weekly_expiry_day_name(symbol, target_dt)
+                    m_exp = get_monthly_expiry(target_dt.year, target_dt.month, weekday_name=expiry_day_name)
+                    is_monthly = (target_dt == m_exp)
+                except Exception:
+                    next_week = d + timedelta(days=7)
+                    is_monthly = next_week.month != d.month
                 
                 if is_monthly:
                     friendly_contract = f"{symbol} {mon} {strike_str} {option_type}"
@@ -1167,7 +1179,12 @@ class TelegramBot:
         vpr_val = signal.get("vpr60")
         vpr_str = f" | VPR₆₀: {float(vpr_val):.0%}" if vpr_val is not None else ""
         gex_val = signal.get("net_gex")
-        gex_str = f" | GEX: {float(gex_val)/1e7:+.1f}Cr" if gex_val is not None and abs(float(gex_val)) > 0 else ""
+        if gex_val is not None and abs(float(gex_val)) > 0:
+            g_num = float(gex_val)
+            g_cr = g_num / 1e7 if abs(g_num) >= 1e5 else g_num
+            gex_str = f" | GEX: {g_cr:+.1f}Cr" if abs(g_cr) > 0.01 else ""
+        else:
+            gex_str = ""
         zgl_val = signal.get("zgl")
         zgl_str = f" | ZGL: {float(zgl_val):.0f}" if zgl_val is not None and float(zgl_val) > 0 else ""
 

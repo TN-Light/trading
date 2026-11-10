@@ -42,7 +42,7 @@ def is_market_open_now() -> bool:
 def is_trading_day_today() -> bool:
     """Check if today is a trading day."""
     try:
-        from prometheus.utils.calendar import is_trading_day
+        from prometheus.utils.indian_market import is_trading_day
         return is_trading_day(date.today())
     except ImportError:
         return datetime.now().weekday() < 5
@@ -225,8 +225,11 @@ class LiveScanner:
         if vix > 28 and signal.action in ('BUY_CE', 'BUY_PE'):
             return f"VIX={vix:.1f} > 28 — option buying blocked (theta bleed)"
         
-        if vix < 10:
-            return f"VIX={vix:.1f} < 10 — dead market, premiums too thin"
+        from prometheus.config import get
+        is_low_vix_mode = bool(get("market.low_vix_mode", True))
+        min_vix = float(get("risk.low_vix_gate.min_vix", 9.0 if is_low_vix_mode else 10.0))
+        if vix < min_vix:
+            return f"VIX={vix:.1f} < {min_vix:.1f} — dead market, premiums too thin"
         
         return None  # OK
     
@@ -384,11 +387,7 @@ class LiveScanner:
                 results.append(result)
                 continue
             
-            # Step 3b: OI confluence — log only, do NOT modify confidence
-            # Rationale: the ±15% boost/penalty was unvalidated. OI data is
-            # logged and displayed in Telegram for manual review, but doesn't
-            # affect the pass/fail gate until we have trade data proving
-            # OI-confirmed signals actually outperform.
+            # Step 3b: OI Confluence & Opposing Wall Veto (Part 3 Rules)
             oi_info = None
             if self._oi_cache:
                 oi_info = self._oi_cache.get_oi_confluence(
@@ -398,6 +397,38 @@ class LiveScanner:
                     logger.info(
                         f"LiveScanner: {symbol} OI: {oi_info['summary']}"
                     )
+                    # Opposing Wall Veto (Stop Buying Into Institutional Supply)
+                    spot_px = float(oi_info.get("spot_price") or executable.entry_price or 0.0)
+                    atr_val = float(getattr(executable, "atr", 0.0) or (executable.raw.get("atr") if executable.raw else 40.0) or 40.0)
+                    opposing_veto = False
+                    veto_reason = ""
+                    if executable.direction == "bullish":
+                        call_wall = float(oi_info.get("resistance", 0.0) or 0.0)
+                        if call_wall > spot_px and (call_wall - spot_px) < (0.8 * atr_val):
+                            opposing_veto = True
+                            veto_reason = f"Call Wall defended at {call_wall:.0f} within 0.8 ATR ({call_wall - spot_px:.1f} pts)"
+                    elif executable.direction == "bearish":
+                        put_wall = float(oi_info.get("support", 0.0) or 0.0)
+                        if 0 < put_wall < spot_px and (spot_px - put_wall) < (0.8 * atr_val):
+                            opposing_veto = True
+                            veto_reason = f"Put Wall defended at {put_wall:.0f} within 0.8 ATR ({spot_px - put_wall:.1f} pts)"
+
+                    if opposing_veto:
+                        logger.info(f"LiveScanner: {symbol} rejected by Opposing OI Wall: {veto_reason}")
+                        result.gate = GateResult(
+                            verdict=GateVerdict.REJECT_OTHER,
+                            reason=f"Opposing OI Wall Veto: {veto_reason}",
+                        )
+                        results.append(result)
+                        continue
+
+                    # Apply confidence boost if OI agrees / writer trapping
+                    score_boost = float(oi_info.get("score_boost", 0.0) or 0.0)
+                    if score_boost > 0:
+                        executable.confidence = min(0.95, round(executable.confidence + score_boost, 2))
+                    elif score_boost < -0.10:
+                        executable.confidence = max(0.20, round(executable.confidence + score_boost, 2))
+
                     # Attach OI data to raw dict for Telegram notification
                     if executable.raw:
                         executable.raw['oi_pcr'] = oi_info.get('pcr', 0)
@@ -441,8 +472,15 @@ class LiveScanner:
                 executable.entry_price = real_ltp
                 if old_entry > 0:
                     ratio = real_ltp / old_entry
-                    executable.stop_loss = round(executable.stop_loss * ratio, 2)
+                    raw_sl = round(executable.stop_loss * ratio, 2)
                     executable.target = round(executable.target * ratio, 2)
+                    from prometheus.utils.indian_market import get_lot_size
+                    lot_sz = get_lot_size(symbol)
+                    max_sl_pts = round(850.0 / max(1, lot_sz), 2)
+                    if real_ltp > raw_sl:
+                        executable.stop_loss = max(raw_sl, round(real_ltp - max_sl_pts, 2))
+                    else:
+                        executable.stop_loss = raw_sl
                 if executable.raw:
                     executable.raw['entry_price'] = real_ltp
                     executable.raw['live_premium'] = real_ltp
@@ -533,10 +571,11 @@ class LiveScanner:
                 paper_capture_active = self._is_paper_capture_active()
                 if not paper_capture_active and hasattr(self._prometheus, "_dispatch_multi_account"):
                     try:
+                        b_int = getattr(executable, "bar_interval", "15minute")
                         self._prometheus._dispatch_multi_account(
                             exec_dict,
-                            is_intraday=(executable.bar_interval != "day"),
-                            bar_interval=executable.bar_interval
+                            is_intraday=(b_int != "day"),
+                            bar_interval=b_int
                         )
                     except Exception as mae:
                         logger.error(f"LiveScanner: multi-account dispatch failed: {mae}")
@@ -645,13 +684,29 @@ class LiveScanner:
                 new_premium = max(new_premium, old_premium * 0.5)
                 new_premium = max(new_premium, 1.0)
                 
+                # Shift stop-loss and target symmetrically to prevent inverted risk
+                premium_shift = old_premium - new_premium
+                if executable.stop_loss > 0:
+                    raw_sl = max(1.0, round(executable.stop_loss - premium_shift, 2))
+                    from prometheus.utils.indian_market import get_lot_size
+                    lot_sz = get_lot_size(symbol)
+                    max_sl_pts = round(850.0 / max(1, lot_sz), 2)
+                    executable.stop_loss = max(raw_sl, round(new_premium - max_sl_pts, 2))
+                    executable.stop_loss = min(executable.stop_loss, round(new_premium - 2.0, 2))
+                if executable.target > 0:
+                    executable.target = max(new_premium + 5.0, round(executable.target - premium_shift, 2))
+
                 # Update executable with pullback-adjusted premium
                 executable.entry_price = new_premium
                 if executable.raw:
                     executable.raw['entry_price'] = new_premium
+                    executable.raw['stop_loss'] = executable.stop_loss
+                    executable.raw['target'] = executable.target
                     executable.raw['pullback_fill_spot'] = current_spot
                     executable.raw['entry_type'] = 'pullback_limit'
                 exec_dict['entry_price'] = new_premium
+                exec_dict['stop_loss'] = executable.stop_loss
+                exec_dict['target'] = executable.target
                 
                 logger.info(
                     f"LiveScanner: {symbol} pullback FILLED — "
@@ -684,10 +739,11 @@ class LiveScanner:
                     paper_capture_active = self._is_paper_capture_active()
                     if not paper_capture_active and hasattr(self._prometheus, "_dispatch_multi_account"):
                         try:
+                            b_int = getattr(executable, "bar_interval", "15minute")
                             self._prometheus._dispatch_multi_account(
                                 exec_dict,
-                                is_intraday=(executable.bar_interval != "day"),
-                                bar_interval=executable.bar_interval
+                                is_intraday=(b_int != "day"),
+                                bar_interval=b_int
                             )
                         except Exception as mae:
                             logger.error(f"LiveScanner: multi-account dispatch failed: {mae}")
@@ -918,7 +974,8 @@ class LiveScanner:
                 try:
                     spot = self._get_underlying_spot(state.symbol)
                     strike = self._parse_strike(state.tradingsymbol)
-                    opt_type = "CE" if state.tradingsymbol.endswith("CE") else "PE"
+                    from prometheus.utils.options_math import OptionType
+                    opt_type = OptionType.CALL if state.tradingsymbol.endswith("CE") else OptionType.PUT
                     if spot <= 0 or strike <= 0:
                         continue
                     dte = max(1, days_to_expiry(state.symbol))

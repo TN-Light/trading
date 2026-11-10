@@ -223,8 +223,7 @@ class LivePriceFeed:
             pass
         ltp = self.get_ltp(instrument)
         if ltp > 0:
-            # Synthesize a tightish quote for paper-mode simulation only.
-            return (ltp, ltp * 0.999, ltp * 1.001)
+            return (ltp, None, None)
         return None
 
 
@@ -347,7 +346,7 @@ class LivePaperCapture:
             data_engine=self._data_engine,
             trend_aware=True,
             max_stagnation_bars=6,
-            heartbeat_interval_seconds=60,
+            heartbeat_interval_seconds=300,
         )
         self._tracker = tracker
         # PaperTradeEngine with high cap + allow_duplicate_instrument=True
@@ -1204,6 +1203,9 @@ class LivePaperCapture:
                     entry_spot=float(r.get("entry_spot") or 0.0),
                     atr=float(r.get("atr") or 0.0),
                     target_gain_pts=float(r.get("target_gain_pts") or 0.0),
+                    initial_sl=float(r.get("initial_sl") or 0.0),
+                    initial_risk_distance=float(r.get("initial_risk_distance") or 0.0),
+                    half_risk_set=bool(int(r.get("half_risk_set") or 0)),
                 )
                 # Inject into the tracker's in-memory dict ONLY if not
                 # already present (defensive — should never happen, but

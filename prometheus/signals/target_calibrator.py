@@ -199,6 +199,9 @@ def calibrate_target_and_sl(
     elif "SENSEX" in sym_u or "BSX" in sym_u:
         default_noise_floor = 22.0
         default_min_target = 22.0
+    elif "MIDCAP" in sym_u or "MIDCPNIFTY" in sym_u:
+        default_noise_floor = 5.0
+        default_min_target = 6.0
     else:
         default_noise_floor = 8.0
         default_min_target = 8.0
@@ -295,13 +298,13 @@ def calibrate_target_and_sl(
     max_allowable_sl = base_max_sl
     if is_low_vix is False and vix and vix > 18.0 and spot_atr > 0:
         vol_sl_cap = round(0.40 * spot_atr, 1)
-        max_allowable_sl = max(base_max_sl, vol_sl_cap)
+        max_allowable_sl = min(budget_sl_cap, max(base_max_sl, vol_sl_cap))
 
     is_rejected = False
     rejection_reason = ""
 
     # Rejection Check 1: Compressed Target < Instrument Noise Floor (GEMINI.md Section 7)
-    if is_compressed and target_gain_pts < actual_noise_floor:
+    if is_compressed and target_gain_pts <= actual_noise_floor:
         is_rejected = True
         rejection_reason = (
             f"Compressed target ({target_gain_pts:.1f} pts) < noise floor ({actual_noise_floor:.1f} pts) "
@@ -343,11 +346,14 @@ def calibrate_target_and_sl(
         # Golden Balance: Minimum Reward-to-Risk Invariant (GEMINI.md Section 7)
         # When targets are compressed to scalp boundaries (Tier C / Long Gamma),
         # stop-loss must ALSO be compressed to prevent inverted risk (Risk > Reward).
+        # Requires SL <= Target * 0.80 (Reward-to-Risk >= 1.25:1 gross, >= 1.0:1 net).
         if not is_rejected:
+            golden_sl_cap = round(target_gain_pts * 0.80, 1)
+            effective_golden_sl = max(actual_noise_floor, golden_sl_cap)
             if is_compressed:
-                sl_pts = min(sl_pts, max(actual_noise_floor, round(target_gain_pts * 1.25, 1)))
-            elif sl_pts > round(target_gain_pts * 1.25, 1):
-                sl_pts = max(actual_noise_floor, round(target_gain_pts * 1.25, 1))
+                sl_pts = min(sl_pts, effective_golden_sl)
+            elif sl_pts > effective_golden_sl:
+                sl_pts = effective_golden_sl
 
     if not is_rejected:
         sl_pts = max(actual_noise_floor, min(sl_pts, max_allowable_sl))

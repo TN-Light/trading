@@ -455,12 +455,16 @@ class PaperTrader(BrokerBase):
 
         if order.side == OrderSide.BUY:
             if pos.quantity >= 0:
-                # Adding to long
+                # Adding to long (option buying)
                 total_value = (pos.average_price * pos.quantity) + (fill_price * fill_qty)
                 pos.quantity += fill_qty
                 pos.average_price = total_value / pos.quantity if pos.quantity > 0 else 0
+                # Deduct cost strictly on long entries
+                cost = fill_price * fill_qty
+                self.available_cash -= cost
+                self.used_margin += cost
             else:
-                # Closing short
+                # Closing short (option cover)
                 close_qty = min(fill_qty, abs(pos.quantity))
                 realized_pnl = (pos.average_price - fill_price) * close_qty
 
@@ -474,7 +478,12 @@ class PaperTrader(BrokerBase):
                 self.available_cash += net_pnl
                 pos.quantity += fill_qty
                 if pos.quantity > 0:
+                    # Flipped to net long
+                    rem_qty = pos.quantity
                     pos.average_price = fill_price
+                    rem_cost = fill_price * rem_qty
+                    self.available_cash -= rem_cost
+                    self.used_margin += rem_cost
 
                 self.trade_history.append({
                     "timestamp": order.timestamp,
@@ -486,11 +495,6 @@ class PaperTrader(BrokerBase):
                     "costs": costs,
                     "net_pnl": round(net_pnl, 2),
                 })
-
-            # Deduct cost
-            cost = fill_price * fill_qty
-            self.available_cash -= cost
-            self.used_margin += cost
 
         elif order.side == OrderSide.SELL:
             if pos.quantity <= 0:

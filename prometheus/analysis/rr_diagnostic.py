@@ -106,9 +106,11 @@ class RRPerformanceAnalyzer:
         if 'net_pnl' in trade:
             pnl = float(trade['net_pnl'])
         else:
+            # Option contracts: long calls and long puts are both strictly LONG premium
             price_diff = exit_p - entry
-            if direction == 'bearish':
-                price_diff = -price_diff
+            is_spread = trade.get('is_spread', False) or 'spread' in str(trade.get('strategy', '')).lower()
+            if is_spread:
+                price_diff = entry - exit_p
             pnl = price_diff * qty
 
         if risk_per_unit is None or risk_per_unit == 0:

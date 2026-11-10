@@ -169,7 +169,8 @@ def test_target_calibrator_adaptive_volatility_ceiling():
         structural_sl_pts=30.0,
     )
     assert res_high_vix.is_rejected is False
-    assert res_high_vix.sl_pts == 30.0
+    # GEMINI.md §7: Hard single-lot risk ceiling of Rs 850 strictly caps NIFTY SL at 13.1 pts
+    assert res_high_vix.sl_pts == 13.1
 
 
 def test_live_bridge_today_net_pnl_and_consecutive_losses(tmp_path):

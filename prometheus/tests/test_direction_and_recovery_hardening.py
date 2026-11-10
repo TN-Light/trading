@@ -146,8 +146,8 @@ def test_crash_recovery_order_side_for_put_buying():
     placed_order = mock_broker.place_order.call_args[0][0]
     assert placed_order.side == OrderSide.SELL
 
-    # 3. PnL must be positive: (180 - 150) * 50 = +1500, NOT negative inverted!
-    assert pnl == pytest.approx(1500.0)
+    # 3. PnL must be positive: (180 - 150) * 50 = +1500 gross, net after statutory fees
+    assert pnl > 0 and pnl == pytest.approx(1410.92, abs=1.0)
 
 
 def test_crash_recovery_order_side_for_credit_spread():
@@ -200,8 +200,8 @@ def test_crash_recovery_order_side_for_credit_spread():
     placed_order = mock_broker.place_order.call_args[0][0]
     assert placed_order.side == OrderSide.BUY
 
-    # 3. PnL for credit spread: (entry - exit) * qty = (30 - 10) * 50 = +1000
-    assert pnl == pytest.approx(1000.0)
+    # 3. PnL for credit spread: (entry - exit) * qty = (30 - 10) * 50 = +1000 gross, net after statutory fees
+    assert pnl > 0 and pnl == pytest.approx(878.54, abs=1.0)
 
 
 def test_spread_fill_side_in_paper_engine_and_tracker():

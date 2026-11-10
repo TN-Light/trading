@@ -14,6 +14,7 @@ class ExecutionGate:
         self._daily_loss_limit = daily_loss_limit
         self._today_traded: Set[str] = set()
         self._last_bar_ts: Dict[str, str] = {}  # symbol -> last bar timestamp
+        self._recent_passes: Dict[str, list] = {}
         self._current_date: Optional[date] = None
         self._open_position_count: int = 0
         self._daily_pnl: float = 0.0
@@ -27,6 +28,8 @@ class ExecutionGate:
         """Reset daily state (call at market open)."""
         self._today_traded.clear()
         self._last_bar_ts.clear()
+        if hasattr(self, "_recent_passes"):
+            self._recent_passes.clear()
         self._daily_pnl = 0.0
         self._current_date = date.today()
         logger.info("ExecutionGate: daily state reset")
@@ -121,15 +124,29 @@ class ExecutionGate:
             self._last_bar_ts[symbol] = bar_ts
         self._today_traded.add(dedup_key)
         self._today_traded.add(inst_key)
+        if hasattr(self, "_recent_passes"):
+            self._recent_passes.setdefault(symbol, []).append((dedup_key, inst_key, bar_ts))
         
         logger.info(f"ExecutionGate: PASS — {symbol} {signal.action}")
         return GateResult(verdict=GateVerdict.PASS)
     
-    def undo_pass(self, symbol: str, direction: Optional[str] = None):
+    def undo_pass(self, symbol: str, direction: Optional[str] = None, instrument: Optional[str] = None):
         """Undo a PASS (e.g., if execution fails after gate passed)."""
         if direction:
             self._today_traded.discard(f"{symbol}_{direction}")
         else:
-            # For backward compatibility with callers/tests that don't pass direction
             prefix = f"{symbol}_"
             self._today_traded = {k for k in self._today_traded if not k.startswith(prefix)}
+        
+        if instrument:
+            self._today_traded.discard(instrument)
+
+        if hasattr(self, "_recent_passes") and symbol in self._recent_passes:
+            for d_key, i_key, b_ts in self._recent_passes.pop(symbol, []):
+                self._today_traded.discard(d_key)
+                self._today_traded.discard(i_key)
+                if self._last_bar_ts.get(symbol) == b_ts:
+                    self._last_bar_ts.pop(symbol, None)
+
+        # Allow immediate retry on the current bar
+        self._last_bar_ts.pop(symbol, None)

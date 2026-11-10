@@ -673,6 +673,18 @@ class PositionMonitor:
                             spot_disp = (curr_spot - state.entry_spot) if trade_is_bullish else (state.entry_spot - curr_spot)
                             min_progress = 0.5 * current_atr
                             if spot_disp < min_progress and current_price < entry * 1.05:
+                                # Severe Premium Theta Bleed Guard:
+                                premium_decay_pct = (entry - current_price) / max(entry, 1e-4) if entry > 0 else 0.0
+                                if premium_decay_pct >= 0.28:
+                                    logger.warning(
+                                        f"[MONITOR] Inactivity Kill-Switch triggered for {state.position_id}: "
+                                        f"Premium decayed {premium_decay_pct*100:.1f}% >= 28% during consolidation "
+                                        f"(LTP {current_price:.2f} vs Entry {entry:.2f}). Bypassing consolidation hold."
+                                    )
+                                    if self._on_exit:
+                                        self._on_exit(state.position_id, current_price, "inactivity_kill_switch")
+                                    return
+
                                 trend_intact = False
                                 health_report = None
                                 try:
@@ -740,6 +752,16 @@ class PositionMonitor:
 
             # 2. Fallback: option premium stagnation (< +3% gain after 3 bars / 45 min) when spot check wasn't performed
             if not is_stagnant and not spot_checked and current_price < entry * 1.03:
+                premium_decay_pct = (entry - current_price) / max(entry, 1e-4) if entry > 0 else 0.0
+                if premium_decay_pct >= 0.28:
+                    logger.warning(
+                        f"[MONITOR] Inactivity Kill-Switch triggered for {state.position_id}: "
+                        f"Premium decayed {premium_decay_pct*100:.1f}% >= 28% during fallback stagnation "
+                        f"(LTP {current_price:.2f} vs Entry {entry:.2f})."
+                    )
+                    if self._on_exit:
+                        self._on_exit(state.position_id, current_price, "inactivity_kill_switch")
+                    return
                 health_report = None
                 if self.health_engine and getattr(state, "strategy_type", "") != "credit_spread":
                     try:
@@ -822,7 +844,110 @@ class PositionMonitor:
             )
         )
 
-        if not state.breakeven_set:
+        gain_pts = price_for_trail - entry
+        progress = gain_pts / max(rd, 1.0)
+
+        # Trigger thresholds for higher stages
+        s3_pct = 1.22 if state.low_vix_mode else 1.32
+        lock3_pct = 1.18 if state.low_vix_mode else 1.24
+        s3_trigger = min(entry + rd * 2.0, entry * s3_pct)
+
+        s2_pct = 1.18 if state.low_vix_mode else 1.25
+        lock2_pct = 1.14 if state.low_vix_mode else 1.16
+        s2_trigger = min(entry + rd * 1.5, entry * s2_pct)
+
+        s1_trigger = min(entry + rd * 1.0, entry * 1.14) if state.low_vix_mode else (entry + rd * 1.0)
+        s05_trigger = entry + rd * 0.65
+
+        # ── Sequential Top-Down Evaluation (Stage 4 -> Stage 3 -> Stage 2 -> Stage 1 -> Stage 0.5 -> Stage 0) ──
+        if (state.trailing_stage3 and price_for_trail >= state.premium_hwm) or progress >= 3.5:
+            # Stage 4: Dynamic trail with high-water mark (floor never below Stage 3 +0.75R lock)
+            state.breakeven_set = True
+            state.half_risk_set = True
+            state.trailing_stage0_5 = True
+            state.trailing_activated = True
+            state.trailing_stage2 = True
+            state.trailing_stage3 = True
+            if price_for_trail > state.premium_hwm:
+                state.premium_hwm = price_for_trail
+            floor_sl = round(entry + rd * 0.75, 2)
+            trail_mult = 0.15 if is_weak_edge else (0.40 if is_strong_edge else 0.30)
+            trail_offset = (state.premium_hwm - entry) * trail_mult
+            dynamic_sl = round(state.premium_hwm - trail_offset, 2)
+            new_sl = max(floor_sl, dynamic_sl)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 4 DYNAMIC (mult={trail_mult:.2f}): "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (HWM={state.premium_hwm:.2f})"
+                )
+
+        elif (not state.trailing_stage3 and price_for_trail >= s3_trigger) or progress >= 2.0:
+            # Stage 3: Lock +0.75R profit at >= 2.0R gain, begin runner (+22% in Low-VIX mode)
+            state.breakeven_set = True
+            state.half_risk_set = True
+            state.trailing_stage0_5 = True
+            state.trailing_activated = True
+            state.trailing_stage2 = True
+            state.trailing_stage3 = True
+            new_sl = round(max(entry * lock3_pct, entry + rd * 0.75), 2)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 3 RUNNER (+0.75R Lock): "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f}, HWM={price_for_trail:.2f}"
+                )
+
+        elif (not state.trailing_stage2 and price_for_trail >= s2_trigger) or progress >= 1.5:
+            # Stage 2: Lock +0.65R profit at >= 1.5R gain (+18% in Low-VIX mode)
+            state.breakeven_set = True
+            state.half_risk_set = True
+            state.trailing_stage0_5 = True
+            state.trailing_activated = True
+            state.trailing_stage2 = True
+            new_sl = round(max(entry * lock2_pct, entry + rd * 0.65), 2)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 2 LOCK +0.65R: "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
+                )
+
+        elif (not state.trailing_activated and price_for_trail >= s1_trigger) or progress >= 1.0:
+            # Stage 1: Lock +0.50R profit at >= 1.0R gain (+14% in Low-VIX mode locks +8%)
+            state.breakeven_set = True
+            state.half_risk_set = True
+            state.trailing_stage0_5 = True
+            state.trailing_activated = True
+            lock_pct = 1.08
+            lock_r = 0.20 if state.low_vix_mode else 0.50
+            new_sl = round(max(entry * lock_pct if state.low_vix_mode else 0.0, entry + rd * lock_r), 2)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 1 LOCK: "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
+                )
+
+        elif (not getattr(state, "trailing_stage0_5", False) and price_for_trail >= s05_trigger) or progress >= 0.65:
+            # Stage 0.5: Lock +0.35R profit at >= 0.65R gain (bridge dead-zone)
+            state.breakeven_set = True
+            state.half_risk_set = True
+            state.trailing_stage0_5 = True
+            new_sl = round(entry + rd * 0.35, 2)
+            if new_sl > state.current_sl:
+                state.current_sl = new_sl
+                stage_changed = True
+                logger.info(
+                    f"[TRAIL] {state.position_id} Stage 0.5 LOCK +0.35R: "
+                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f}, gain=+{gain_pts:.2f} pts >= 0.65R)"
+                )
+
+        elif not state.breakeven_set:
             # Stage 0: Progressive Ratchet (Tier C Micro-Lock / Tier S/B Noise Floor Breakeven / Half-Risk Cut)
             sym_root = (getattr(state, "symbol", "") or "").upper()
             qty = int(getattr(state, "quantity", 0) or 0)
@@ -842,11 +967,9 @@ class PositionMonitor:
             if getattr(state, "low_vix_mode", False):
                 cost_buffer_pts = max(cost_buffer_pts, entry * 0.015)
 
-            gain_pts = price_for_trail - entry
             tgt_distance = getattr(state, "target_gain_pts", 0.0) or ((state.target - entry) if state.target > entry else 0.0)
             be_gain_threshold = min(10.0, tgt_distance * 0.50) if tgt_distance > 0 else 10.0
             be_trigger_pts = max(3.0, be_gain_threshold) + cost_buffer_pts
-            progress = gain_pts / max(rd, 1.0)
 
             # Weak Edge Capital Defense: Early half-risk cut without moving SL into entry noise envelope
             is_tier_runner = (getattr(state, "tier", "") or "").upper() in ("S", "B")
@@ -906,90 +1029,6 @@ class PositionMonitor:
                         f"[TRAIL] {state.position_id} Stage 0A HALF-RISK: "
                         f"SL {old_sl:.2f} -> {half_risk_sl:.2f} (LTP={price_for_trail:.2f}, Entry={entry:.2f})"
                     )
-
-        elif not state.trailing_activated and price_for_trail >= (min(entry + rd * 1.0, entry * 1.14) if state.low_vix_mode else (entry + rd * 1.0)):
-            # Stage 1: Lock +0.50R profit at >= 1.0R gain (+14% in Low-VIX mode locks +8%)
-            lock_pct = 1.08
-            lock_r = 0.20 if state.low_vix_mode else 0.50
-            new_sl = round(max(entry * lock_pct if state.low_vix_mode else 0.0, entry + rd * lock_r), 2)
-            if new_sl > state.current_sl:
-                state.current_sl = new_sl
-                state.trailing_stage0_5 = True
-                state.trailing_activated = True
-                stage_changed = True
-                logger.info(
-                    f"[TRAIL] {state.position_id} Stage 1 LOCK: "
-                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
-                )
-
-        elif not getattr(state, "trailing_stage0_5", False) and not state.trailing_activated and not state.trailing_stage2 and not state.trailing_stage3 and price_for_trail >= (entry + rd * 0.65):
-            # Stage 0.5: Lock +0.35R profit at >= 0.65R gain (bridge dead-zone)
-            s05_trigger = entry + rd * 0.65
-            new_sl = round(entry + rd * 0.35, 2)
-            if new_sl > state.current_sl:
-                state.current_sl = new_sl
-                state.trailing_stage0_5 = True
-                stage_changed = True
-                logger.info(
-                    f"[TRAIL] {state.position_id} Stage 0.5 LOCK +0.35R: "
-                    f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f}, gain=+{price_for_trail - entry:.2f} pts >= 0.65R)"
-                )
-
-        elif not state.trailing_stage2:
-            # Stage 2: Lock +0.65R profit at >= 1.5R gain (+18% in Low-VIX mode)
-            s2_pct = 1.18 if state.low_vix_mode else 1.25
-            lock_pct = 1.14 if state.low_vix_mode else 1.16
-            s2_trigger = min(entry + rd * 1.5, entry * s2_pct)
-            if price_for_trail >= s2_trigger:
-                new_sl = round(max(entry * lock_pct, entry + rd * 0.65), 2)
-                if new_sl > state.current_sl:
-                    state.current_sl = new_sl
-                    state.trailing_stage0_5 = True
-                    state.trailing_activated = True
-                    state.trailing_stage2 = True
-                    stage_changed = True
-                    logger.info(
-                        f"[TRAIL] {state.position_id} Stage 2 LOCK +0.65R: "
-                        f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
-                    )
-
-        elif not state.trailing_stage3:
-            # Stage 3: Lock +0.75R profit at >= 2.0R gain, begin runner (+22% in Low-VIX mode)
-            s3_pct = 1.22 if state.low_vix_mode else 1.32
-            lock_pct = 1.18 if state.low_vix_mode else 1.24
-            s3_trigger = min(entry + rd * 2.0, entry * s3_pct)
-            if price_for_trail >= s3_trigger:
-                new_sl = round(max(entry * lock_pct, entry + rd * 0.75), 2)
-                if new_sl > state.current_sl:
-                    state.current_sl = new_sl
-                    state.trailing_stage0_5 = True
-                    state.trailing_activated = True
-                    state.trailing_stage2 = True
-                    state.trailing_stage3 = True
-                    stage_changed = True
-                    logger.info(
-                        f"[TRAIL] {state.position_id} Stage 3 RUNNER (+0.75R Lock): "
-                        f"SL {old_sl:.2f} -> {new_sl:.2f}, HWM={price_for_trail:.2f}"
-                    )
-
-        else:
-            # Stage 4: Dynamic trail with high-water mark
-            if price_for_trail > state.premium_hwm:
-                state.premium_hwm = price_for_trail
-            floor_sl = entry + rd * 0.70
-            trail_mult = 0.15 if is_weak_edge else (0.40 if is_strong_edge else 0.30)
-            trail_offset = (state.premium_hwm - entry) * trail_mult
-            dynamic_sl = state.premium_hwm - trail_offset
-            new_sl = max(floor_sl, dynamic_sl)
-            if new_sl > state.current_sl:
-                state.current_sl = new_sl
-                stage_changed = True
-                logger.info(
-                    f"[TRAIL] {state.position_id} Stage 4 DYNAMIC (mult={trail_mult:.2f}): "
-                    f"SL {old_sl:.2f} -> {new_sl:.2f} "
-                    f"(HWM={state.premium_hwm:.2f})"
-                )
-
         # ── If SL changed, update broker order + persist ──
         if stage_changed and state.current_sl != old_sl:
             self._modify_broker_sl(state)

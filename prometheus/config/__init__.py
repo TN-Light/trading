@@ -37,6 +37,26 @@ CREDENTIAL_ENV_MAP = {
 }
 
 
+def _load_dotenv_if_present():
+    env_file = Path(__file__).resolve().parent.parent.parent / ".env"
+    if env_file.exists():
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'").strip('"')
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception:
+            pass
+
+_load_dotenv_if_present()
+
+
 def _get_env_credential(key_path: str) -> Optional[str]:
     env_key = CREDENTIAL_ENV_MAP.get(key_path)
     if not env_key:
@@ -65,10 +85,13 @@ def load_credentials(creds_path: Optional[str] = None) -> dict:
     path = Path(creds_path) if creds_path else CREDENTIALS_FILE
 
     if not path.exists():
-        raise FileNotFoundError(f"Credentials file not found: {path}")
+        # Fall back gracefully if environment variables are set
+        if any(os.getenv(v) for v in CREDENTIAL_ENV_MAP.values()):
+            return _credentials
+        raise FileNotFoundError(f"Credentials file not found: {path} and no environment variables set")
 
     with open(path, "r") as f:
-        _credentials = yaml.safe_load(f)
+        _credentials = yaml.safe_load(f) or {}
 
     return _credentials
 

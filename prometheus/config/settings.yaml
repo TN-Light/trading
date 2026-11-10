@@ -329,7 +329,7 @@ intraday:
       strike_otm_steps: 1
       hedge_otm_steps: 3
       min_credit_pct: 0.15
-      max_days_to_expiry: 3
+      max_days_to_expiry: 1
       strategy_preference: credit_spread
     premium_targeting_enabled: true
     profiles:
@@ -426,7 +426,7 @@ market:
   lot_sizes:
     NIFTY 50: 65
     NIFTY BANK: 30
-    NIFTY FIN SERVICE: 65
+    NIFTY FIN SERVICE: 60
     NIFTY MIDCAP SELECT: 120
     SENSEX: 20
   stocks: []  # Aug-17: removed 6 F&O stocks — zero backtest coverage,
@@ -623,5 +623,5 @@ paper_capture:
   enable_trailing: true                  # 5-stage trailing stop logic
   default_max_bars_intraday: 16          # 15min bars (matches intraday.v2.time_stop_bars_15min)
   default_max_bars_swing: 96            # swing time-stop default
-  cost_per_side_bps: 1.0                 # simulated Zerodha-style per-side cost
+  cost_per_side_bps: 35.0                # realistic statutory cost per side (0.15% STT + fees)
   slippage_bps: 15                      # 0.15% (matches backtest engine default)

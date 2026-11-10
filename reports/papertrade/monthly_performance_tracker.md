@@ -1,9 +1,9 @@
 # 📊 PROMETHEUS — Monthly Performance Tracker
 
-**Tracking Period:** August 2026  
+**Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 44,079.23 (-293.86%)**  
-**Last Updated:** 2026-11-05 16:00:21 IST  
+**Current Realized Net P&L:** **🔴 -Rs 43,226.64 (-288.18%)**  
+**Last Updated:** 2026-11-10 08:46:22 IST  
 
 ---
 
@@ -11,15 +11,15 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 44,079.23** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-293.86%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **47** | 20–22 days | In Progress |
-| **Green / Red Days** | **12 Green / 21 Red / 14 BE** | > 65% Green | 25.5% |
-| **Total Trades** | **158** | ~3–5 / day | Tracked |
-| **Win Rate** | **38.0%** (60W / 98L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.61** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 51,845.39 | — | Winning Trades |
-| **Gross Loss** | -Rs 84,590.26 | — | Losing Trades |
+| **Net Realized P&L** | **-Rs 43,226.64** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-288.18%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **51** | 20–22 days | In Progress |
+| **Green / Red Days** | **14 Green / 22 Red / 15 BE** | > 65% Green | 27.5% |
+| **Total Trades** | **168** | ~3–5 / day | Tracked |
+| **Win Rate** | **39.9%** (67W / 101L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.65** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 56,265.70 | — | Winning Trades |
+| **Gross Loss** | -Rs 87,090.46 | — | Losing Trades |
 
 ---
 
@@ -74,6 +74,10 @@
 | **2026-11-02** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 41,260.1** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
 | **2026-11-03** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 41,260.1** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
 | **2026-11-05** | 4 | 1W / 3L | 25% | +Rs 221 | -Rs 2,651 | **🔴 -Rs 2,819.2** | -2.8% | **-Rs 44,079.2** | Intraday paper trading session: 4 trades (1W / 3L), Net P&L: Rs -2,819.16 |
+| **2026-11-06** | 6 | 3W / 3L | 50% | +Rs 832 | -Rs 2,500 | **🔴 -Rs 2,292.0** | -2.3% | **-Rs 46,371.2** | Intraday paper trading session: 6 trades (3W / 3L), Net P&L: Rs -2,291.96 |
+| **2026-11-08** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 46,371.2** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
+| **2026-11-09** | 2 | 2W / 0L | 100% | +Rs 1,088 | -Rs 0 | **🟢 +Rs 844.5** | +0.8% | **-Rs 45,526.6** | Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +844.55 |
+| **2026-11-10** | 2 | 2W / 0L | 100% | +Rs 2,500 | -Rs 0 | **🟢 +Rs 2,300.0** | +2.2% | **-Rs 43,226.6** | Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +2,300.00 |
 
 ---
 

@@ -91,6 +91,8 @@ def test_credit_spread_dynamic_hedge_discovery_fallback():
     """Verify CreditSpreadStrategy dynamically probes and selects fallback hedge strike when primary is unlisted."""
     strat = CreditSpreadStrategy(max_days_to_expiry=1)
     df = _build_synthetic_bars(trend="neutral")
+    # Shift today's session bars so spot close is 23500 (Bull Put short strike = 23500 - 150 = 23350)
+    df.loc[df["timestamp"] >= "2026-09-22", ["open", "high", "low", "close"]] += 50.0
     mock_chain = MockOptionChainWithMissingStrike()
 
     sig = strat.evaluate_spread(
@@ -98,6 +100,7 @@ def test_credit_spread_dynamic_hedge_discovery_fallback():
         symbol="NIFTY 50",
         capital=100000,
         option_chain=mock_chain,
+        trend="bullish",
     )
 
     assert sig is not None, "Credit spread should NOT be None despite missing 23200 strike!"

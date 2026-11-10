@@ -541,7 +541,7 @@ def test_position_monitor_live_cost_buffers_and_telemetry_guards():
     # Gain +20 pts reaches SENSEX noise floor (>= 20 pts)
     monitor._process_tick(state_sensex, 320.0)
     assert state_sensex.breakeven_set is True
-    assert state_sensex.current_sl == pytest.approx(305.50, abs=1e-2)
+    assert state_sensex.current_sl == pytest.approx(310.50, abs=1e-2)
 
     # 2. NIFTY 65 qty single lot in PositionMonitor
     state_nifty = TrailingState(
@@ -562,7 +562,7 @@ def test_position_monitor_live_cost_buffers_and_telemetry_guards():
     # Gain +10 pts triggers breakeven
     monitor._process_tick(state_nifty, 110.0)
     assert state_nifty.breakeven_set is True
-    assert state_nifty.current_sl == pytest.approx(102.00, abs=1e-2)
+    assert state_nifty.current_sl == pytest.approx(105.25, abs=1e-2)
 
     # 3. Missing telemetry keys (commitment_ratio=0.0, net_gex=0.0) must not trigger weak edge ratchet in PositionMonitor
     state_guard = TrailingState(

@@ -276,8 +276,13 @@ class DataStore:
             df = df.sort_values("timestamp").reset_index(drop=True)
             # Mixed historical rows can contain both tz-aware and tz-naive strings.
             # Parse robustly in UTC and then store as tz-naive for downstream compatibility.
-            ts = pd.to_datetime(df["timestamp"], errors="coerce", format="mixed", utc=True)
-            df["timestamp"] = ts.dt.tz_localize(None)
+            ts = pd.to_datetime(df["timestamp"], errors="coerce", format="mixed")
+            # Convert tz-aware timestamps to IST clock time; leave tz-naive as IST
+            from prometheus.utils.indian_market import IST
+            if getattr(ts.dt, "tz", None) is not None:
+                df["timestamp"] = ts.dt.tz_convert(IST).dt.tz_localize(None)
+            else:
+                df["timestamp"] = ts
             df = df.dropna(subset=["timestamp"]).reset_index(drop=True)
         return df
 

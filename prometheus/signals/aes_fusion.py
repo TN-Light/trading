@@ -118,7 +118,8 @@ class AesFusionEngine:
             return "EXPLOSIVE", 1.5   # 150% sizing (Kelly Max)
 
 
-    def get_bounded_sizing(self, edge_score: int, available_capital: float, lot_premium: float) -> Tuple[str, int]:
+    def get_bounded_sizing(self, edge_score: int, available_capital: float, lot_premium: float, max_lots: int = 1) -> Tuple[str, int]:
+        """Calculates bounded position sizing respecting the Single-Lot Rule (GEMINI.md Section 2)."""
         tier, allocation_multiplier = self.get_sizing_tier(edge_score)
         if tier == "REJECT":
             return "REJECT", 0
@@ -126,7 +127,7 @@ class AesFusionEngine:
         if max_affordable_lots < 1:
             return "REJECT_INSUFFICIENT_FUNDS", 0
         if available_capital <= 25000:
-            return tier, 1
+            return tier, min(1, max_lots)
         calculated_lots = int(max_affordable_lots * allocation_multiplier)
-        final_lots = max(1, min(calculated_lots, max_affordable_lots))
+        final_lots = max(1, min(calculated_lots, max_affordable_lots, max_lots))
         return tier, final_lots

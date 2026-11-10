@@ -50,12 +50,15 @@ class StrategyDriftSupervisor:
         self._in_memory_trades: List[Dict[str, Any]] = []
 
 
-    def record_trade(self, pnl: float, strategy: str = "", trade_id: str = "") -> None:
-        """Record a completed trade outcome for online rolling adaptation."""
+    def record_trade(self, pnl: float, strategy: str = "", trade_id: str = "", tier: str = "B") -> None:
+        """Record a completed trade outcome for online rolling adaptation (skips Tier C paper noise)."""
+        if str(tier).upper() == "C":
+            return
         self._in_memory_trades.append({
             "pnl": float(pnl),
             "strategy": strategy,
             "trade_id": trade_id,
+            "tier": tier,
         })
 
     def get_recent_pnls(self, strategy: str = "") -> List[float]:
@@ -63,13 +66,8 @@ class StrategyDriftSupervisor:
         Retrieve recent trade PnLs, prioritizing in-memory live stream
         with fallback to persistent SQLite ledger if db_path is provided and no in-memory trades exist.
         """
-        # If in-memory trades have been recorded, use them directly
-        if self._in_memory_trades:
-            if strategy:
-                return [t["pnl"] for t in self._in_memory_trades if t.get("strategy") == strategy][-self.rolling_window:]
-            return [t["pnl"] for t in self._in_memory_trades][-self.rolling_window:]
-
-        # Query persistent SQLite ledger only if db_path is explicitly set and exists
+        # Combine persistent SQLite ledger with recent in-memory trades (Defect 40 fix: avoid shadowing)
+        db_trades: List[Dict[str, Any]] = []
         if self.db_path:
             p = Path(self.db_path)
             if p.exists():
@@ -96,11 +94,19 @@ class StrategyDriftSupervisor:
                     rows = cursor.fetchall()
                     conn.close()
                     if rows:
-                        return [float(r[0]) for r in reversed(rows)]
+                        db_trades = [{'pnl': float(r[0]), 'strategy': strategy, 'trade_id': ''} for r in reversed(rows)]
                 except Exception as e:
                     logger.warning(f"StrategyDriftSupervisor: Failed to query ledger {e}")
 
-        return []
+        # Combine DB trades with in-memory trades (Defect 40 fix: avoid shadowing SQLite ledger)
+        combined = list(db_trades)
+        for t in self._in_memory_trades:
+            if not strategy or t.get('strategy') == strategy:
+                combined.append(t)
+
+        if strategy:
+            return [t['pnl'] for t in combined if t.get('strategy') == strategy][-self.rolling_window:]
+        return [t['pnl'] for t in combined][-self.rolling_window:]
 
 
 

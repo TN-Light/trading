@@ -1,3 +1,9 @@
+# ═══════════════════════════════════════════════════════════════════════
+# LEGACY RESEARCH SCRIPT: Apex Hunter / Swing 15M Engine
+# Architectural Status: Abandoned exploratory research track.
+# Production Engine: PriceActionMomentumScanner (ORB + VWAP + SuperTrend + ADX)
+# ═══════════════════════════════════════════════════════════════════════
+
 #!/usr/bin/env python3
 """
 DD Diagnostic: Realized vs Unrealized Drawdown Split
@@ -84,9 +90,13 @@ def main():
     hourly_bias_map = {}
     if len(data) >= 10:
         hourly_vwap = calculate_vwap(data.copy())
+        daily_dates = sorted(list(set(str(ts)[:10] for ts in data["timestamp"])))
+        date_to_next = {daily_dates[k]: daily_dates[k+1] for k in range(len(daily_dates)-1)}
         for i in range(10, len(data)):
             chunk = data.iloc[max(0, i - 20):i + 1]
-            date_key = str(chunk["timestamp"].iloc[-1])[:10]
+            current_date_val = str(chunk["timestamp"].iloc[-1])[:10]
+            # Anti-Lookahead: map closing bias of session T to session T+1
+            date_key = date_to_next.get(current_date_val, current_date_val)
             recent_h = chunk.tail(5)
             highs = recent_h["high"].values
             lows = recent_h["low"].values

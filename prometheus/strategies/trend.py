@@ -214,6 +214,9 @@ class TrendStrategy:
 
         option_target = premium + (index_target_move * abs(delta))
 
+        budget_sl_pts = round(850.0 / lot_size, 1)
+        option_sl_pts = min(max(5.0, index_sl_move * abs(delta)), budget_sl_pts, premium * 0.40)
+        option_sl = round(max(1.0, premium - option_sl_pts), 2)
         risk_per_lot = (premium - option_sl) * lot_size
         reward_per_lot = (option_target - premium) * lot_size
 

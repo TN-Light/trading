@@ -122,14 +122,24 @@ def _parse_expiry(expiry_in) -> Optional[date]:
 
 
 def _is_monthly_expiry(d: date) -> bool:
-    """True if ``d`` is the last occurrence of its weekday in its month.
+    """True if ``d`` is the last occurrence of its weekday in its month (or holiday preponed).
 
     This is the standard NSE/BSE convention: a monthly options contract expires
     on the LAST occurrence of its weekday-of-the-month (Tuesday for NSE post
     Sep 2025, Thursday for BSE/SENSEX); everything else is treated as a weekly
     contract.
     """
-    return (d + timedelta(days=7)).month != d.month
+    if (d + timedelta(days=7)).month != d.month:
+        return True
+    try:
+        from prometheus.utils.indian_market import get_monthly_expiry
+        return d in (
+            get_monthly_expiry(d.year, d.month, "Tuesday"),
+            get_monthly_expiry(d.year, d.month, "Thursday"),
+            get_monthly_expiry(d.year, d.month, "Wednesday"),
+        )
+    except Exception:
+        return False
 
 
 _MONTH_CODES = {

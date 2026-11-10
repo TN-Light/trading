@@ -290,9 +290,15 @@ class RiskManager:
                 f"(limit: {self.max_correlated_pct}%)"
             )
 
-        # 10b. Block duplicate instrument positions outright
-        if any(p.get("symbol") == trade.get("symbol") for p in self._open_positions):
-            violations.append("Duplicate instrument position not allowed (symbol already open)")
+        # 10b. Block duplicate instrument positions outright (check specific instrument contract unless multi-trade disabled)
+        allow_multi = getattr(self, "allow_multiple_trades_per_symbol", False)
+        trade_inst = trade.get("instrument") or trade.get("tradingsymbol") or trade.get("symbol")
+        if not allow_multi:
+            if any(p.get("symbol") == trade.get("symbol") for p in self._open_positions):
+                violations.append("Duplicate instrument position not allowed (symbol already open)")
+        else:
+            if any((p.get("instrument") or p.get("tradingsymbol") or p.get("symbol")) == trade_inst for p in self._open_positions):
+                violations.append(f"Duplicate instrument position not allowed ({trade_inst} already open)")
 
         # Warnings (non-blocking)
         if trade_cost > max_position_value * 0.8:
@@ -372,7 +378,7 @@ class RiskManager:
         # Allow a 1-lot floor if the total risk for 1 lot does not exceed 6% of capital.
         if lots < 1:
             loss_for_one_lot = risk_per_unit * lot_size
-            small_account_risk_limit = self.current_capital * 0.06
+            small_account_risk_limit = min(self.current_capital * 0.06, 850.0)
             if self.current_capital < 50000 and loss_for_one_lot <= small_account_risk_limit and dd_mult > 0.0:
                 lots = 1
                 logger.info(
@@ -404,7 +410,7 @@ class RiskManager:
                 one_lot_cost = entry_price * lot_size
                 if (
                     self.current_capital < 50000
-                    and one_lot_risk <= (self.current_capital * 0.06)
+                    and one_lot_risk <= min(self.current_capital * 0.06, 850.0)
                     and one_lot_cost <= (self.current_capital * 0.50)
                 ):
                     lots = 1
@@ -440,17 +446,12 @@ class RiskManager:
         """
         atr_sl_distance = atr * self.atr_multiplier
 
-        if direction == "bullish":
-            sl = entry_price - atr_sl_distance
-        else:
-            sl = entry_price + atr_sl_distance
+        # Option buying (both Call and Put) are long premium: stop loss is ALWAYS below entry price
+        sl = entry_price - atr_sl_distance
 
         # Cap stop loss at max allowed
         max_loss_pct = self.max_stop_loss_pct / 100
-        if direction == "bullish":
-            sl = max(sl, entry_price * (1 - max_loss_pct))
-        else:
-            sl = min(sl, entry_price * (1 + max_loss_pct))
+        sl = max(1.0, max(sl, entry_price * (1 - max_loss_pct)))
 
         return round(sl, 2)
 

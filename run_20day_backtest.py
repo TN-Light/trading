@@ -1,3 +1,9 @@
+# ═══════════════════════════════════════════════════════════════════════
+# LEGACY RESEARCH SCRIPT: Apex Hunter / Swing 15M Engine
+# Architectural Status: Abandoned exploratory research track.
+# Production Engine: PriceActionMomentumScanner (ORB + VWAP + SuperTrend + ADX)
+# ═══════════════════════════════════════════════════════════════════════
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -57,9 +63,12 @@ def run_swing_15m_backtest(symbol: str, days: int = 20):
     hourly_bias_map = {}
     if not data_hourly.empty and len(data_hourly) >= 10:
         hourly_vwap = calculate_vwap(data_hourly.copy())
+        daily_dates = sorted(list(set(str(ts)[:10] for ts in data_hourly["timestamp"])))
+        date_to_next = {daily_dates[k]: daily_dates[k+1] for k in range(len(daily_dates)-1)}
         for i in range(10, len(data_hourly)):
             chunk = data_hourly.iloc[max(0, i - 20):i + 1]
-            date_key = str(chunk["timestamp"].iloc[-1])[:10]
+            cur_date = str(chunk["timestamp"].iloc[-1])[:10]
+            date_key = date_to_next.get(cur_date, cur_date)
             recent_h = chunk.tail(5)
             highs = recent_h["high"].values
             lows = recent_h["low"].values

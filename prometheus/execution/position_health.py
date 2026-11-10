@@ -127,6 +127,8 @@ class PositionHealthEngine:
             entry_spot = float(state.get("entry_spot", 0.0) or 0.0)
             risk_dist = float(state.get("risk_distance", state.get("initial_risk_distance", 0.0)) or 0.0)
             tier = (str(state.get("tier", "") or "")).upper()
+            bars_held = int(state.get("entry_bar_count", state.get("bars_held", 0)) or 0)
+            entry_iv = state.get("entry_iv", None)
         else:
             pos_id = getattr(state, "position_id", getattr(state, "trade_id", "UNKNOWN"))
             symbol = getattr(state, "symbol", getattr(state, "underlying", "NIFTY"))
@@ -136,6 +138,8 @@ class PositionHealthEngine:
             entry_spot = float(getattr(state, "entry_spot", 0.0) or 0.0)
             risk_dist = float(getattr(state, "risk_distance", getattr(state, "initial_risk_distance", 0.0)) or 0.0)
             tier = (getattr(state, "tier", "") or "").upper()
+            bars_held = int(getattr(state, "entry_bar_count", getattr(state, "bars_held", 0)) or 0)
+            entry_iv = getattr(state, "entry_iv", None)
         if hasattr(direction, "value"):
             direction = direction.value
         direction = str(direction).lower()
@@ -270,7 +274,7 @@ class PositionHealthEngine:
         p6_score, theta_threat = self._eval_pillar_theta(
             current_premium=current_premium,
             entry_premium=entry_premium,
-            bars_held=getattr(state, "entry_bar_count", getattr(state, "bars_held", 0)),
+            bars_held=bars_held,
         )
         p_scores["P6_Theta"] = p6_score
         report.theta_penalty = p6_score
@@ -281,7 +285,7 @@ class PositionHealthEngine:
         # PILLAR 7: Implied Volatility (IV) Trend & Vega Coherence
         # ─────────────────────────────────────────────────────────────────
         p7_score, iv_drift_val, iv_threat, iv_favor = self._eval_pillar_iv(
-            symbol=symbol, tradingsymbol=tsym, entry_iv=getattr(state, "entry_iv", None)
+            symbol=symbol, tradingsymbol=tsym, entry_iv=entry_iv
         )
         p_scores["P7_IV"] = p7_score
         report.iv_drift = iv_drift_val
@@ -344,16 +348,15 @@ class PositionHealthEngine:
         # Bank Nifty & Sensex carry 3-8 pt bid-ask spread and 10-15 pt 1-minute candle noise.
         # Preserve technical SL outside noise envelope for Tier S/B setups.
         noise_buffer = 15.0 if ("BANK" in sym_upper or "SENSEX" in sym_upper) else 6.0
-        tier = (getattr(state, "tier", "B") or "B").upper()
-        bars_held = getattr(state, "entry_bar_count", getattr(state, "bars_held", 0))
-
+        tier = (tier or (state.get("tier") if isinstance(state, dict) else getattr(state, "tier", "B")) or "B").upper()
+        # bars_held already extracted safely above
         if composite_score <= -35.0 or (composite_score <= -25.0 and len(threats) >= 2):
             report.real_threat = True
             is_tier_sb = tier in ("S", "B")
 
             # Check if underlying spot has structurally failed
-            spot_val = getattr(report, "spot_price", 0.0) or float(spot if ('spot' in locals() and spot is not None) else 0.0)
-            entry_spot_val = float(getattr(state, "entry_spot", 0.0) or 0.0)
+            spot_val = spot_price
+            entry_spot_val = entry_spot
             spot_breakdown = False
             if spot_val > 0 and entry_spot_val > 0:
                 trade_bull = trade_is_bullish
@@ -559,25 +562,25 @@ class PositionHealthEngine:
 
             if trade_is_bullish:
                 if delta_oi < -10000:
-                    threat_msg = f"Call open interest unwinding ({delta_oi:+,} contracts) — smart money closing longs"
-                    base_score = -65.0
-                elif delta_oi > 25000:
-                    favor_msg = f"Call open interest aggressive buildup ({delta_oi:+,} contracts) — institutional backing"
+                    favor_msg = f"Call open interest short-covering ({delta_oi:+,} contracts) — trapped writers buying to cover"
                     base_score = +70.0
+                elif delta_oi > 25000:
+                    threat_msg = f"Call open interest aggressive writing ({delta_oi:+,} contracts) — overhead supply wall"
+                    base_score = -65.0
             else:
                 if delta_oi < -10000:
-                    threat_msg = f"Put open interest unwinding ({delta_oi:+,} contracts) — smart money closing shorts"
-                    base_score = -65.0
-                elif delta_oi > 25000:
-                    favor_msg = f"Put open interest aggressive buildup ({delta_oi:+,} contracts) — institutional backing"
+                    favor_msg = f"Put open interest unwinding ({delta_oi:+,} contracts) — support floor capitulation"
                     base_score = +70.0
+                elif delta_oi > 25000:
+                    threat_msg = f"Put open interest aggressive writing ({delta_oi:+,} contracts) — downside support absorption"
+                    base_score = -65.0
 
             score = base_score
 
             # Commitment Ratio Evaluation:
             # 1. Institutional commitment ratio >= 0.25 reinforces directional conviction (+25 pts)
-            # Requires positive delta_oi supporting trade direction
-            if commitment >= 0.25 and delta_oi > 0 and base_score >= 0:
+            # Either positive delta_oi or active short-covering base_score > 0
+            if commitment >= 0.25 and (delta_oi > 0 or base_score > 0) and base_score >= 0:
                 score += 25.0
                 if favor_msg:
                     favor_msg = f"{favor_msg} + strong institutional commitment ({commitment:.2f})"

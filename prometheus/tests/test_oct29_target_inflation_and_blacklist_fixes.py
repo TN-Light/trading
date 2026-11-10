@@ -50,7 +50,7 @@ def test_target_calibrator_clamps_today_trade_6_and_7():
         structural_sl_pts=50.4,
     )
     assert res6.is_rejected is False
-    assert res6.sl_pts == 13.1
+    assert res6.sl_pts == 8.5  # Golden balance: round(10.6 * 0.80, 1) = 8.5 pts <= 13.1
     assert res6.target_gain_pts < 25.0  # Must NOT be 60.5 pts!
 
     # Trade #7: SENSEX PriceAction Momentum with 75.7 pt SL -> clamped to 42.5 pts (Rs 850 budget)
@@ -64,7 +64,7 @@ def test_target_calibrator_clamps_today_trade_6_and_7():
         structural_sl_pts=75.7,
     )
     assert res7.is_rejected is False
-    assert res7.sl_pts == 33.8  # Golden balance: 27.0 * 1.25 <= 42.5
+    assert res7.sl_pts == 22.0  # Golden balance: max(noise_floor 22.0, 27.0 * 0.80) <= 42.5
 
 
 def test_target_calibrator_accepts_today_trade_1_2_3():

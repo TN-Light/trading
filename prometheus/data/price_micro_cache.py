@@ -287,7 +287,7 @@ class SharedPriceMicroCache:
             if not t_str:
                 continue
             entry = self._cache.get(t_str)
-            if entry is not None and (now - entry.timestamp) <= ttl:
+            if entry is not None and not getattr(entry, "is_stale", False) and (now - entry.timestamp) <= ttl:
                 res[t_str] = entry
                 self.stats["hits"] += 1
             else:

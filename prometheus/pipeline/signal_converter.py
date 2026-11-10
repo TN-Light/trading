@@ -128,6 +128,9 @@ class SignalConverter:
                 underlying = sym_upper
             instrument = _generate_tradingsymbol(underlying, expiry, strike, option_type)
         
+        t_mode = raw.get('trade_mode') or ('swing' if raw.get('bar_interval') == 'day' or raw.get('primary_interval') == 'day' else 'intraday')
+        b_interval = raw.get('bar_interval', raw.get('primary_interval', '15minute'))
+
         executable = ExecutableSignal(
             symbol=symbol,
             action=action,
@@ -144,7 +147,8 @@ class SignalConverter:
             instrument=instrument,
             confidence=confidence,
             bar_timestamp=signal_result.bar_timestamp,
-            trade_mode='swing',
+            trade_mode=t_mode,
+            bar_interval=b_interval,
             regime=signal_result.regime,
             strategy=signal_result.strategy,
             reasons=signal_result.reasons,

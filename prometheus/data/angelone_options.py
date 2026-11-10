@@ -496,9 +496,12 @@ class AngelOneOptionChain:
         with self._oi_lock:
             self._check_oi_date_roll(today_str)
 
-        cache_key = underlying
+        # Anti-Cache Poisoning Guard: key by underlying AND expiry to prevent single-expiry queries poisoning full lookups
+        cache_key = f"{underlying}:{expiry_date[:10] if expiry_date else 'ALL'}"
         if self._cache_date == today_str and cache_key in self._token_cache:
             contracts = self._token_cache[cache_key]
+        elif self._cache_date == today_str and underlying in self._token_cache:
+            contracts = self._token_cache[underlying]
         else:
             obj = self._get_obj()
             if not obj:
@@ -610,6 +613,8 @@ class AngelOneOptionChain:
                 ]
 
                 self._token_cache[cache_key] = contracts
+                if not expiry_date:
+                    self._token_cache[underlying] = contracts
                 self._cache_date = today_str
                 logger.info(
                     f"Angel One: discovered {len(contracts)} {seg} contracts "
@@ -771,12 +776,13 @@ class AngelOneOptionChain:
                     expiry_weekday = _resolve_weekly_expiry_day_name(
                         underlying, on_date=date(now_year, month, 15),
                     )
-                    monthly_curr = get_monthly_expiry(now_year, month, expiry_weekday)
-                    if monthly_curr.day == val_2digit:
-                        expiry_dt = monthly_curr
-                    else:
+                    # Anti-Collision Guard: 2-digit prefix in Kite monthly format is strictly 2-digit year (e.g. 26=2026, 27=2027)
+                    if 20 <= val_2digit <= 40:
                         year = 2000 + val_2digit
                         expiry_dt = get_monthly_expiry(year, month, expiry_weekday)
+                    else:
+                        monthly_curr = get_monthly_expiry(now_year, month, expiry_weekday)
+                        expiry_dt = monthly_curr
                     expiry_str = expiry_dt.strftime("%Y-%m-%d")
                 except Exception:
                     pass

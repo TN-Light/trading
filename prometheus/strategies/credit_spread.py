@@ -13,6 +13,7 @@ Designed for small-to-medium capital accounts with defined risk and SEBI margin 
 
 import pandas as pd
 import numpy as np
+import math
 from datetime import datetime, time as dtime
 from typing import Dict, List, Optional, Tuple
 
@@ -21,7 +22,7 @@ from prometheus.utils.indian_market import (
     days_to_expiry, get_expiry_date, is_weekly_expiry_day
 )
 from prometheus.execution.kite_executor import generate_tradingsymbol
-from prometheus.signals.technical import calculate_atr, calculate_vwap, calculate_supertrend
+from prometheus.signals.technical import calculate_atr, calculate_session_vwap, calculate_supertrend
 from prometheus.utils.logger import logger
 
 
@@ -77,6 +78,7 @@ class CreditSpreadStrategy:
         df_1h: Optional[pd.DataFrame] = None,
         net_gex: Optional[float] = None,
         stopped_out_directions: Optional[set] = None,
+        vix: Optional[float] = None,
     ) -> Optional[Dict]:
         """Evaluate if market is in a range-bound state and generate a credit spread.
 
@@ -183,20 +185,27 @@ class CreditSpreadStrategy:
                 )
                 return None
 
-        # Check VWAP and EMAs for rigorous alignment
+        # Check VWAP and EMAs for rigorous alignment (Session-anchored VWAP per GEMINI.md Section 1)
         try:
             typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
             if "volume" in df.columns and df["volume"].sum() > 0:
-                vwap_df = calculate_vwap(df)
+                vwap_df = calculate_session_vwap(df)
                 if isinstance(vwap_df, pd.DataFrame) and "vwap" in vwap_df.columns:
                     vwap_val = vwap_df["vwap"].iloc[-1]
                 elif isinstance(vwap_df, pd.Series):
                     vwap_val = vwap_df.iloc[-1]
                 else:
                     vwap_val = float(typical_price.iloc[-1])
-                vwap = float(vwap_val) if (pd.notna(vwap_val) and vwap_val > 0) else float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
+                vwap = float(vwap_val) if (pd.notna(vwap_val) and vwap_val > 0) else float(typical_price.iloc[-1])
             else:
-                vwap = float(typical_price.rolling(20, min_periods=1).mean().iloc[-1])
+                # Session-anchored typical price fallback for 0-volume index spot
+                current_date = df["timestamp"].iloc[-1].date() if "timestamp" in df.columns and len(df) > 0 and hasattr(df["timestamp"].iloc[-1], "date") else None
+                if current_date is not None:
+                    today_mask = (df["timestamp"].dt.date == current_date)
+                    today_tp = typical_price[today_mask]
+                    vwap = float(today_tp.expanding(min_periods=1).mean().iloc[-1]) if len(today_tp) > 0 else float(typical_price.iloc[-1])
+                else:
+                    vwap = float(typical_price.iloc[-1])
         except Exception:
             vwap = close
         
@@ -257,7 +266,7 @@ class CreditSpreadStrategy:
                     df_res["timestamp"] = pd.to_datetime(df_res["timestamp"])
                 synth_1h = (
                     df_res.set_index("timestamp")
-                    .resample("1h")
+                    .resample("1h", offset="15min")
                     .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
                     .dropna()
                     .reset_index()
@@ -362,31 +371,31 @@ class CreditSpreadStrategy:
         
         if is_bearish:
             # Bear Call Spread: Place short strike above today's high / resistance
+            # Defect 32 Fix: Enforce sigma_buffer and oi_wall_strike on 0-DTE as well
             spread_type = "BEAR_CALL_SPREAD"
+            high_strike = get_atm_strike(today_high + sigma_buffer, symbol)
+            calculated_strike = atm_strike + max(otm_steps * interval, sigma_buffer)
+            short_strike = max(high_strike, calculated_strike)
             if dte == 0:
-                short_strike = max(self.get_atm_strike(today_high + interval, symbol), atm_strike + (2 * interval))
-            else:
-                high_strike = get_atm_strike(today_high + sigma_buffer, symbol)
-                calculated_strike = atm_strike + max(otm_steps * interval, sigma_buffer)
-                short_strike = max(high_strike, calculated_strike)
-                # If an institutional Call OI wall is identified above spot, ensure strike is at or beyond the wall
-                if oi_wall_strike and oi_wall_strike >= atm_strike:
-                    short_strike = max(short_strike, oi_wall_strike)
+                short_strike = max(short_strike, atm_strike + (2 * interval))
+            # If an institutional Call OI wall is identified above spot, ensure strike is at or beyond the wall
+            if oi_wall_strike and oi_wall_strike >= atm_strike:
+                short_strike = max(short_strike, oi_wall_strike)
             long_strike = short_strike + (self.hedge_otm_steps * interval)
             opt_str = "CE"
             action = "SELL_CALL_SPREAD"
         elif is_bullish:
             # Bull Put Spread: Place short strike below today's low / support
+            # Defect 32 Fix: Enforce sigma_buffer and oi_wall_strike on 0-DTE as well
             spread_type = "BULL_PUT_SPREAD"
+            low_strike = get_atm_strike(today_low - sigma_buffer, symbol)
+            calculated_strike = atm_strike - max(otm_steps * interval, sigma_buffer)
+            short_strike = min(low_strike, calculated_strike)
             if dte == 0:
-                short_strike = min(self.get_atm_strike(today_low - interval, symbol), atm_strike - (2 * interval))
-            else:
-                low_strike = get_atm_strike(today_low - sigma_buffer, symbol)
-                calculated_strike = atm_strike - max(otm_steps * interval, sigma_buffer)
-                short_strike = min(low_strike, calculated_strike)
-                # If an institutional Put OI wall is identified below spot, ensure strike is at or below the wall
-                if oi_wall_strike and oi_wall_strike <= atm_strike:
-                    short_strike = min(short_strike, oi_wall_strike)
+                short_strike = min(short_strike, atm_strike - (2 * interval))
+            # If an institutional Put OI wall is identified below spot, ensure strike is at or below the wall
+            if oi_wall_strike and oi_wall_strike <= atm_strike:
+                short_strike = min(short_strike, oi_wall_strike)
             long_strike = short_strike - (self.hedge_otm_steps * interval)
             opt_str = "PE"
             action = "SELL_PUT_SPREAD"
@@ -499,6 +508,24 @@ class CreditSpreadStrategy:
         else:
             effective_min_pct = self.min_credit_pct  # 4+: full requirement
         min_required_credit = round(strike_width * effective_min_pct, 2)
+
+        # Statutory Fee Hurdle Floor (GEMINI.md Rule 2 & 2026 Audit):
+        # A 2-leg credit spread incurs 4 completed orders across entry and exit (~Rs 115-125 in statutory costs).
+        # To guarantee positive net expectancy after statutory friction, net credit must clear the minimum point hurdle:
+        # NIFTY (L=65): >= 4.0 pts (Rs 260 gross credit)
+        # SENSEX (L=20): >= 15.0 pts (Rs 300 gross credit)
+        # BANK NIFTY (L=30): >= 10.0 pts (Rs 300 gross credit)
+        sym_u = symbol.upper()
+        if "SENSEX" in sym_u:
+            fee_floor_pts = 15.0
+        elif "BANK" in sym_u:
+            fee_floor_pts = 10.0
+        elif "FIN" in sym_u:
+            fee_floor_pts = 5.0
+        else:
+            fee_floor_pts = 4.0
+        min_required_credit = max(min_required_credit, fee_floor_pts)
+
         if net_credit < min_required_credit or net_credit <= 0:
             logger.info(
                 f"CreditSpread skipped for {symbol}: Net credit Rs {net_credit:.2f} is below "
@@ -577,7 +604,11 @@ class CreditSpreadStrategy:
         is_0dte = bool(current_date and expiry_date and (expiry_date - current_date).days == 0)
         strike_dist = abs(short_strike - close)
         daily_move = max(min_index_buffer, 3.5 * max(atr, 1.0))
-        otm_sigma = round((strike_dist / daily_move) * 2.0, 2)
+        # Black-Scholes IV 1-SD Move calculation (Manual §4 standard): 1-SD = Spot * IV * sqrt(DTE / 365)
+        eff_vix = float(vix) if (vix is not None and vix > 0) else 15.0
+        eff_dte = max(dte if dte is not None else 0.5, 0.5)
+        bs_one_sigma = close * (eff_vix / 100.0) * math.sqrt(eff_dte / 365.0)
+        otm_sigma = round(strike_dist / max(bs_one_sigma, 1.0), 2) if bs_one_sigma > 0 else round((strike_dist / daily_move) * 2.0, 2)
         
         # Rigorous Pillar Checks:
         # Pillar 1: Statistical buffer (requires >= 2.0σ away from spot for true Tier 1 conviction)
@@ -594,7 +625,6 @@ class CreditSpreadStrategy:
         # Theoretical Probability of Profit (POP) based on standard normal distribution & moneyness
         # POP approx = Phi(otm_sigma) with haircut for fat-tail risk in index options
         # e.g., 2.0σ -> ~93%, 1.75σ -> ~89%, 1.5σ -> ~85%, 1.0σ -> ~78%
-        import math
         def _norm_cdf(x):
             return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
         

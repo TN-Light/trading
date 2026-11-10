@@ -79,8 +79,15 @@ class PostExitAnalytics:
             max_alpha_left = float(tgt_df["alpha_left_pts"].max()) if not tgt_df.empty else 0.0
 
             total_dd_saved_pts = float(sl_df["drawdown_saved_pts"].sum()) if not sl_df.empty else 0.0
-            # Approximate INR saved using lot sizing (15 BN / 10 Sensex / 25 Nifty ~ 15 qty average)
-            total_dd_saved_inr = total_dd_saved_pts * 15.0
+            # 2026 Lot Sizing Multiplier (NIFTY 65, BANKNIFTY 30, SENSEX 20)
+            if not sl_df.empty and "symbol" in sl_df.columns:
+                from prometheus.utils.indian_market import get_lot_size
+                total_dd_saved_inr = float(sum(
+                    float(row.get("drawdown_saved_pts", 0.0) or 0.0) * get_lot_size(str(row.get("symbol", "NIFTY 50")))
+                    for _, row in sl_df.iterrows()
+                ))
+            else:
+                total_dd_saved_inr = total_dd_saved_pts * 38.0
 
             inactivity_mask = df["exit_reason"].str.upper().str.contains("INACTIVITY|KILL_SWITCH", na=False)
             inact_df = df[inactivity_mask]
@@ -88,8 +95,8 @@ class PostExitAnalytics:
             inact_inval = int(inact_df["target_reclaimed"].sum()) if not inact_df.empty else 0
             inact_rate = (inact_inval / inact_count * 100.0) if inact_count > 0 else 0.0
 
-            avg_mfe = float(df["post_exit_mfe"].mean()) if not df.empty else 0.0
-            avg_mae = float(df["post_exit_mae"].mean()) if not df.empty else 0.0
+            avg_mfe = float(df["post_exit_mfe"].mean()) if ("post_exit_mfe" in df.columns and not df.empty) else 0.0
+            avg_mae = float(df["post_exit_mae"].mean()) if ("post_exit_mae" in df.columns and not df.empty) else 0.0
 
             return PostExitMetrics(
                 total_trades=total_trades,

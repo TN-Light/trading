@@ -38,7 +38,7 @@ def _resample_to_hourly(df_15min: pd.DataFrame) -> pd.DataFrame:
         if 'volume' in df.columns:
             agg['volume'] = 'sum'
         
-        hourly = df.resample('1h').agg(agg).dropna(subset=['open'])
+        hourly = df.resample('1h', offset='15min').agg(agg).dropna(subset=['open'])
         hourly = hourly.reset_index()
         hourly.rename(columns={'index': 'timestamp'}, inplace=True)
         

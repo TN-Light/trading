@@ -954,7 +954,9 @@ class Prometheus:
         still_open = list(engine.tracker.open_positions.values())
         for pos in still_open:
             df = per_symbol_df.get(pos.symbol)
-            last_close = float(df.iloc[-1]["close"]) if df is not None and len(df) > 0 else pos.entry_price
+            # Never close an option position at index spot close (e.g. Rs 24,000)!
+            # Use pos.entry_price as fallback option premium if option feed is not available.
+            last_close = float(pos.entry_price)
             from prometheus.papertrade.types import ExitReason
             final_ts = pd.Timestamp(df.iloc[-1]["timestamp"]).to_pydatetime() if df is not None and len(df) > 0 else datetime.now(IST)
             trade = engine.tracker.close_position(
@@ -2073,7 +2075,7 @@ class Prometheus:
                         df_res["timestamp"] = pd.to_datetime(df_res["timestamp"])
                     df_1h_synth = (
                         df_res.set_index("timestamp")
-                        .resample("1h")
+                        .resample("1h", offset="15min")
                         .agg({
                             "open": "first",
                             "high": "max",
@@ -2169,7 +2171,7 @@ class Prometheus:
                                 gex_res = self.gamma_engine.calculate_gex(chain_data, spot_price, symbol)
                                 net_gex = float(gex_res.get("net_gex", 0.0) or 0.0)
                                 zgl_val = gex_res.get("zgl")
-                                gamma_regime = gex_res.get("regime", "LONG_GAMMA" if net_gex >= 0 else "SHORT_GAMMA")
+                                gamma_regime = gex_res.get("gamma_regime") or gex_res.get("regime", "LONG_GAMMA" if net_gex >= 0 else "SHORT_GAMMA")
                     except Exception as e:
                         logger.debug(f"Option chain / GEX analysis error for {symbol}: {e}")
 
@@ -2526,8 +2528,19 @@ class Prometheus:
 
             # NON-EXPIRY REGIME with Seller-First Preference:
             if pref == "credit_spread":
+                # If Option Buying is Live Eligible (Tier S/A/B or Golden) but Credit Spread is Paper Only (Tier C/D),
+                # live-eligible execution must NEVER be discarded for paper-only observation!
+                cs_is_paper_only = (cs_sig.get("tier") in ("C", "D")) or (not cs_sig.get("is_live_eligible", True))
+                buy_is_live = (execution_signal.get("tier") in ("S", "A", "B")) or execution_signal.get("is_golden_setup", False) or (buy_score >= 7.0 and execution_signal.get("is_live_eligible", True))
+                if buy_is_live and cs_is_paper_only:
+                    logger.info(
+                        f"Signal Priority on {symbol} (Seller-First): Live-Eligible Option Buying ({buy_score:.1f}, "
+                        f"tier={execution_signal.get('tier', 'B')}) overrides Paper-Only Credit Spread (tier={cs_sig.get('tier', 'C')})"
+                    )
+                    return execution_signal
+
                 # Credit Spread wins UNLESS option buying is Tier S elite (score >= 7.5 + golden)
-                if buy_score >= 7.5 and execution_signal.get("is_golden_setup", False):
+                if (buy_score >= 7.5 and execution_signal.get("is_golden_setup", False)) or (execution_signal.get("tier") == "S"):
                     logger.info(
                         f"Signal Priority on {symbol} (Seller-First): Tier S Breakout ({buy_score:.1f}) "
                         f"overrides Credit Spread ({spread_score:.1f})"
@@ -3109,7 +3122,7 @@ class Prometheus:
                             "quantity": p.quantity,
                             "entry": p.average_price,
                             "ltp": p.last_price,
-                            "pnl": p.unrealized_pnl,
+                            "pnl": self._extract_position_pnl(p),
                             "sl": 0,
                             "target": 0,
                             "strategy": "paper",
@@ -3736,15 +3749,9 @@ class Prometheus:
             curr_price = float(current_price or 0.0)
             qty = int(getattr(state, "quantity", 0) or 0)
             if qty <= 0:
-                sym_upper = (getattr(state, "symbol", "") or "").upper()
-                if "SENSEX" in sym_upper:
-                    qty = 10
-                elif "BANK" in sym_upper:
-                    qty = 15
-                elif "MIDCP" in sym_upper:
-                    qty = 50
-                else:
-                    qty = 25
+                from prometheus.utils.indian_market import get_lot_size
+                sym_raw = getattr(state, "symbol", "") or getattr(state, "underlying", "NIFTY")
+                qty = get_lot_size(sym_raw)
 
             if is_spread:
                 gain_pts = round(entry_price - curr_price, 2)
@@ -3829,6 +3836,30 @@ class Prometheus:
             )
             return True, 0
         return False, backoff
+
+    @staticmethod
+    def _extract_position_pnl(p) -> float:
+        """Safely extract unrealized PnL from Broker position or PaperPosition."""
+        pnl = getattr(p, "unrealized_pnl", 0.0)
+        if callable(pnl):
+            ltp = getattr(p, "last_price", getattr(p, "current_price", getattr(p, "entry_price", 0.0)))
+            try:
+                pnl = pnl(float(ltp or 0.0))
+            except Exception:
+                pnl = 0.0
+        if not isinstance(pnl, (int, float)):
+            try:
+                pnl = float(pnl)
+            except Exception:
+                pnl = 0.0
+        # If pnl is 0.0, fallback to calculation from prices if available
+        if pnl == 0.0:
+            last_px = float(getattr(p, "last_price", getattr(p, "current_price", 0.0)) or 0.0)
+            avg_px = float(getattr(p, "average_price", getattr(p, "entry_price", 0.0)) or 0.0)
+            qty = float(getattr(p, "quantity", 0.0) or 0.0)
+            if last_px > 0 and avg_px > 0 and qty != 0:
+                pnl = (last_px - avg_px) * qty
+        return float(pnl or 0.0)
 
     def _persist_equity_state(self):
         """Save current equity/capital to SQLite for crash recovery.
@@ -4137,8 +4168,8 @@ class Prometheus:
                     if qty <= 0:
                         from prometheus.utils.indian_market import get_lot_size
                         qty = get_lot_size(row["symbol"])
-                    if row["direction"] == "bearish":
-                        qty = -qty
+                    # In directional option buying, both CE and PE buys hold positive (+qty) option contracts.
+                    qty = abs(qty)
 
                     p_type = ProductType.MIS if row.get("trade_mode") == "intraday" else ProductType.NRML
                     stack.broker.positions[row["tradingsymbol"]] = Position(
@@ -5483,8 +5514,8 @@ class Prometheus:
                                 f"{mode_label}: [Alpha Goal Locked - Continuous Learning] Tier C candidate on {sym} routed to background paper tracking."
                             )
                         else:
-                            # Tier S / Tier B: Allow in the high-edge afternoon session (>= 13:00) or on institutional trend days
-                            is_afternoon_or_trend = (current_time >= "13:00") or bool(cand.get("is_institutional_trend_day"))
+                            # Tier S / Tier B: Allow in the high-edge afternoon session (>= 13:15) or on institutional trend days
+                            is_afternoon_or_trend = (current_time >= dtime(13, 15)) or bool(cand.get("is_institutional_trend_day"))
                             if is_afternoon_or_trend and (today_net_pnl >= daily_alpha_target * 0.7):
                                 logger.info(
                                     f"{mode_label}: [Alpha Goal Locked] Allowing Tier {cand_tier} Institutional Setup on {sym} "
@@ -5539,40 +5570,37 @@ class Prometheus:
                     is_spread_sig = refined.get("strategy_type") == "credit_spread" or "SPREAD" in str(refined.get("action", "")).upper()
                     is_bn_fn_buying = (not is_spread_sig) and ("BANK" in sym_u or "FIN" in sym_u)
 
-                    if is_rank_1 and tier_info["is_live_eligible"] and not is_bn_fn_buying:
-                        # Rank #1 Live Eligible: Dispatch to primary account
-                        position = self._execute_signal_with_feedback(
-                            refined, confirm=False, context=mode_label
-                        )
-                        # In paper mode, _execute_signal_with_feedback returns None.
-                        # Route to paper_capture so Rank #1 setups are never silently dropped!
-                        if position is None and getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
-                            try:
-                                shadow_trade_id = self.paper_capture.on_signal(refined)
-                                tier_label = tier_info.get("tier", "B")
-                                logger.info(
-                                    f"📝 [PAPER-LIVE-ELIGIBLE] Rank #1 ({tier_label}) signal paper-tracked: "
-                                    f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
-                                )
-                            except Exception as e:
-                                logger.error(f"Paper capture error for Rank #1 {symbol}: {e}")
-                    elif is_rank_1 and is_bn_fn_buying:
-                        logger.info(
-                            f"[CAPITAL-ALLOCATION] De-allocating live capital from {refined.get('symbol')} "
-                            f"directional option buying (-Rs 5,760 net empirical drag). Reserved for credit spreads. "
-                            f"Routing to Paper Engine for statistical tracking."
-                        )
-                        position = None
-                        if position is None:
+                    is_live_el = bool(refined.get("is_live_eligible", False))
+                    cand_tier = refined.get("tier", "B")
+
+                    if is_rank_1 and is_live_el:
+                        if not is_bn_fn_buying:
+                            # Rank #1 Live Eligible: Dispatch to primary account
+                            position = self._execute_signal_with_feedback(
+                                refined, confirm=False, context=mode_label
+                            )
+                            # In paper mode, _execute_signal_with_feedback returns None.
+                            # Route to paper_capture so Rank #1 setups are never silently dropped!
+                            if position is None and getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
+                                try:
+                                    shadow_trade_id = self.paper_capture.on_signal(refined)
+                                    logger.info(
+                                        f"📝 [PAPER-LIVE-ELIGIBLE] Rank #1 ({cand_tier}) signal paper-tracked: "
+                                        f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
+                                    )
+                                except Exception as e:
+                                    logger.error(f"Paper capture error for Rank #1 {symbol}: {e}")
+                        else:
+                            logger.info(
+                                f"[CAPITAL-ALLOCATION] De-allocating live capital from {refined.get('symbol')} "
+                                f"directional option buying (-Rs 5,760 net empirical drag). Reserved for credit spreads. "
+                                f"Routing to Paper Engine for statistical tracking."
+                            )
                             position = self._dispatch_multi_account(
                                 refined, is_intraday=True,
                                 bar_interval=bar_interval
                             )
-                        else:
-                            self._dispatch_multi_account(
-                                refined, is_intraday=True,
-                                bar_interval=bar_interval
-                            )
+
                         if position:
                             _today_traded_symbols.add(symbol)
                             self._set_daily_state("dry_today_traded_symbols", _today_traded_symbols)
@@ -5608,7 +5636,7 @@ class Prometheus:
                                 shadow_trade_id = self.paper_capture.on_signal(refined)
                             except Exception as e:
                                 logger.debug(f"Shadow paper capture error for {symbol}: {e}")
-                        tier_label = tier_info.get("tier", "C")
+                        tier_label = refined.get("tier", "C")
                         tag_desc = "SHADOW-OBSERVATION" if not is_rank_1 else f"TIER-{tier_label}-PAPER-ONLY"
                         logger.info(
                             f"📝 [{tag_desc}] Rank #{rank_idx + 1} ({tier_label}) signal paper-tracked: "
@@ -6262,12 +6290,13 @@ class Prometheus:
                 time.sleep(backoff)
 
     def _compute_daily_bias(self, data_daily: pd.DataFrame) -> dict:
-        """Compute hourly bias map from daily data only (5-day structure analysis)."""
+        """Compute causal bias map from daily data strictly prior to session open (zero lookahead)."""
         bias_map = {}
         if len(data_daily) >= 10:
             for i in range(5, len(data_daily)):
                 date_key = str(data_daily["timestamp"].iloc[i])[:10]
-                recent_d = data_daily.iloc[max(0, i-5):i+1]
+                # Anti-Lookahead Guard: evaluate strictly prior completed sessions (i-5 to i, excluding today's bar i)
+                recent_d = data_daily.iloc[max(0, i-5):i]
                 d_highs = recent_d["high"].values
                 d_lows = recent_d["low"].values
                 d_hh = sum(1 for j in range(1, len(d_highs)) if d_highs[j] > d_highs[j-1])
@@ -6285,15 +6314,22 @@ class Prometheus:
         return bias_map
 
     def _compute_intraday_bias(self, data_bias: pd.DataFrame) -> dict:
-        """Compute bias map from intraday higher-timeframe data."""
+        """Compute causal bias map from completed higher-timeframe sessions (zero lookahead)."""
         bias_map = {}
         if data_bias is None or data_bias.empty or len(data_bias) < 10:
             return bias_map
 
+        # Use session vwap or standard vwap
         vwap_df = calculate_vwap(data_bias.copy())
+        # Track session boundaries: map the closing bias of session T to session T+1
+        daily_dates = sorted(list(set(str(ts)[:10] for ts in data_bias["timestamp"])))
+        date_to_next = {daily_dates[k]: daily_dates[k+1] for k in range(len(daily_dates)-1)}
+
         for i in range(10, len(data_bias)):
             chunk = data_bias.iloc[max(0, i - 20):i + 1]
-            date_key = str(chunk["timestamp"].iloc[-1])[:10]
+            current_bar_date = str(chunk["timestamp"].iloc[-1])[:10]
+            # Anti-Lookahead Guard: In backtests, bias of session T is projected forward to session T+1
+            target_session_date = date_to_next.get(current_bar_date, current_bar_date)
 
             recent_h = chunk.tail(5)
             highs = recent_h["high"].values
@@ -6314,11 +6350,11 @@ class Prometheus:
             bear_points = lh_count + ll_count + (1 if close_val < vwap_val else 0)
 
             if bull_points >= 4 and bull_points > bear_points + 1:
-                bias_map[date_key] = "bullish"
+                bias_map[target_session_date] = "bullish"
             elif bear_points >= 4 and bear_points > bull_points + 1:
-                bias_map[date_key] = "bearish"
+                bias_map[target_session_date] = "bearish"
             else:
-                bias_map[date_key] = "neutral"
+                bias_map[target_session_date] = "neutral"
 
         return bias_map
 
@@ -7703,8 +7739,8 @@ class Prometheus:
                 if bar_t.hour == 9 and bar_t.minute == 15:
                     return None
                 dead_start = str(overrides.get("dead_zone_start", "11:30") or "11:30")
-                dead_end = str(overrides.get("dead_zone_end", "13:30") or "13:30")
-                aft_start = str(overrides.get("afternoon_window_start", "14:00") or "14:00")
+                dead_end = str(overrides.get("dead_zone_end", "13:15") or "13:15")
+                aft_start = str(overrides.get("afternoon_window_start", dead_end) or dead_end)
                 use_second_window = bool(overrides.get("use_second_window", True))
                 try:
                     ds_h, ds_m = map(int, dead_start.split(":"))
@@ -8633,11 +8669,11 @@ class Prometheus:
                 bear_points = lh_count + ll_count + (1 if close_val < vwap_val else 0)
 
                 if bull_points >= 4 and bull_points > bear_points + 1:
-                    hourly_bias_map[date_key] = "bullish"
+                    hourly_bias_map[target_session_date] = "bullish"
                 elif bear_points >= 4 and bear_points > bull_points + 1:
-                    hourly_bias_map[date_key] = "bearish"
+                    hourly_bias_map[target_session_date] = "bearish"
                 else:
-                    hourly_bias_map[date_key] = "neutral"
+                    hourly_bias_map[target_session_date] = "neutral"
 
         logger.info(f"Hourly bias computed for {len(hourly_bias_map)} sessions")
 
@@ -9275,9 +9311,12 @@ class Prometheus:
                 print(f"  {idx + 1}/{len(combos)} combos tested...")
 
         # Filter for good combos: WR >= 52% AND DD <= 55% AND PF >= 1.4
+        # Note: BacktestEngine returns win_rate on 0-100 scale (e.g. 58.0 for 58%)
         filtered = [
             r for r in results
-            if r['wr'] >= 0.52 and r['dd'] <= 55.0 and r['pf'] >= 1.4
+            if (r['wr'] if r['wr'] > 1.0 else r['wr'] * 100.0) >= 52.0
+            and r['dd'] <= 55.0
+            and r['pf'] >= 1.4
         ]
 
         print(f"\n  ═" * 40)
@@ -9293,8 +9332,9 @@ class Prometheus:
         print("  ─" * 70)
 
         for rank, r in enumerate(filtered[:20], 1):
+            wr_display = r['wr'] if r['wr'] > 1.0 else r['wr'] * 100.0
             print(f"  {rank:<5} {r['combo'][:39]:<40} {r['pf']:>5.2f} {r['sharpe']:>6.2f} "
-                  f"{r['wr']*100:>5.0f}% {r['dd']:>6.1f}% {r['mr_min_score']:>6.1f}")
+                  f"{wr_display:>5.1f}% {r['dd']:>6.1f}% {r['mr_min_score']:>6.1f}")
 
         # Save full results to CSV
         import csv
@@ -9724,7 +9764,7 @@ class Prometheus:
         }
 
         # Non-executable symbols (signal-only, can't trade via Kite)
-        SIGNAL_ONLY = {"SENSEX", "NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
+        SIGNAL_ONLY = {"NIFTY MIDCAP SELECT", "NIFTY NEXT 50"}
 
         scan_results = []
 
@@ -9919,10 +9959,14 @@ class Prometheus:
         traded_symbols: set,
         batch_size: int = 10,
         batch_delay: int = 5,
-        min_confidence: float = 0.70,
-        min_signals: int = 3,
+        min_confidence: Optional[float] = None,
+        min_signals: Optional[int] = None,
         mode_label: str = "COMBINED DRY",
     ):
+        if min_confidence is None:
+            min_confidence = float(getattr(self, "swing_cfg", {}).get("stock_confidence_min", get("swing.stock_confidence_min", 0.70)))
+        if min_signals is None:
+            min_signals = int(getattr(self, "swing_cfg", {}).get("stock_min_signals", get("swing.stock_min_signals", 3)))
         """
         Scan F&O stocks in batches to avoid yfinance rate limits.
         Uses same analyze() + regime detection pipeline as index scans.
@@ -10068,23 +10112,29 @@ class Prometheus:
             today_str = date.today().strftime("%Y-%m-%d")
             conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
             c = conn.cursor()
-            c.execute("SELECT net_pnl, gross_pnl FROM paper_trades WHERE substr(entry_time, 1, 10) = ?", (today_str,))
+            # Capital Segregation (GEMINI.md §7): Separate operational live trades (Tiers S, A, B)
+            # from experimental sandbox learning trades (Tier C/D)
+            c.execute("SELECT net_pnl, gross_pnl, tier FROM paper_trades WHERE substr(entry_time, 1, 10) = ?", (today_str,))
             rows = c.fetchall()
             if rows:
-                total_trades = len(rows)
-                daily_pnl = sum(r[0] for r in rows if r[0] is not None)
-                winning = sum(1 for r in rows if r[0] is not None and r[0] > 0)
-                gross_prof = sum(r[1] for r in rows if r[1] is not None and r[1] > 0)
-                gross_los = sum(r[1] for r in rows if r[1] is not None and r[1] < 0)
+                live_rows = [r for r in rows if (r[2] or "").upper() in ("S", "A", "B")]
+                target_rows = live_rows if live_rows else rows
+                total_trades = len(target_rows)
+                daily_pnl = sum(r[0] for r in target_rows if r[0] is not None)
+                winning = sum(1 for r in target_rows if r[0] is not None and r[0] > 0)
+                gross_prof = sum(r[1] for r in target_rows if r[1] is not None and r[1] > 0)
+                gross_los = sum(r[1] for r in target_rows if r[1] is not None and r[1] < 0)
             conn.close()
         except Exception as e:
             logger.debug(f"Failed to query SQLite for daily summary: {e}")
 
+        # state.capital (RiskManager.current_capital) already incorporates realized daily P&L.
+        # Adding state.capital + daily_pnl double-counted P&L. Reported equity is state.capital.
         self.telegram.alert_daily_summary({
             "daily_pnl": daily_pnl,
             "total_trades": total_trades,
             "winning_trades": winning,
-            "equity": state.capital + daily_pnl,
+            "equity": state.capital,
             "intraday_guardrail_audit": self._get_intraday_guardrail_audit_line(),
         })
 
@@ -10155,12 +10205,21 @@ class Prometheus:
     def _tg_cmd_postexit(self, args: str = "") -> str:
         """Handle /postexit command: output post-exit drift & shakeout analytics."""
         try:
+            import html
             from prometheus.analysis.post_exit_analytics import PostExitAnalytics
             analytics = PostExitAnalytics()
-            return analytics.generate_telegram_summary()
+            summary = analytics.generate_telegram_summary()
+            if not summary or not summary.strip():
+                return "ℹ️ No closed trades recorded yet for post-exit drift analytics."
+            if len(summary) > 4000:
+                summary = summary[:3900] + "\n\n<i>... [truncated for Telegram 4k limit]</i>"
+            return summary
+        except FileNotFoundError as fnf:
+            logger.warning(f"/postexit ledger file not found: {fnf}")
+            return "ℹ️ Post-exit analytics: No trades ledger found yet (run after first session trades)."
         except Exception as e:
             logger.error(f"Error in /postexit: {e}")
-            return f"❌ Error computing post-exit analytics: {e}"
+            return f"❌ Error computing post-exit analytics: {str(e)[:200]}"
 
     def _tg_cmd_help(self, args: str = "") -> str:
         """Handle /help command."""
@@ -10222,6 +10281,13 @@ class Prometheus:
 
         def _scan_swing(symbol):
             try:
+                # Inter-scan and daily deduplication check
+                traded_symbols = getattr(self, "_today_traded_symbols", set())
+                if symbol in traded_symbols:
+                    return None
+                if hasattr(self, "position_monitor") and hasattr(self.position_monitor, "has_symbol") and self.position_monitor.has_symbol(symbol):
+                    return None
+
                 scan_data = bridge_sc.fetch_scan_data(symbol, interval=swing_interval)
                 if not scan_data.is_usable:
                     return None
@@ -10248,9 +10314,21 @@ class Prometheus:
 
         def _scan_intra(symbol):
             try:
+                # Inter-scan and daily deduplication check
+                traded_symbols = getattr(self, "_today_traded_symbols", set())
+                if symbol in traded_symbols:
+                    return None
+
                 use_backtest = bool(get("intraday.use_backtest_generator", False))
                 exec_sig = self._get_intraday_signal_for_execution(symbol, "15minute", use_backtest)
                 if exec_sig and exec_sig.get("action", "HOLD") != "HOLD":
+                    tsym = exec_sig.get("tradingsymbol", "") or exec_sig.get("instrument", "")
+                    traded_insts = getattr(self, "_today_traded_instruments", set())
+                    if tsym and tsym in traded_insts:
+                        return None
+                    if getattr(self, "paper_capture", None) and hasattr(self.paper_capture, "is_direction_stopped_out"):
+                        if self.paper_capture.is_direction_stopped_out(symbol, refined_signal=exec_sig):
+                            return None
                     return f"• {symbol}: {exec_sig.get('action')} (Intraday 15m)"
             except Exception as e:
                 pass
@@ -10297,11 +10375,16 @@ class Prometheus:
         return res
 
     def _tg_cmd_scan(self, args: str = "") -> str:
-        """Handle /scan command — start scan work in the background."""
+        """Handle /scan command — start scan work in the background with lock timeout."""
         with self._scan_lock:
-            if self._scan_in_progress:
-                return "⏳ Scan already in progress. Please wait for the current scan to finish."
+            now_ts = time.time()
+            scan_started_at = getattr(self, "_scan_started_at", 0.0)
+            # Automatic 180s TTL timeout reset for stuck background scan threads
+            if self._scan_in_progress and (now_ts - scan_started_at < 180.0):
+                elapsed = int(now_ts - scan_started_at)
+                return f"⏳ Scan already in progress ({elapsed}s elapsed). Please wait for the current scan to finish."
             self._scan_in_progress = True
+            self._scan_started_at = now_ts
 
         worker = threading.Thread(
             target=self._run_tg_scan_job,
@@ -10449,43 +10532,23 @@ class Prometheus:
                         regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
                         adj_confidence = raw_confidence * regime_mult
                         
-                        return {
+                        # Preserve entire exec_sig dictionary so tier and spread metadata are never stripped
+                        res = dict(exec_sig)
+                        # Correct signal_count to count confluences/reasons, not floating edge_score
+                        sig_count = len(exec_sig.get("reasons", [])) if exec_sig.get("reasons") else (len(exec_sig.get("classification_reasons", [])) or 1)
+                        res.update({
                             "symbol": symbol,
                             "display_name": f"{symbol} (intraday {bar_interval})",
                             "action": exec_sig.get("action", "HOLD"),
                             "raw_confidence": raw_confidence,
                             "adj_confidence": adj_confidence,
                             "regime": regime_str,
-                            "signal_count": int(exec_sig.get("edge_score", exec_sig.get("confidence", 0) * 100)),
-                            "entry_price": exec_sig.get("entry_price", 0),
-                            "stop_loss": exec_sig.get("stop_loss", 0),
-                            "target": exec_sig.get("target", 0),
-                            "risk_reward": exec_sig.get("risk_reward", 0),
-                            "reasoning": exec_sig.get("reasoning", exec_sig.get("strategy", "")),
+                            "signal_count": sig_count,
                             "executable": symbol not in SIGNAL_ONLY,
                             "timeframe": "intraday",
-                            "instrument": exec_sig.get("instrument", ""),
-                            "tradingsymbol": exec_sig.get("tradingsymbol", exec_sig.get("instrument", "")),
-                            "strike": exec_sig.get("strike", 0),
-                            "option_type": exec_sig.get("option_type", ""),
-                            "expiry": exec_sig.get("expiry", ""),
-                            "strategy_type": exec_sig.get("strategy_type", ""),
-                            "spread_type": exec_sig.get("spread_type", ""),
-                            "net_credit": exec_sig.get("net_credit", 0),
-                            "target_decay_price": exec_sig.get("target_decay_price", 0),
-                            "hard_sl_price": exec_sig.get("hard_sl_price", 0),
-                            "margin_required": exec_sig.get("margin_required", 0),
-                            "legs": exec_sig.get("legs", []),
-                            "lot_size": exec_sig.get("lot_size", 0),
-                            "edge_score": exec_sig.get("edge_score", 0.0),
-                            "signal_score": exec_sig.get("edge_score", 0.0),
-                            "reasons": exec_sig.get("reasons", []),
-                            "lots": exec_sig.get("lots", 1),
-                            "lot_cost": exec_sig.get("lot_cost", 0.0),
-                            "quantity": exec_sig.get("quantity", exec_sig.get("lots", 1) * exec_sig.get("lot_size", 0)),
-                            # Freshness timestamp (Fix B) — see _scan_one_cmd.
                             "_signal_generated_at": time.time(),
-                        }
+                        })
+                        return res
                     except Exception as e:
                         logger.debug(f"Intraday scan failed for {symbol}: {e}")
                         return None
@@ -10503,6 +10566,7 @@ class Prometheus:
         finally:
             with self._scan_lock:
                 self._scan_in_progress = False
+                self._scan_started_at = 0.0
 
     def _tg_cmd_status(self, args: str = "") -> str:
         """Handle /status command — shows all accounts if multi-account is active."""
@@ -10550,15 +10614,7 @@ class Prometheus:
         if positions:
             text += f"\n<b>Open Positions</b>\n"
             for p in positions:
-                pnl = getattr(p, "unrealized_pnl", 0)
-                # Bug #6 (2026-07-22): ``unrealized_pnl`` is a *method* on
-                # ``papertrade.Position`` (it requires a current_price
-                # argument), so callers that swap in paper_capture positions
-                # would crash here. Defensive: if we got a method instead of
-                # a number, treat as unrealized=0 (paper-capture's own
-                # section below carries the real MTM).
-                if callable(pnl):
-                    pnl = 0
+                pnl = self._extract_position_pnl(p)
                 pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
                 text += (
                     f"  {pnl_emoji} {p.tradingsymbol}  "
@@ -10700,7 +10756,7 @@ class Prometheus:
         if primary_positions:
             text += "\n<b>Primary Open Positions</b>\n"
             for p in primary_positions:
-                pnl = getattr(p, "unrealized_pnl", 0)
+                pnl = self._extract_position_pnl(p)
                 pnl_emoji = "\U0001f7e2" if pnl >= 0 else "\U0001f534"
                 text += (
                     f"  {pnl_emoji} {p.tradingsymbol}  "

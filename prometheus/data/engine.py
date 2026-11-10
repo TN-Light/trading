@@ -379,6 +379,18 @@ class NSEDirectFeed:
         return df
 
     def get_india_vix(self) -> Optional[float]:
+        """Query live India VIX from NSE with dynamic fallback."""
+        try:
+            self._set_cookies()
+            url = f"{self.BASE_URL}/api/allIndices"
+            resp = self.session.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                for item in data:
+                    if item.get("index") == "INDIA VIX":
+                        return float(item.get("last", 15.0))
+        except Exception:
+            pass
         return 15.0
     def get_fii_dii_data(self) -> Optional[dict]:
         """Get FII/DII daily activity data."""
@@ -739,7 +751,7 @@ class DataEngine:
         if getattr(ts.dt, "tz", None) is None:
             # Source-aware default for tz-naive timestamps.
             # Angel One historical candles and CSV datasets are returned in IST clock time.
-            if str(source).lower() in ["angelone", "csv"]:
+            if str(source).lower() in ["angelone", "csv", "kite"]:
                 ts = ts.dt.tz_localize(IST)
             else:
                 ts = ts.dt.tz_localize("UTC")
@@ -1042,8 +1054,18 @@ class DataEngine:
         # Try Kite first
         if self.kite.is_connected():
             prices = self.kite.get_ltp([symbol])
-            if symbol in prices:
+            if symbol in prices and prices[symbol] > 0:
                 return prices[symbol]
+
+        # Try Angel One second before falling back to delayed yfinance
+        try:
+            from prometheus.data.angelone_options import AngelOneOptionChain
+            ao = AngelOneOptionChain()
+            ao_spot = ao.get_spot_price(symbol)
+            if ao_spot and ao_spot > 0:
+                return float(ao_spot)
+        except Exception:
+            pass
 
         # yfinance fallback
         return self.yf.get_current_price(symbol)

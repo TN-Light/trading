@@ -48,6 +48,7 @@ class ManagedPosition:
     expiry_date: str = ""
     lot_size: int = 0
     lots: int = 0
+    quantity: int = 0
     lot_cost: float = 0.0
     dte_at_entry: int = -1
     is_expiry_day: bool = False
@@ -327,6 +328,7 @@ class OrderManager:
         managed.expiry_date = str(signal.get("option_expiry_date") or signal.get("expiry", ""))
         managed.lot_size = int(signal.get("lot_size", lot_size) or lot_size)
         managed.lots = int(signal.get("lots", lots) or lots)
+        managed.quantity = total_qty
         managed.lot_cost = float(signal.get("lot_cost", managed.entry_premium * managed.lot_size) or 0.0)
         try:
             managed.dte_at_entry = int(signal.get("dte", signal.get("days_to_expiry", -1)))
@@ -535,9 +537,23 @@ class OrderManager:
         managed.target_decay_price = tgt_decay
         managed.breakeven_decay_price = be_decay
         managed.tier = tier_val
+        managed.quantity = quantity
         managed.status = "open"
 
         self.managed_positions[position_id] = managed
+
+        # Record spread entry in risk manager (SPAN + Exposure margin ~Rs 60,000/lot)
+        margin_est = float(signal.get("margin_required", 60000.0) or 60000.0)
+        self.risk.record_trade_entry({
+            "symbol": symbol,
+            "instrument": managed.tradingsymbol,
+            "direction": managed.direction,
+            "entry_price": net_credit,
+            "quantity": quantity,
+            "cost": margin_est,
+            "is_spread": True,
+            "strategy_type": "credit_spread",
+        })
 
         # Log trade to store
         self.store.log_trade({
@@ -745,21 +761,33 @@ class OrderManager:
                     pnl = (entry_order.average_price - filled.average_price) * entry_order.filled_quantity
                 total_pnl += pnl
 
-        managed.realized_pnl = round(total_pnl, 2)
+        # Compute realistic round-trip statutory costs to ensure Net-Over-Gross integrity
+        from prometheus.papertrade.position_tracker import CostModel
+        _cm = CostModel()
+        _entry_val = sum(eo.average_price * eo.filled_quantity for eo in managed.entry_orders if eo.average_price > 0)
+        _exit_val = sum(xo.average_price * xo.filled_quantity for xo in managed.exit_orders if xo.average_price > 0)
+        _is_sp = getattr(managed, "strategy_type", "") == "credit_spread" or getattr(managed, "is_spread", False)
+        _statutory_costs = _cm.calculate_trade_cost(_entry_val, _exit_val, is_spread=_is_sp)
+        net_pnl = round(total_pnl - _statutory_costs, 2)
+
+        managed.realized_pnl = net_pnl
         managed.status = "closed"
 
-        # Record in risk manager (pass trade info so _open_positions gets cleaned)
-        self.risk.record_trade_result(total_pnl, trade={
+        # Record in risk manager (strictly NET P&L after statutory friction)
+        self.risk.record_trade_result(net_pnl, trade={
             "instrument": managed.tradingsymbol,
             "symbol": managed.symbol,
+            "gross_pnl": round(total_pnl, 2),
+            "costs": round(_statutory_costs, 2),
+            "net_pnl": net_pnl,
         })
 
         logger.info(
             f"Position closed: {position_id} | "
-            f"P&L: Rs {total_pnl:+,.0f} | Reason: {reason}"
+            f"Net P&L: Rs {net_pnl:+,.0f} (Gross: Rs {total_pnl:+,.0f}, Costs: Rs {_statutory_costs:.1f}) | Reason: {reason}"
         )
 
-        return total_pnl
+        return net_pnl
 
     def close_all_positions(self, reason: str = "system") -> float:
         """Close all open positions. Returns total P&L."""
@@ -830,7 +858,12 @@ class OrderManager:
             target_decay_price=target_decay,
             breakeven_decay_price=be_decay,
             tier=tier_val,
-            quantity=int(getattr(managed, "quantity", 0) or 0),
+            quantity=int(
+                getattr(managed, "quantity", 0)
+                or (managed.lots * managed.lot_size if managed.lots and managed.lot_size else 0)
+                or (sum(eo.filled_quantity or eo.quantity for eo in managed.entry_orders) if managed.entry_orders else 0)
+                or 0
+            ),
         )
 
     # -------------------------------------------------------------------------
@@ -857,19 +890,26 @@ class OrderManager:
         # We place the real exchange order 50% lower than the algorithm's true SL
         # so that normal IV crush doesn't trigger the exchange order during Phase 1.
         # PositionMonitor will ratchet this up to the true SL after Phase 1 and 2.
-        broker_trigger = sl_premium * 0.5
+        # Regulatory Guard: NSE/BSE & Zerodha Kite block OrderType.SL_M on options.
+        # Must place OrderType.SL (Stop Loss Limit) with valid tick-aligned trigger and limit price.
+        # Align trigger to valid 0.05 tick size at the true stop-loss level (never 50% below entry)
+        broker_trigger = round(round(sl_premium / 0.05) * 0.05, 2)
         if broker_trigger < 0.05:
             broker_trigger = 0.05
+
+        # Limit price placed with a safety buffer (10% lower) to ensure execution without freak trade slippage
+        limit_price = round(max(0.05, round((broker_trigger * 0.90) / 0.05) * 0.05), 2)
 
         exchange = "BFO" if ("SENSEX" in tradingsymbol or "BSX" in tradingsymbol or "BANKEX" in tradingsymbol) else "NFO"
         sl_order = Order(
             tradingsymbol=tradingsymbol,
             exchange=exchange,
             side=OrderSide.SELL,
-            order_type=OrderType.SL_M,
+            order_type=OrderType.SL,
             product=ProductType.MIS,
             quantity=quantity,
-            trigger_price=round(broker_trigger, 2),
+            price=limit_price,
+            trigger_price=broker_trigger,
             tag="P-SL",
         )
 

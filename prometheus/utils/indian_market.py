@@ -133,8 +133,7 @@ NSE_HOLIDAYS_2026 = [
     date(2026, 9, 14),   # Ganesh Chaturthi
     date(2026, 10, 2),   # Mahatma Gandhi Jayanti
     date(2026, 10, 20),  # Dussehra
-    date(2026, 11, 9),   # Diwali Balipratipada
-    date(2026, 11, 10),  # Diwali Balipratipada (if Tue)
+    date(2026, 11, 10),  # Diwali Balipratipada
     date(2026, 11, 24),  # Guru Nanak Jayanti
     date(2026, 12, 25),  # Christmas
 ]
@@ -332,8 +331,8 @@ def get_monthly_expiry(year: int, month: int, weekday_name: str = "Thursday") ->
     while last_day.weekday() != target_weekday:
         last_day -= timedelta(days=1)
 
-    # If holiday, move to previous trading day
-    while last_day in ALL_HOLIDAYS:
+    # If holiday or weekend, move to previous trading day (Defect 42 fix)
+    while last_day in ALL_HOLIDAYS or (last_day.weekday() >= 5 and last_day not in SPECIAL_TRADING_DAYS):
         last_day -= timedelta(days=1)
 
     return last_day

@@ -150,3 +150,28 @@ def test_golden_setup_1145_cutoff_on_expiry_day():
     assert sig is None, "Expected trade at 12:00 PM on expiry day to be strictly blocked by 11:45 cutoff"
 
 
+
+
+def test_afternoon_power_session_evaluation():
+    """Verify that on non-expiry days, trend continuation signals are allowed during Afternoon Power Session (13:15-14:30)."""
+    scanner = PriceActionMomentumScanner()
+    # 20 bars prior + 18 bars today (18th bar is 13:30 PM)
+    prior_df = _generate_sample_candles(n_bars=20, start_dt=datetime(2026, 9, 7, 9, 15), trend="neutral")
+    today_df = _generate_sample_candles(n_bars=18, start_dt=datetime(2026, 9, 8, 9, 15), trend="bullish")
+    df = pd.concat([prior_df, today_df], ignore_index=True)
+
+    # 1H macro bullish trend
+    h_rows = [
+        {"timestamp": datetime(2026, 9, 7, 9, 15) + timedelta(hours=i), "open": 24000 + i*50, "high": 24050 + i*50, "low": 23990 + i*50, "close": 24040 + i*50, "volume": 10000}
+        for i in range(30)
+    ]
+    df_1h_bull = pd.DataFrame(h_rows)
+
+    # 1. Non-expiry day at 13:30 with 1H macro alignment -> allowed
+    sig = scanner.evaluate_bar(df, symbol="NIFTY 50", df_1h=df_1h_bull, is_expiry_day=False, golden_mode=False)
+    assert sig is not None, "Expected valid Afternoon Power Session breakout signal"
+    assert sig["action"] == "BUY_CE"
+
+    # 2. Expiry day at 13:30 -> strictly blocked by afternoon expiry cutoff
+    sig_exp = scanner.evaluate_bar(df, symbol="NIFTY 50", df_1h=df_1h_bull, is_expiry_day=True, golden_mode=False)
+    assert sig_exp is None, "Expected expiry day afternoon trade to be blocked by expiry cutoff"
