@@ -387,6 +387,10 @@ class Prometheus:
         self._paper_loop_started_at = None
         self._paper_scan_interval_seconds = None
 
+        # Traded tracking sets
+        self._today_traded_symbols: set = set()
+        self._today_traded_instruments: set = set()
+
         # Signal deduplication — prevents restart replay of same alerts
         self._alerted_signals: Dict[str, float] = {}
         self._alerted_signals_file = str(PROJECT_ROOT.parent / "data" / "alerted_signals.json")
@@ -5138,6 +5142,7 @@ class Prometheus:
         )
 
         _today_traded_symbols = self._get_daily_state("dry_today_traded_symbols", set())
+        self._today_traded_symbols = _today_traded_symbols
         _today_traded_instruments = self._get_daily_state("dry_today_traded_instruments", set())
         self._today_traded_instruments = _today_traded_instruments
         _intraday_trades_today = self._get_daily_state("dry_intraday_trades_today", 0)
@@ -5620,6 +5625,7 @@ class Prometheus:
 
                         if position:
                             _today_traded_symbols.add(symbol)
+                            self._today_traded_symbols = _today_traded_symbols
                             self._set_daily_state("dry_today_traded_symbols", _today_traded_symbols)
                             tsym = refined.get("tradingsymbol", "")
                             if tsym:
@@ -10250,10 +10256,11 @@ class Prometheus:
         def _scan_swing(symbol):
             try:
                 # Inter-scan and daily deduplication check
-                traded_symbols = getattr(self, "_today_traded_symbols", set())
-                if symbol in traded_symbols:
+                active_pos_symbols = self._get_active_positions_symbols()
+                if symbol in active_pos_symbols:
                     return None
-                if hasattr(self, "position_monitor") and hasattr(self.position_monitor, "has_symbol") and self.position_monitor.has_symbol(symbol):
+                traded_symbols = getattr(self, "_today_traded_symbols", set()) or self._get_daily_state("dry_today_traded_symbols", set())
+                if symbol in traded_symbols:
                     return None
 
                 scan_data = bridge_sc.fetch_scan_data(symbol, interval=swing_interval)
@@ -10283,7 +10290,10 @@ class Prometheus:
         def _scan_intra(symbol):
             try:
                 # Inter-scan and daily deduplication check
-                traded_symbols = getattr(self, "_today_traded_symbols", set())
+                active_pos_symbols = self._get_active_positions_symbols()
+                if symbol in active_pos_symbols:
+                    return None
+                traded_symbols = getattr(self, "_today_traded_symbols", set()) or self._get_daily_state("dry_today_traded_symbols", set())
                 if symbol in traded_symbols:
                     return None
 
@@ -10497,8 +10507,9 @@ class Prometheus:
                             regime_str = regime.regime.value
                             
                         raw_confidence = exec_sig.get("confidence", 0.5)
-                        regime_mult = REGIME_MULTIPLIER.get(regime_str, 0.40)
-                        adj_confidence = raw_confidence * regime_mult
+                        # Intraday momentum signals from PriceActionMomentumScanner already incorporate 
+                        # 1H macro trend alignment, VWAP, and ADX confluences. Do not penalize with daily regime_mult.
+                        adj_confidence = raw_confidence
                         
                         # Preserve entire exec_sig dictionary so tier and spread metadata are never stripped
                         res = dict(exec_sig)
@@ -10638,14 +10649,14 @@ class Prometheus:
                         # Fall back to entry price (neutrality on no LTP)
                         # rather than 0, which would report a 100% paper loss.
                         ltp = entry_px
-                    mtm = (ltp - entry_px) * qty
-                    if p.get("direction") == "SHORT":
-                        # Both LONG-direction (bullish CE) and SHORT-direction
-                        # (bearish PE) positions are LONG the option premium
-                        # in this subsystem (we always BUY options). MTM is
-                        # symmetric in premium movement; no sign flip needed
-                        # for SHORT. (Fix 2026-07-18 reference.)
-                        pass
+                    is_spread = (
+                        "/" in str(instr)
+                        or "SPREAD" in str(p.get("strategy", "")).upper()
+                        or "SPREAD" in str(p.get("strategy_type", "")).upper()
+                        or bool(p.get("is_spread", False))
+                    )
+                    per_unit = (entry_px - ltp) if is_spread else (ltp - entry_px)
+                    mtm = per_unit * qty
                     unreal_total += mtm
                     em = "\U0001f7e2" if mtm >= 0 else "\U0001f534"
                     # Item 2 (2026-07-25 audit follow-up): per-unit
@@ -10654,7 +10665,6 @@ class Prometheus:
                     # (qty=1 × -6.60/unit) and (qty=75 × -0.09/unit).
                     # Skipping the per-unit line when |delta| < 0.005 to
                     # avoid cluttering neutral rows with tiny float noise.
-                    per_unit = (ltp - entry_px) if (ltp != 0 and entry_px != 0) else 0.0
                     per_unit_str = ""
                     if abs(per_unit) >= 0.005:
                         per_unit_str = f"  ({int(qty)} \u00d7 {per_unit:+.2f}/u)"
@@ -10766,18 +10776,28 @@ class Prometheus:
         realized_pnl = state.realized_pnl_today
         trades_count = state.trades_today
         wins_count = 0
+        tier_c_pnl = 0.0
+        tier_c_count = 0
         try:
             import sqlite3
             from datetime import date
             today_str = date.today().strftime("%Y-%m-%d")
             conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
             c = conn.cursor()
-            c.execute("SELECT net_pnl, gross_pnl FROM paper_trades WHERE substr(entry_time, 1, 10) = ?", (today_str,))
+            # Capital Segregation (GEMINI.md Section 7 & Architecture Manual Section 9):
+            # Query tier and segregate operational live trades (Tiers S, A, B) from experimental sandbox (Tier C)
+            c.execute("SELECT net_pnl, gross_pnl, tier FROM paper_trades WHERE substr(entry_time, 1, 10) = ?", (today_str,))
             rows = c.fetchall()
             if rows:
-                trades_count = len(rows)
-                realized_pnl = sum(r[0] for r in rows if r[0] is not None)
-                wins_count = sum(1 for r in rows if r[0] is not None and r[0] > 0)
+                live_rows = [r for r in rows if (r[2] or "").upper() in ("S", "A", "B")]
+                tier_c_rows = [r for r in rows if (r[2] or "").upper() == "C"]
+                target_rows = live_rows if live_rows else rows
+                trades_count = len(target_rows)
+                realized_pnl = sum(r[0] for r in target_rows if r[0] is not None)
+                wins_count = sum(1 for r in target_rows if r[0] is not None and r[0] > 0)
+                if tier_c_rows:
+                    tier_c_pnl = sum(r[0] for r in tier_c_rows if r[0] is not None)
+                    tier_c_count = len(tier_c_rows)
             conn.close()
         except Exception as e:
             logger.debug(f"Failed to query SQLite for /pnl: {e}")
@@ -10797,12 +10817,17 @@ class Prometheus:
                     f"({s['return_pct']:+.1f}%)\n"
                 )
 
+        tier_c_note = ""
+        if tier_c_count > 0:
+            tier_c_note = f"\n<i>(Tier C Paper Sandbox: Rs {tier_c_pnl:+,.2f} across {tier_c_count} trades)</i>\n"
+
         return (
             f"\U0001f4b0 <b>TODAY'S REALIZED P&amp;L</b>\n"
             f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\n"
             f"{emoji} <b>Net P&amp;L:  <code>Rs {realized_pnl:+,.2f}</code></b>\n"
             f"Trades:     <code>{trades_count}</code> (Won: {wins_count}, WR: {wr_pct:.0f}%)\n"
-            f"Portfolio:  <code>Rs {state.capital + realized_pnl:,.0f}</code>\n\n"
+            f"Portfolio:  <code>Rs {state.capital:,.0f}</code>\n"
+            f"{tier_c_note}\n"
             f"Daily limit: <code>Rs {self.risk.max_daily_loss:,.0f}</code>\n"
             f"Loss used:   <code>{used_pct:.0f}%</code>"
             f"{multi_section}"
