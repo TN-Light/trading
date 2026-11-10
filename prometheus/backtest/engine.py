@@ -1880,7 +1880,10 @@ class BacktestEngine:
                 ts_trading = pd.to_datetime(data["timestamp"].iloc[wb:wb + n_ec])
                 if len(ts_trading) == n_ec:
                     eq_series = pd.Series(ec_trading, index=ts_trading)
-                    monthly_eq = eq_series.resample("M").last().dropna()
+                    try:
+                        monthly_eq = eq_series.resample("ME").last().dropna()
+                    except (ValueError, KeyError):
+                        monthly_eq = eq_series.resample("M").last().dropna()
                     for i in range(1, len(monthly_eq)):
                         key = monthly_eq.index[i].strftime("%Y-%m")
                         monthly_returns[key] = round(
