@@ -397,12 +397,12 @@ def test_modify_broker_sl_never_lowers_below_ratcheted_value():
     # (this is exactly what buggy Phase 1→2 transition did today at 10:31:39)
     monitor._modify_broker_sl_manual(state, manual_trigger=233.76)
 
-    # Must have clamped upward to current_sl (332.64), not the requested 233.76.
+    # Must have clamped upward to current_sl (332.64 -> 332.65 tick-aligned), not the requested 233.76.
     assert len(broker.modifies) == 1, "Broker modify_order should be called once"
     _oid, trigger_price = broker.modifies[0]
-    assert trigger_price == 332.64, (
+    assert trigger_price in (332.64, 332.65), (
         f"Broker SL must NOT be lowered below ratcheted current_sl; "
-        f"got {trigger_price} expected 332.64"
+        f"got {trigger_price} expected 332.64/332.65"
     )
 
 

@@ -50,7 +50,7 @@ def test_zerodha_copy_box_present_on_live_and_paper_directional_signals():
     live_msg = sent_messages[0][0]
     assert "ACTION: EXECUTE LIVE ON KITE" in live_msg
     assert "Zerodha Kite Search (Tap to Copy):" in live_msg
-    assert "NIFTY JUL 500 CE" in live_msg
+    assert "NIFTY JUL 24500 CE" in live_msg
 
     # Paper signal (Tier C)
     sent_messages.clear()
@@ -76,7 +76,7 @@ def test_zerodha_copy_box_present_on_live_and_paper_directional_signals():
     assert "ACTION: PAPER ONLY — DO NOT EXECUTE LIVE" in paper_msg
     # Copy box must be present so operator can shadow/monitor on Kite
     assert "Zerodha Kite Search (Tap to Copy):" in paper_msg
-    assert "NIFTY JUL 500 CE" in paper_msg
+    assert "NIFTY JUL 24500 CE" in paper_msg
 
 
 def test_zerodha_copy_box_present_on_paper_credit_spread_signals():

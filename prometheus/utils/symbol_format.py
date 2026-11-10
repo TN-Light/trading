@@ -346,7 +346,10 @@ def parse_api_tradingsymbol(tradingsymbol: str) -> Optional[dict]:
             yy = int(rest[5:7])
             strike_str = rest[7:]
             strike = float(strike_str)
-            if strike > 0 and strike_str:
+            # Guard against Kite monthly collision: e.g. NIFTY26NOV24500CE where rest[:2]='26',
+            # rest[5:7]='24' leaves strike=500. Major index option strikes are never < 3000.
+            is_index = underlying in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX")
+            if strike > 0 and strike_str and (not is_index or strike >= 3000):
                 d = date(2000 + yy, month, dd)
                 return {
                     "underlying": underlying,

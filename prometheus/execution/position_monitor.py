@@ -860,7 +860,7 @@ class PositionMonitor:
         s05_trigger = entry + rd * 0.65
 
         # ── Sequential Top-Down Evaluation (Stage 4 -> Stage 3 -> Stage 2 -> Stage 1 -> Stage 0.5 -> Stage 0) ──
-        if (state.trailing_stage3 and price_for_trail >= state.premium_hwm) or progress >= 3.5:
+        if progress >= 3.5 or (state.trailing_stage3 and progress >= 2.5 and price_for_trail >= state.premium_hwm):
             # Stage 4: Dynamic trail with high-water mark (floor never below Stage 3 +0.75R lock)
             state.breakeven_set = True
             state.half_risk_set = True
@@ -874,7 +874,7 @@ class PositionMonitor:
             trail_mult = 0.15 if is_weak_edge else (0.40 if is_strong_edge else 0.30)
             trail_offset = (state.premium_hwm - entry) * trail_mult
             dynamic_sl = round(state.premium_hwm - trail_offset, 2)
-            new_sl = max(floor_sl, dynamic_sl)
+            new_sl = min(round(price_for_trail - 0.5, 2), max(floor_sl, dynamic_sl))
             if new_sl > state.current_sl:
                 state.current_sl = new_sl
                 stage_changed = True
@@ -883,15 +883,17 @@ class PositionMonitor:
                     f"SL {old_sl:.2f} -> {new_sl:.2f} (HWM={state.premium_hwm:.2f})"
                 )
 
-        elif (not state.trailing_stage3 and price_for_trail >= s3_trigger) or progress >= 2.0:
-            # Stage 3: Lock +0.75R profit at >= 2.0R gain, begin runner (+22% in Low-VIX mode)
+        elif not state.trailing_stage3 and (price_for_trail >= s3_trigger or progress >= 2.0):
+            # Stage 3: Lock +0.75R profit at >= 2.0R gain
             state.breakeven_set = True
             state.half_risk_set = True
             state.trailing_stage0_5 = True
             state.trailing_activated = True
             state.trailing_stage2 = True
             state.trailing_stage3 = True
-            new_sl = round(max(entry * lock3_pct, entry + rd * 0.75), 2)
+            pct_sl = round(entry * lock3_pct, 2) if price_for_trail >= (entry * s3_pct) else 0.0
+            new_sl = round(max(pct_sl, entry + rd * 0.75), 2)
+            new_sl = min(new_sl, round(price_for_trail - 0.5, 2))
             if new_sl > state.current_sl:
                 state.current_sl = new_sl
                 stage_changed = True
@@ -900,14 +902,16 @@ class PositionMonitor:
                     f"SL {old_sl:.2f} -> {new_sl:.2f}, HWM={price_for_trail:.2f}"
                 )
 
-        elif (not state.trailing_stage2 and price_for_trail >= s2_trigger) or progress >= 1.5:
-            # Stage 2: Lock +0.65R profit at >= 1.5R gain (+18% in Low-VIX mode)
+        elif not state.trailing_stage2 and (price_for_trail >= s2_trigger or progress >= 1.5):
+            # Stage 2: Lock +0.65R profit at >= 1.5R gain
             state.breakeven_set = True
             state.half_risk_set = True
             state.trailing_stage0_5 = True
             state.trailing_activated = True
             state.trailing_stage2 = True
-            new_sl = round(max(entry * lock2_pct, entry + rd * 0.65), 2)
+            pct_sl = round(entry * lock2_pct, 2) if price_for_trail >= (entry * s2_pct) else 0.0
+            new_sl = round(max(pct_sl, entry + rd * 0.65), 2)
+            new_sl = min(new_sl, round(price_for_trail - 0.5, 2))
             if new_sl > state.current_sl:
                 state.current_sl = new_sl
                 stage_changed = True
@@ -916,15 +920,17 @@ class PositionMonitor:
                     f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
                 )
 
-        elif (not state.trailing_activated and price_for_trail >= s1_trigger) or progress >= 1.0:
-            # Stage 1: Lock +0.50R profit at >= 1.0R gain (+14% in Low-VIX mode locks +8%)
+        elif not state.trailing_activated and (price_for_trail >= s1_trigger or progress >= 1.0):
+            # Stage 1: Lock +0.50R profit at >= 1.0R gain
             state.breakeven_set = True
             state.half_risk_set = True
             state.trailing_stage0_5 = True
             state.trailing_activated = True
             lock_pct = 1.08
             lock_r = 0.20 if state.low_vix_mode else 0.50
-            new_sl = round(max(entry * lock_pct if state.low_vix_mode else 0.0, entry + rd * lock_r), 2)
+            pct_sl = round(entry * lock_pct, 2) if (state.low_vix_mode and price_for_trail >= entry * 1.14) else 0.0
+            new_sl = round(max(pct_sl, entry + rd * lock_r), 2)
+            new_sl = min(new_sl, round(price_for_trail - 0.5, 2))
             if new_sl > state.current_sl:
                 state.current_sl = new_sl
                 stage_changed = True
@@ -933,12 +939,12 @@ class PositionMonitor:
                     f"SL {old_sl:.2f} -> {new_sl:.2f} (LTP={price_for_trail:.2f})"
                 )
 
-        elif (not getattr(state, "trailing_stage0_5", False) and price_for_trail >= s05_trigger) or progress >= 0.65:
-            # Stage 0.5: Lock +0.35R profit at >= 0.65R gain (bridge dead-zone)
+        elif not getattr(state, "trailing_stage0_5", False) and (price_for_trail >= s05_trigger or progress >= 0.65):
+            # Stage 0.5: Lock +0.35R profit at >= 0.65R gain
             state.breakeven_set = True
             state.half_risk_set = True
             state.trailing_stage0_5 = True
-            new_sl = round(entry + rd * 0.35, 2)
+            new_sl = min(round(price_for_trail - 0.5, 2), round(entry + rd * 0.35, 2))
             if new_sl > state.current_sl:
                 state.current_sl = new_sl
                 stage_changed = True
@@ -1209,13 +1215,30 @@ class PositionMonitor:
                 )
                 return
 
+            aligned_trigger = round(round(manual_trigger / 0.05) * 0.05, 2)
+            aligned_limit = round(max(0.05, round((aligned_trigger * 0.95) / 0.05) * 0.05), 2)
+            
+            # Defensively pass limit price if broker supports it (broker.py, kite_executor, paper_trader)
+            import inspect
+            try:
+                sig = inspect.signature(self.broker.modify_order)
+                supports_price = "price" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                )
+            except Exception:
+                supports_price = True
+
+            kwargs = {"trigger_price": aligned_trigger}
+            if supports_price:
+                kwargs["price"] = aligned_limit
+
             result = self.broker.modify_order(
                 state.sl_order_id,
-                trigger_price=round(manual_trigger, 2),
+                **kwargs,
             )
             logger.info(
                 f"Broker SL modified: {state.sl_order_id} -> "
-                f"trigger={manual_trigger:.2f}"
+                f"trigger={aligned_trigger:.2f}, limit={aligned_limit:.2f}"
             )
         except Exception as e:
             logger.error(f"Failed to modify broker SL for {state.position_id}: {e}")
@@ -1261,8 +1284,7 @@ class PositionMonitor:
                 last_ts = getattr(state, "_last_bar_ts", None)
                 if last_ts is None:
                     try:
-                        entry_dt = datetime.strptime(state.entry_time, "%Y-%m-%d %H:%M:%S")
-                        elapsed_sec = (now - entry_dt).total_seconds()
+                        elapsed_sec = self._get_elapsed_seconds(state.entry_time)
                         if elapsed_sec > 0:
                             state.entry_bar_count = int(elapsed_sec // (interval_minutes * 60))
                             logger.info(f"[MONITOR] Initialized bar count for {state.position_id} to {state.entry_bar_count} based on entry time {state.entry_time}")

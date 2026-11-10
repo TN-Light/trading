@@ -10910,16 +10910,37 @@ class Prometheus:
         ]
         import html
         for pid, state in self.position_monitor.get_positions().items():
-            ltp = self.broker.get_ltp(state.tradingsymbol)
+            sym_root = (getattr(state, "symbol", "") or "").upper()
+            tsym = getattr(state, "tradingsymbol", "") or ""
+            exch = "BFO" if ("SENSEX" in sym_root or "BSX" in sym_root or "SENSEX" in tsym) else "NFO"
+            ltp = self.broker.get_ltp(state.tradingsymbol, exchange=exch)
+            if (not ltp or ltp <= 0) and exch != "NFO":
+                ltp = self.broker.get_ltp(state.tradingsymbol, exchange="NFO")
+            if not ltp or ltp <= 0:
+                ltp = self.broker.get_ltp(state.tradingsymbol)
+            
+            qty = int(getattr(state, "quantity", 0) or 0)
+            if qty <= 0:
+                from prometheus.risk.manager import get_lot_size
+                qty = get_lot_size(state.symbol)
+            if qty <= 0:
+                qty = 1
+
+            is_credit_spread = getattr(state, "strategy_type", "") == "credit_spread" or getattr(state, "is_spread", False)
+
             if ltp and ltp > 0 and state.entry_premium > 0:
-                pnl_pct = (ltp - state.entry_premium) / state.entry_premium * 100
-                pnl_rs = ltp - state.entry_premium
+                if is_credit_spread:
+                    pnl_rs = (state.entry_premium - ltp) * qty
+                    pnl_pct = (state.entry_premium - ltp) / state.entry_premium * 100
+                else:
+                    pnl_rs = (ltp - state.entry_premium) * qty
+                    pnl_pct = (ltp - state.entry_premium) / state.entry_premium * 100
                 ltp_str = f"\nLTP <code>{ltp:.2f}</code>"
             else:
                 pnl_pct = 0.0
                 pnl_rs = 0.0
                 ltp_str = ""
-            pnl_emoji = "\U0001f7e2" if pnl_pct >= 0 else "\U0001f534"
+            pnl_emoji = "\U0001f7e2" if pnl_rs >= 0 else "\U0001f534"
             acct_label = getattr(state, "_multi_account_label", "primary")
             
             # Generate Kite-searchable name
@@ -10928,11 +10949,11 @@ class Prometheus:
             
             lines.append(
                 f"{pnl_emoji} <b>{html.escape(str(display_name))}</b>\n"
-                f"    <i>{html.escape(str(acct_label))}</i>\n"
+                f"    <i>{html.escape(str(acct_label))}</i> (Qty: {qty})\n"
                 f"    Entry <code>{state.entry_premium:.2f}</code>  \u2502  SL <code>{state.current_sl:.2f}</code>{ltp_str}\n"
                 f"    Stage <code>{state.current_stage()}</code>  \u2502  "
                 f"Bars <code>{state.entry_bar_count}/{state.max_bars}</code>\n"
-                f"    P&amp;L <code>{pnl_rs:+.2f} ({pnl_pct:+.1f}%)</code>\n"
+                f"    P&amp;L <code>Rs {pnl_rs:+.2f} ({pnl_pct:+.1f}%)</code>\n"
             )
         return "\n".join(lines)
     
@@ -10968,84 +10989,26 @@ class Prometheus:
         try:
             if not tsym:
                 return ""
-            INDEX_MAP = {
-                'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY',
-                'FINNIFTY': 'FINNIFTY', 'MIDCPNIFTY': 'MIDCPNIFTY',
-                'SENSEX': 'SENSEX',
-            }
-            underlying = ""
-            for name in INDEX_MAP:
-                if tsym.startswith(name):
-                    underlying = name
-                    break
-            if not underlying:
-                underlying = symbol.upper() if symbol else ""
-            if not underlying or not tsym.startswith(underlying):
-                return ""
-
-            body = tsym[len(underlying):]
-            if body.endswith("CE") or body.endswith("PE"):
-                body = body[:-2]
-            else:
-                return ""
-
-            date_part = body[:5].upper() if len(body) >= 5 else ""
-            if len(date_part) == 5:
-                if not date_part[2:].isalpha():
-                    # Weekly: e.g. 26721
-                    yy = int(date_part[0:2])
-                    m_char = date_part[2]
-                    dd = int(date_part[3:5])
-                    m_map = {
-                        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
-                        "7": 7, "8": 8, "9": 9, "O": 10, "N": 11, "D": 12
-                    }
-                    month = m_map.get(m_char)
-                    if month and 1 <= dd <= 31:
-                        return f"20{yy:02d}-{month:02d}-{dd:02d}"
-            return ""
+            from prometheus.utils.symbol_format import parse_api_tradingsymbol
+            parsed = parse_api_tradingsymbol(tsym)
+            if parsed and parsed.get("expiry"):
+                return parsed["expiry"].strftime("%Y-%m-%d")
         except Exception:
-            return ""
+            pass
+        return ""
 
     def _parse_strike_otype_from_tradingsymbol(self, tsym: str, symbol: str) -> tuple:
         """Parse strike (float) and option_type (str) from NSE token/tradingsymbol format."""
         try:
             if not tsym:
                 return 0.0, ""
-            INDEX_MAP = {
-                'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY',
-                'FINNIFTY': 'FINNIFTY', 'MIDCPNIFTY': 'MIDCPNIFTY',
-                'SENSEX': 'SENSEX',
-            }
-            underlying = ""
-            for name in INDEX_MAP:
-                if tsym.startswith(name):
-                    underlying = name
-                    break
-            if not underlying:
-                underlying = symbol.upper() if symbol else ""
-            if not underlying or not tsym.startswith(underlying):
-                return 0.0, ""
-
-            body = tsym[len(underlying):]
-            if body.endswith("CE"):
-                option_type = "CE"
-                body = body[:-2]
-            elif body.endswith("PE"):
-                option_type = "PE"
-                body = body[:-2]
-            else:
-                return 0.0, ""
-
-            if len(body) > 5:
-                strike_str = body[5:]
-                try:
-                    return float(strike_str), option_type
-                except ValueError:
-                    pass
-            return 0.0, ""
+            from prometheus.utils.symbol_format import parse_api_tradingsymbol
+            parsed = parse_api_tradingsymbol(tsym)
+            if parsed:
+                return float(parsed.get("strike", 0.0)), str(parsed.get("option_type", ""))
         except Exception:
-            return 0.0, ""
+            pass
+        return 0.0, ""
 
     def _tg_cmd_set_price(self, args: str = "") -> str:
         """Handle /set_price — push synthetic LTP for dry-run testing.
