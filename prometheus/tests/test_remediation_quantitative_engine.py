@@ -281,8 +281,9 @@ def test_data_engine_enrich_zero_oi_from_nse():
     assert not enriched.empty
     ce_row = enriched[enriched["option_type"] == "CE"].iloc[0]
     pe_row = enriched[enriched["option_type"] == "PE"].iloc[0]
-    assert ce_row["oi_change"] == 3500
-    assert pe_row["oi_change"] == -1200
+    # Scaled to shares (NSE contract count * lot_size 65) to match Angel One units
+    assert ce_row["oi_change"] == 3500 * 65
+    assert pe_row["oi_change"] == -1200 * 65
 
 
 def test_live_bridge_build_signal_notification_commitment_ratio_fallback(tmp_path):

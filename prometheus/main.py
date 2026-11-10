@@ -2364,7 +2364,7 @@ class Prometheus:
                                 execution_signal["body_displacement"] = pa_sig.get("body_displacement")
                                 execution_signal["has_range_expansion"] = bool(pa_sig.get("has_range_expansion"))
                                 execution_signal["adx"] = float(pa_sig.get("adx", 0.0) or 0.0)
-                                execution_signal["breakeven_trigger_pts"] = pa_sig.get("breakeven_trigger_pts", round(target_gain_pts * 0.5, 1))
+                                execution_signal["breakeven_trigger_pts"] = float(pa_sig.get("breakeven_trigger_pts") or round(target_gain_pts * 0.5, 1))
                                 execution_signal["tier"] = pa_sig.get("tier", "C")
                                 execution_signal["is_compressed"] = pa_sig.get("is_compressed", False)
                                 execution_signal["net_gex"] = pa_sig.get("net_gex", 0.0)
@@ -2472,6 +2472,7 @@ class Prometheus:
                         df_1h=df_1h,
                         net_gex=curr_net_gex,
                         stopped_out_directions=stopped_set,
+                        vix=self.data.get_vix(),
                     )
                     if cs_sig:
                         cs_sig["strategy_type"] = "credit_spread"
@@ -2482,10 +2483,13 @@ class Prometheus:
                             cs_sig["zgl"] = curr_zgl
                         if curr_commitment is not None:
                             cs_sig["commitment_ratio"] = curr_commitment
+                        from prometheus.signals.tier_classifier import classify_signal_tier
+                        cs_tier_info = classify_signal_tier(cs_sig)
+                        cs_sig.update(cs_tier_info)
                         logger.info(
                             f"CreditSpread signal generated for {symbol}: "
                             f"{cs_sig.get('spread_type')} (Credit=Rs {cs_sig.get('net_credit', 0):.2f}) "
-                            f"[{cs_sig.get('tradingsymbol', '')}]"
+                            f"[{cs_sig.get('tradingsymbol', '')}] Tier={cs_sig.get('tier', 'C')}"
                         )
         except Exception as e:
             logger.debug(f"Credit Spread check failed for {symbol}: {e}")
@@ -6247,17 +6251,17 @@ class Prometheus:
                                             ts = self.order_manager.create_trailing_state(
                                                 position.position_id
                                             )
-                                        if ts:
-                                            ts.trade_mode = "intraday"
-                                            ts.bar_interval = bar_interval
-                                            ts.breakeven_ratio = be_ratio
-                                            intraday_ts_cfg = intraday_cfg.get(
-                                                f"time_stop_bars_{bar_interval.replace('minute', 'min')}",
-                                                intraday_cfg.get("time_stop_bars_15min", 20)
-                                            )
-                                            ts.max_bars = intraday_ts_cfg
-                                            self.position_monitor.add_position(ts)
-                                            self._handle_state_persist(ts)
+                                            if ts:
+                                                ts.trade_mode = "intraday"
+                                                ts.bar_interval = bar_interval
+                                                ts.breakeven_ratio = be_ratio
+                                                intraday_ts_cfg = intraday_cfg.get(
+                                                    f"time_stop_bars_{bar_interval.replace('minute', 'min')}",
+                                                    intraday_cfg.get("time_stop_bars_15min", 20)
+                                                )
+                                                ts.max_bars = intraday_ts_cfg
+                                                self.position_monitor.add_position(ts)
+                                                self._handle_state_persist(ts)
 
                             _last_intra_scan = now
 
@@ -6352,7 +6356,9 @@ class Prometheus:
             chunk = data_bias.iloc[max(0, i - 20):i + 1]
             current_bar_date = str(chunk["timestamp"].iloc[-1])[:10]
             # Anti-Lookahead Guard: In backtests, bias of session T is projected forward to session T+1
-            target_session_date = date_to_next.get(current_bar_date, current_bar_date)
+            target_session_date = date_to_next.get(current_bar_date)
+            if not target_session_date:
+                continue
 
             recent_h = chunk.tail(5)
             highs = recent_h["high"].values

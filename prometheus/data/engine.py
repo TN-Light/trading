@@ -1025,8 +1025,10 @@ class DataEngine:
                             if nse_raw:
                                 nse_df = self.nse.parse_options_chain(nse_raw)
                                 if not nse_df.empty and "oi_change" in nse_df.columns:
+                                    from prometheus.utils.indian_market import get_lot_size
+                                    lot_mult = get_lot_size(symbol) if not df.attrs.get("is_contracts", False) else 1
                                     change_map = {
-                                        (round(float(r["strike"]), 2), str(r["option_type"]).upper()): float(r["oi_change"])
+                                        (round(float(r["strike"]), 2), str(r["option_type"]).upper()): float(r["oi_change"]) * lot_mult
                                         for _, r in nse_df.iterrows()
                                         if r.get("oi_change") is not None
                                     }

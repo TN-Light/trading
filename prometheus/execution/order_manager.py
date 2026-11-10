@@ -155,6 +155,8 @@ class OrderManager:
             "stop_loss": sl,
             "quantity": quantity,
             "cost": trade_cost,
+            "strategy_type": "credit_spread" if is_spread else signal.get("strategy_type", "option_buying"),
+            "risk_amount": abs(entry - sl) * quantity if not is_spread else 850.0,
         })
 
         if not risk_check.approved:

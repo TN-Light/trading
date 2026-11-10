@@ -132,6 +132,7 @@ class RiskManager:
 
         # Margin & Lot Limits
         self.margin_utilization_max = config.get("margin_utilization_max", 70.0)
+        self.max_total_exposure_pct = float(config.get("max_total_exposure_pct", self.margin_utilization_max))
         self.max_lots_per_trade = config.get("max_lots_per_trade", 50)  # Hard cap on physical liquidity
 
         # Circuit breakers
@@ -255,7 +256,25 @@ class RiskManager:
         # 7. Position size check
         trade_cost = trade.get("cost", trade.get("entry_price", 0) * trade.get("quantity", 0))
         max_position_value = self.current_capital * self.max_single_position_pct / 100
-        if trade_cost > max_position_value:
+        
+        trade_risk = trade.get("risk_amount")
+        if trade_risk is None and trade.get("entry_price") and trade.get("stop_loss") and trade.get("quantity"):
+            trade_risk = abs(trade.get("entry_price", 0) - trade.get("stop_loss", 0)) * trade.get("quantity", 0)
+        
+        is_spread_trade = (
+            trade.get("strategy_type") == "credit_spread"
+            or "spread" in str(trade.get("strategy", "")).lower()
+            or "spread" in str(trade.get("symbol", "")).lower()
+        )
+        max_exp_pct = getattr(self, "max_total_exposure_pct", getattr(self, "margin_utilization_max", 70.0))
+        is_single_lot_approved = (
+            (trade_risk is not None and trade_risk <= 850.0)
+            and trade_cost <= (self.current_capital * 0.50)
+        ) or (
+            is_spread_trade
+            and trade_cost <= (self.current_capital * (max_exp_pct / 100.0))
+        )
+        if trade_cost > max_position_value and not is_single_lot_approved:
             violations.append(
                 f"Position too large: Rs {trade_cost:.0f} "
                 f"(limit: Rs {max_position_value:.0f}, {self.max_single_position_pct}% of capital)"

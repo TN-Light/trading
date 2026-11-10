@@ -35,6 +35,7 @@ class TargetCalibrationResult(NamedTuple):
     is_compressed: bool
     is_rejected: bool = False
     rejection_reason: str = ""
+    breakeven_trigger_pts: float = 0.0
 
     def __iter__(self):
         # 5-tuple backwards compatibility for unpacking (target_gain_pts, sl_pts, tgt_price, sl_price, is_compressed)
@@ -42,11 +43,6 @@ class TargetCalibrationResult(NamedTuple):
 
     def __len__(self):
         return 5
-
-    @property
-    def breakeven_trigger_pts(self) -> float:
-        """Breakeven trigger point (50% of target gain)."""
-        return round(self.target_gain_pts * 0.50, 1)
 
     def __getitem__(self, item):
         if isinstance(item, str):
@@ -369,6 +365,11 @@ def calibrate_target_and_sl(
         tgt_price = round(target_gain_pts, 2)
         sl_price = round(max(0.0, -sl_pts), 2)
 
+    if is_tier_c:
+        be_trigger = round(target_gain_pts * 0.5, 1)
+    else:
+        be_trigger = round(max(actual_noise_floor, target_gain_pts * 0.5), 1)
+
     return TargetCalibrationResult(
         target_gain_pts=target_gain_pts,
         sl_pts=sl_pts,
@@ -377,4 +378,5 @@ def calibrate_target_and_sl(
         is_compressed=is_compressed,
         is_rejected=is_rejected,
         rejection_reason=rejection_reason,
+        breakeven_trigger_pts=be_trigger,
     )
