@@ -10088,7 +10088,6 @@ class Prometheus:
         winning = 0
         try:
             import sqlite3
-            from datetime import date
             today_str = date.today().strftime("%Y-%m-%d")
             conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
             c = conn.cursor()
@@ -10786,7 +10785,6 @@ class Prometheus:
         tier_c_count = 0
         try:
             import sqlite3
-            from datetime import date
             today_str = date.today().strftime("%Y-%m-%d")
             conn = sqlite3.connect("reports/papertrade/live_ledger.sqlite")
             c = conn.cursor()

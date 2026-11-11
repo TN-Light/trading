@@ -2,8 +2,8 @@
 
 **Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 43,226.64 (-288.18%)**  
-**Last Updated:** 2026-11-10 08:46:22 IST  
+**Current Realized Net P&L:** **🔴 -Rs 40,926.64 (-272.84%)**  
+**Last Updated:** 2026-11-11 10:31:51 IST  
 
 ---
 
@@ -11,14 +11,14 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 43,226.64** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-288.18%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **51** | 20–22 days | In Progress |
-| **Green / Red Days** | **14 Green / 22 Red / 15 BE** | > 65% Green | 27.5% |
-| **Total Trades** | **168** | ~3–5 / day | Tracked |
-| **Win Rate** | **39.9%** (67W / 101L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.65** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 56,265.70 | — | Winning Trades |
+| **Net Realized P&L** | **-Rs 40,926.64** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-272.84%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **52** | 20–22 days | In Progress |
+| **Green / Red Days** | **15 Green / 22 Red / 15 BE** | > 65% Green | 28.8% |
+| **Total Trades** | **170** | ~3–5 / day | Tracked |
+| **Win Rate** | **40.6%** (69W / 101L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.67** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 58,765.70 | — | Winning Trades |
 | **Gross Loss** | -Rs 87,090.46 | — | Losing Trades |
 
 ---
@@ -78,6 +78,7 @@
 | **2026-11-08** | 0 | 0W / 0L | 0% | +Rs 0 | -Rs 0 | **⚪ +Rs 0.0** | +0.0% | **-Rs 46,371.2** | Intraday paper trading session: 0 trades (0W / 0L), Net P&L: Rs +0.00 |
 | **2026-11-09** | 2 | 2W / 0L | 100% | +Rs 1,088 | -Rs 0 | **🟢 +Rs 844.5** | +0.8% | **-Rs 45,526.6** | Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +844.55 |
 | **2026-11-10** | 2 | 2W / 0L | 100% | +Rs 2,500 | -Rs 0 | **🟢 +Rs 2,300.0** | +2.2% | **-Rs 43,226.6** | Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +2,300.00 |
+| **2026-11-11** | 2 | 2W / 0L | 100% | +Rs 2,500 | -Rs 0 | **🟢 +Rs 2,300.0** | +2.2% | **-Rs 40,926.6** | Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +2,300.00 |
 
 ---
 

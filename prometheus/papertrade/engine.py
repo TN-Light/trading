@@ -212,10 +212,12 @@ class PaperTradeEngine:
         # Structural Risk Ceiling Guard (Anti-Inflation Invariant):
         # Rejects directional option buying signals where stop loss distance exceeds maximum allowable risk
         fill_px = float(fill.fill_price)
-        if self.enforce_risk_ceiling and not is_spread and signal.stop_loss > 0 and fill_px > 0:
+        sig_sl = float(signal.stop_loss or 0.0)
+        sig_tgt = float(signal.target or 0.0)
+        if self.enforce_risk_ceiling and not is_spread and sig_sl > 0 and fill_px > 0:
             raw_hint = float(getattr(signal, "entry_price_hint", 0.0) or 0.0)
             hint_base = raw_hint if raw_hint > 0 else fill_px
-            sl_dist = hint_base - signal.stop_loss
+            sl_dist = hint_base - sig_sl
             lot_sz = qty if qty > 0 else get_lot_size(signal.symbol)
             max_sl = round(850.0 / max(1, lot_sz), 2)
             if sl_dist > max_sl:
@@ -224,7 +226,7 @@ class PaperTradeEngine:
                 return None
 
         # Defensive: skip signals missing SL/target — they'd be useless paper trades
-        if signal.stop_loss <= 0 or signal.target <= 0:
+        if sig_sl <= 0 or sig_tgt <= 0:
             logger.warning(
                 f"[PAPER] skip {signal.instrument}: missing SL/target "
                 f"(sl={signal.stop_loss} target={signal.target})"
@@ -260,27 +262,27 @@ class PaperTradeEngine:
 
         if not is_spread:
             # OPTION BUYING (Both CE and PE): Premium EXPANDS when profitable
-            if tgt_gain <= 0 and signal.target > hint_px > 0:
-                tgt_gain = signal.target - hint_px
+            if tgt_gain <= 0 and sig_tgt > hint_px > 0:
+                tgt_gain = sig_tgt - hint_px
             effective_target = round(fill_px + tgt_gain, 2) if tgt_gain > 0 else (
-                signal.target if signal.target > fill_px else round(fill_px + max(8.0, fill_px * 0.15), 2)
+                sig_tgt if sig_tgt > fill_px else round(fill_px + max(8.0, fill_px * 0.15), 2)
             )
-            risk_dist = (hint_px - signal.stop_loss) if (hint_px > signal.stop_loss > 0) else (fill_px * 0.35)
+            risk_dist = (hint_px - sig_sl) if (hint_px > sig_sl > 0) else (fill_px * 0.35)
             effective_sl = max(1.0, round(fill_px - risk_dist, 2)) if risk_dist > 0 else (
-                signal.stop_loss if 0 < signal.stop_loss < fill_px else max(1.0, round(fill_px * 0.65, 2))
+                sig_sl if 0 < sig_sl < fill_px else max(1.0, round(fill_px * 0.65, 2))
             )
         else:
             # OPTION SELLING (Credit Spreads): Premium DECAYS when profitable
-            if hint_px > 0 and signal.target > 0:
-                target_decay_ratio = max(0.1, min(0.9, signal.target / hint_px))
+            if hint_px > 0 and sig_tgt > 0:
+                target_decay_ratio = max(0.1, min(0.9, sig_tgt / hint_px))
                 effective_target = round(fill_px * target_decay_ratio, 2)
             else:
-                effective_target = signal.target if 0 < signal.target < fill_px else round(fill_px * 0.5, 2)
-            if hint_px > 0 and signal.stop_loss > hint_px:
-                sl_ratio = signal.stop_loss / hint_px
+                effective_target = sig_tgt if 0 < sig_tgt < fill_px else round(fill_px * 0.5, 2)
+            if hint_px > 0 and sig_sl > hint_px:
+                sl_ratio = sig_sl / hint_px
                 effective_sl = round(fill_px * sl_ratio, 2)
             else:
-                effective_sl = signal.stop_loss if signal.stop_loss > fill_px else round(fill_px * 1.5, 2)
+                effective_sl = sig_sl if sig_sl > fill_px else round(fill_px * 1.5, 2)
 
         gex_val = getattr(signal, "net_gex", None)
         gamma_reg = str(getattr(signal, "gamma_regime", "")).upper()

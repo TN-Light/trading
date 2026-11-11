@@ -129,14 +129,14 @@ class FillSimulator:
                             l_ltp, l_bid, l_ask = l_quote
                             if side == "SELL":
                                 # Selling to open credit spread: sell short leg at bid, buy long hedge at ask
-                                s_px = s_bid if s_bid > 0 else s_ltp
-                                l_px = l_ask if l_ask > 0 else l_ltp
+                                s_px = s_bid if (s_bid is not None and s_bid > 0) else s_ltp
+                                l_px = l_ask if (l_ask is not None and l_ask > 0) else l_ltp
                             else:
                                 # Buying to close spread: buy short leg back at ask, sell long hedge at bid
-                                s_px = s_ask if s_ask > 0 else s_ltp
-                                l_px = l_bid if l_bid > 0 else l_ltp
+                                s_px = s_ask if (s_ask is not None and s_ask > 0) else s_ltp
+                                l_px = l_bid if (l_bid is not None and l_bid > 0) else l_ltp
 
-                            if s_px > 0 and l_px > 0:
+                            if (s_px is not None and s_px > 0) and (l_px is not None and l_px > 0):
                                 spread_val = round(max(0.05, s_px - l_px), 2)
                                 slip = spread_val * self.slippage_bps / 10000.0
                                 fp = round(spread_val + slip if side == "BUY" else max(0.05, spread_val - slip), 2)
@@ -166,12 +166,12 @@ class FillSimulator:
 
             if quote:
                 ltp, bid, ask = quote
-                if side == "BUY" and ask > 0:
+                if side == "BUY" and ask is not None and ask > 0:
                     return FillResult(ask, "live_ask")
-                if side == "SELL" and bid > 0:
+                if side == "SELL" and bid is not None and bid > 0:
                     return FillResult(bid, "live_bid")
-                if ltp > 0:
-                    # Bid/ask zero but LTP valid — use mid*(1±slippage)
+                if ltp is not None and ltp > 0:
+                    # Bid/ask zero or None but LTP valid — use mid*(1±slippage)
                     slip = ltp * self.slippage_bps / 10000.0
                     fp = ltp + slip if side == "BUY" else ltp - slip
                     return FillResult(fp, "live_ltp_with_slippage")
@@ -183,7 +183,7 @@ class FillSimulator:
             logger.debug(f"FillSimulator: get_ltp failed for {instrument}: {e}")
             ltp = 0.0
 
-        if ltp > 0:
+        if ltp is not None and ltp > 0:
             slip = ltp * self.slippage_bps / 10000.0
             fp = ltp + slip if side == "BUY" else ltp - slip
             return FillResult(fp, "ltp_with_slippage")

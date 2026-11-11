@@ -359,3 +359,32 @@ def test_metrics_calculation(tmp_path):
     # Holding duration should be positive (exit_time > entry_time)
     assert stats.avg_holding_duration_seconds > 0
     engine.close()
+
+
+def test_fill_simulator_none_quotes_handling():
+    """Verify FillSimulator handles (ltp, None, None) quotes from LivePriceFeed without TypeError."""
+    class NoneQuoteFeed:
+        def get_ltp(self, instrument: str) -> float:
+            return 250.0
+
+        def get_quote(self, instrument: str) -> Optional[tuple]:
+            # Returns valid LTP but None for bid and ask (as configured in LivePriceFeed)
+            return (250.0, None, None)
+
+    feed = NoneQuoteFeed()
+    sim = FillSimulator(feed=feed, slippage_bps=5.0, use_bid_ask=True)
+
+    # 1. Single leg BUY
+    res_buy = sim.fill("NIFTY17NOV2625400CE", Direction.LONG, side="BUY")
+    assert res_buy.source == "live_ltp_with_slippage"
+    assert res_buy.fill_price > 250.0  # LTP + slippage
+
+    # 2. Single leg SELL
+    res_sell = sim.fill("NIFTY17NOV2625400CE", Direction.SHORT, side="SELL")
+    assert res_sell.source == "live_ltp_with_slippage"
+    assert res_sell.fill_price < 250.0  # LTP - slippage
+
+    # 3. 2-leg spread
+    res_spread = sim.fill("NIFTY17NOV2625400CE/NIFTY17NOV2625500CE", Direction.SHORT, side="SELL")
+    assert res_spread.source in ("live_spread_2leg", "rejected")
+
