@@ -159,3 +159,24 @@ This framework governs ALL trading strategies, execution engines, market regimes
     1. *Liquidity Sweeps + Volume Profile (`pro_LiqSweep + VP`)*: 244 trades, 65.2% Win Rate, +Rs 2,52,137.78 Net Profit (Avg: +Rs 1,033.35/trade).
     2. *Afternoon Power Session (13:15–15:30)*: 453 trades, 65.6% Win Rate, +Rs 5,88,421.92 Net Profit (Avg: +Rs 1,298.94/trade — more than double the morning session).
     3. *3-Phase Trailing Stop*: Phase 2 hard stops cut losses to -Rs 125.46 avg; Phase 3 trailing profit-locks generated +Rs 3,22,625.82; full Targets generated +Rs 7,15,994.52.
+
+## 8. Clean-Room Validation, Historical Datasets & Anti-Fakeout Architecture
+
+- **The Clean-Room Epoch & Legacy Decoupling Invariant (Anti-Contamination Mandate)**:
+  - Historical paper trades executed prior to November 13, 2026 (`live_ledger.sqlite` trades 1–116) ran under legacy code containing 22+ verified defects (e.g. inverted OI scoring, trailing stops placed above LTP, unassigned paper trade counters causing re-entry churn, single-leg decay miscalculations, and precision risk ceiling mismatches).
+  - Evaluating strategy alpha or making discretionary parameter tweaks based on unadjusted legacy paper trades is strictly prohibited, as it conflates algorithmic edge with execution engine defects.
+  - Multi-year strategy validation, parameter sweeps, and regime backtests must strictly anchor to the 11-year pristine datasets in `dataset/` (`dataset/NIFTY 50_15minute.csv`, `dataset/NIFTY BANK_15minute.csv`, `dataset/INDIA VIX_15minute.csv`, spanning 2015–2026 across 68,000+ bars).
+  - Forward operational tracking is segregated into a clean-room forward validation epoch (Post-Audit v2.0) starting November 14, 2026.
+
+- **The Liquidity Sweep & Reversal Pin Bar Invariant (Anti-Fakeout Mandate)**:
+  - Breakouts piercing an Opening Range (ORB) High or key multi-session resistance must NEVER trigger directional Call Buying if the triggering bar prints an institutional rejection candle (Bearish Shooting Star / Upper Wick Pin Bar):
+    $$\text{Upper Wick} > 0.40 \times (\text{High} - \text{Low}) \quad \text{OR} \quad \text{Close} \le \text{Low} + 0.33 \times (\text{High} - \text{Low})$$
+  - In auction market microstructure, a breakout candle that pierces resistance to trigger retail buy-stops but closes in the lower third of its range represents institutional supply absorption and inventory unloading. Entering Call options into a completed reversal pin bar is strictly prohibited.
+
+- **The Intermarket Breadth Divergence (SMT) Mandate**:
+  - High-conviction trend setups (Tier S / Tier B) in benchmark indices (SENSEX, NIFTY 50) must verify directional breadth alignment with leading banking peers (NIFTY BANK, HDFCBANK, ICICIBANK).
+  - If SENSEX prints a new high while NIFTY BANK prints a lower high below its VWAP (bearish SMT divergence), breakout momentum is unconfirmed by underlying institutional order flow, gating directional buying to Tier C paper tracking.
+
+- **The Late-Morning Climax Exhaustion Window (10:30–11:30 IST)**:
+  - Empirically across the historical population, morning breakouts between 10:30 and 11:30 IST represent the late-stage exhaustion of morning impulse waves ahead of the midday liquidity drop (37.8% win rate across 74 trades).
+  - Option buying setups in this window must demand strict structural confirmation, while the Afternoon Power Session (13:15–15:30 IST, 56.3% win rate) remains the primary institutional trend continuation window.
