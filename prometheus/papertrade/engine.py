@@ -220,7 +220,7 @@ class PaperTradeEngine:
             sl_dist = hint_base - sig_sl
             lot_sz = qty if qty > 0 else get_lot_size(signal.symbol)
             max_sl = round(850.0 / max(1, lot_sz), 2)
-            if sl_dist > max_sl:
+            if sl_dist > (max_sl + 0.05):
                 self.signals_skipped_other += 1
                 logger.info(f"[PAPER] skip {signal.instrument}: excessive SL risk ({sl_dist:.1f} pts > {max_sl:.1f} pts max threshold for lot_size={lot_sz}). Trade rejected.")
                 return None

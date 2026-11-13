@@ -218,7 +218,8 @@ def test_send_daily_summary_equity_and_tier_segregation(tmp_path):
     def mock_sqlite_connect(path):
         return real_connect(db_file)
 
-    with patch("sqlite3.connect", side_effect=mock_sqlite_connect):
+    with patch("sqlite3.connect", side_effect=mock_sqlite_connect), \
+         patch("prometheus.papertrade.metrics.record_daily_performance"):
         app._send_daily_summary()
 
     assert len(app.telegram.summaries) == 1

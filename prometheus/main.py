@@ -5307,10 +5307,16 @@ class Prometheus:
                         self._send_daily_summary()
                         _did_send_daily_summary = True
                         self._set_daily_state("dry_did_send_daily_summary", True)
-                    self.dashboard.show_status_line(
-                        f"{mode_label}: Squared off. Market closing soon."
-                    )
-                    time.sleep(60)
+                    if current_time >= dtime(16, 0):
+                        self.dashboard.show_status_line(
+                            f"{mode_label}: Market closed. Standing by for next session."
+                        )
+                        time.sleep(300)
+                    else:
+                        self.dashboard.show_status_line(
+                            f"{mode_label}: Squared off. Market closing soon."
+                        )
+                        time.sleep(60)
                     continue
 
                 # Check if today is weekly expiry day for any tracked instrument
@@ -5610,6 +5616,8 @@ class Prometheus:
                             if position is None and getattr(self, "paper_capture", None) and getattr(self.paper_capture, "enabled", False):
                                 try:
                                     shadow_trade_id = self.paper_capture.on_signal(refined)
+                                    if shadow_trade_id:
+                                        position = shadow_trade_id
                                     logger.info(
                                         f"📝 [PAPER-LIVE-ELIGIBLE] Rank #1 ({cand_tier}) signal paper-tracked: "
                                         f"{symbol} {strat} (score={score:.1f}) -> TradeID={shadow_trade_id or 'tracked'}"
@@ -5677,7 +5685,10 @@ class Prometheus:
                     if not _did_send_daily_summary:
                         self._send_daily_summary()
                         _did_send_daily_summary = True
-                    time.sleep(60)
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Market closed. Standing by for next session."
+                    )
+                    time.sleep(300)
                     continue
 
                 n_pos = self._get_active_positions_count()
@@ -6271,7 +6282,10 @@ class Prometheus:
                         self._send_daily_summary()
                         _did_send_daily_summary = True
                         self._set_daily_state("live_did_send_daily_summary", _did_send_daily_summary)
-                    time.sleep(60)  # slow poll after hours
+                    self.dashboard.show_status_line(
+                        f"{mode_label}: Market closed. Standing by for next session."
+                    )
+                    time.sleep(300)  # slow poll after hours
                     continue
 
                 # Status

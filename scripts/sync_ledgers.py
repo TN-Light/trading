@@ -82,7 +82,7 @@ def sync_daily_performance_ledger(conn: sqlite3.Connection):
 
     # All historical dates tracked (including non-trading / zero-trade days)
     # Start with legacy rows pre-Sep 21, then update crucible days
-    all_dates = [
+    base_dates = [
         "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-31",
         "2026-09-01", "2026-09-02", "2026-09-03", "2026-09-04", "2026-09-07",
         "2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-15",
@@ -92,6 +92,7 @@ def sync_daily_performance_ledger(conn: sqlite3.Connection):
         "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15",
         "2026-10-16", "2026-10-19"
     ]
+    all_dates = sorted(list(set(base_dates) | set(sqlite_daily.keys()) | set(existing_notes.keys())))
 
     # Pre-Sep 21 legacy stats dictionary (from legacy archive)
     legacy_stats = {
@@ -142,7 +143,7 @@ def sync_daily_performance_ledger(conn: sqlite3.Connection):
 
         # Detailed Notes
         note = existing_notes.get(dt, "")
-        if not note or (dt in ("2026-10-07", "2026-10-08", "2026-10-13", "2026-10-15", "2026-10-16", "2026-10-19") and "Intraday paper" in note):
+        if not note or (dt in ("2026-10-07", "2026-10-08", "2026-10-13", "2026-10-15", "2026-10-16", "2026-10-19", "2026-11-13") and "Intraday paper" in note) or ("Intraday paper trading session:" in note and f"{total} trades" not in note):
             if dt == "2026-10-07":
                 note = f"Day 12: 8 trades executed (1 Net Green / 7 Losses, 12.5% WR). Gross -Rs 558.51, Costs Rs 985.04, Net -Rs 1543.55."
             elif dt == "2026-10-08":
@@ -161,6 +162,8 @@ def sync_daily_performance_ledger(conn: sqlite3.Connection):
                 note = f"Day 16: 10 trades executed (5 Wins / 5 Losses, 50.0% WR). Gross -Rs 1638.16, Costs Rs 943.63, Net -Rs 2581.79. Interrupted trade 8864A5 cleanly settled."
             elif dt == "2026-10-19":
                 note = "Day 17: 2 credit spreads executed (1 Win / 1 Loss, 50.0% WR). FIN NIFTY scratch (-Rs 8.74), BANK NIFTY square-off decay (+Rs 134.92 net). Net Green session (+Rs 126.18)."
+            elif dt == "2026-11-13":
+                note = f"Day 23: 3 trades executed (0 Wins / 3 Losses). Gross -Rs 1451.38, Costs Rs 280.11, Net -Rs 1731.49. SENSEX Golden Setup stopped out (-Rs 1199.16), NIFTY/SENSEX Put trades stopped out."
             elif total == 0:
                 note = "0 trades executed. Capital preserved."
 
