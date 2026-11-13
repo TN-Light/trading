@@ -183,6 +183,23 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         
         is_golden = bool(signal.get("is_golden_setup", False)) or "golden_setup" in strat_name
 
+        # Microstructure Trap Veto Invariant:
+        # If any of the 6 orthogonal downfall gates (CLV/Wick, Climax/VWAP, Kaufman ER,
+        # Writer Absorption, Wall Clearance, SMT Divergence) triggered a veto,
+        # live capital execution is strictly blocked and demoted to Tier C Paper Only.
+        if bool(signal.get("is_microstructure_vetoed", False)):
+            veto_reasons = [str(r) for r in signal.get("reasons", []) if "VETOED:" in str(r)] or [
+                "Microstructure trap veto triggered (Wick Rejection / Climax / Absorption / SMT Divergence)"
+            ]
+            return _build_tier_result(
+                tier="C",
+                tier_name="MICROSTRUCTURE_TRAP_VETOED",
+                is_live_eligible=False,
+                reasons=veto_reasons,
+                badge="🛡️ <b>[TIER C: MICROSTRUCTURE VETO — PAPER ONLY]</b>",
+                instruction="📝 <b>ACTION:</b> Live Execution Blocked by Microstructure Trap Gate (Paper Tracking Only)"
+            )
+
         # Team A Capital Allocation Mandate:
         # Bank Nifty and FinNifty directional option buying carry heavy spread friction and statutory ticket drag
         # (-Rs 5,760.78 net BN, -Rs 3,143.86 net FN on single lots).

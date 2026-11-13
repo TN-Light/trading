@@ -1771,6 +1771,22 @@ class Prometheus:
         threshold = intraday_cfg.get("vix_threshold_5min", 18.0)
         return "5minute" if vix > threshold else "15minute"
 
+    def _get_cached_daily_atr(self, symbol: str) -> float:
+        """Get cached 14-day Daily ATR for a symbol, computing once per session."""
+        if not hasattr(self, "_daily_atr_cache"):
+            self._daily_atr_cache = {}
+        if symbol not in self._daily_atr_cache:
+            try:
+                daily_df = self.data.fetch_historical(symbol, days=30, interval="day", force_refresh=False)
+                if daily_df is not None and len(daily_df) >= 15:
+                    from prometheus.signals.technical import calculate_atr
+                    d_atr_s = calculate_atr(daily_df, period=14)
+                    val = float(d_atr_s.iloc[-1]) if pd.notna(d_atr_s.iloc[-1]) else 0.0
+                    self._daily_atr_cache[symbol] = val
+            except Exception as e:
+                logger.debug(f"Daily ATR cache load error for {symbol}: {e}")
+        return self._daily_atr_cache.get(symbol, 0.0)
+
     def _get_intraday_instruments(self, fallback: Optional[List[str]] = None) -> List[str]:
         """Resolve intraday symbols with optional performance gate allowlist."""
         intraday_cfg = get("intraday", {})
@@ -2064,6 +2080,10 @@ class Prometheus:
                 self._pa_momentum_scanner = PriceActionMomentumScanner()
 
             intra_df = self.data.fetch_intraday(symbol, interval=bar_interval, days=5)
+            if not hasattr(self, "_latest_intra_dfs"):
+                self._latest_intra_dfs = {}
+            if intra_df is not None and not intra_df.empty:
+                self._latest_intra_dfs[symbol] = intra_df
             df_1h = None
             try:
                 df_1h = self.data.fetch_historical(symbol, interval="60minute", days=5, force_refresh=False)
@@ -2182,6 +2202,7 @@ class Prometheus:
                     net_gex = 0.0
                     zgl_val = None
                     gamma_regime = "NEUTRAL"
+                    res_oi = None
                     try:
                         chain_data = self.data.fetch_options_chain(symbol)
                         if chain_data is not None and not chain_data.empty:
@@ -2200,6 +2221,31 @@ class Prometheus:
                     pa_sig["net_gex"] = net_gex
                     pa_sig["zgl"] = zgl_val
                     pa_sig["gamma_regime"] = gamma_regime
+
+                    # ── Institutional Microstructure Trap & Downfall Veto Gate ──
+                    from prometheus.signals.microstructure_gates import MicrostructureTrapFilter
+                    if not hasattr(self, "_microstructure_filter"):
+                        self._microstructure_filter = MicrostructureTrapFilter()
+
+                    peer_df_15m = self._latest_intra_dfs.get("NIFTY BANK") if "BANK" not in symbol.upper() else None
+                    cached_d_atr = self._get_cached_daily_atr(symbol)
+
+                    is_vetoed, veto_reason, micro_telemetry = self._microstructure_filter.evaluate_all_vetoes(
+                        df_15m=intra_df,
+                        signal=pa_sig,
+                        symbol=symbol,
+                        oi_data=res_oi,
+                        cached_daily_atr=cached_d_atr,
+                        peer_df_15m=peer_df_15m,
+                        peer_symbol="NIFTY BANK",
+                    )
+                    pa_sig["microstructure_telemetry"] = micro_telemetry
+
+                    if is_vetoed:
+                        logger.info(f"🛡️ [MICROSTRUCTURE VETO] {veto_reason}")
+                        pa_sig["is_microstructure_vetoed"] = True
+                        pa_sig["microstructure_veto_reason"] = veto_reason
+                        pa_sig.setdefault("reasons", []).append(f"VETOED: {veto_reason}")
 
                     # 2. Classify Institutional Signal Tier (S, A, B, C, D) BEFORE Target Calibration
                     from prometheus.signals.tier_classifier import classify_signal_tier
