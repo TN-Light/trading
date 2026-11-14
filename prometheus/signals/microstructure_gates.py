@@ -25,7 +25,7 @@ class MicrostructureTrapFilter:
         max_adverse_wick_ratio: float = 0.35,
         min_body_to_range: float = 0.45,
         max_vwap_atr_extension: float = 1.80,
-        max_orb_atr_extension: float = 1.80,
+        max_orb_atr_extension: float = 2.50,
         max_single_bar_atr_mult: float = 1.85,
         max_daily_atr_used_pct: float = 0.85,
         min_efficiency_ratio: float = 0.38,
@@ -102,20 +102,24 @@ class MicrostructureTrapFilter:
 
         if clv_dir < self.min_clv_directional or adverse_wick_ratio > self.max_adverse_wick_ratio:
             reason = (
-                f"Wick Rejection / Pin-Bar Veto on {symbol}: "
+                f"Wick Rejection / Pin-Bar Invalidation on {symbol}: "
                 f"Directional CLV={clv_dir:.2f} (< {self.min_clv_directional:.2f}) or "
                 f"Adverse Wick={adverse_wick_ratio:.0%} (> {self.max_adverse_wick_ratio:.0%}). "
                 f"Institutional supply/absorption detected at bar extreme."
             )
+            telemetry["is_hard_invalidation"] = True
             return True, reason, telemetry
 
         if (is_bull and close_p <= open_p) or (is_bear and close_p >= open_p):
             reason = (
-                f"Wrong-Color Breakout Candle Veto on {symbol}: "
+                f"Wrong-Color Breakout Candle Invalidation on {symbol}: "
                 f"Cannot enter {'BUY_CE' if is_bull else 'BUY_PE'} on an opposing candle close "
                 f"(Open={open_p:.1f}, Close={close_p:.1f})."
             )
+            telemetry["is_hard_invalidation"] = True
             return True, reason, telemetry
+
+        telemetry["is_hard_invalidation"] = False
 
         # ------------------------------------------------------------------
         # GATE 2: All-Day Anti-Climax & Overextension Gate (VWAP, ORB, 1-Bar, Daily ATR)
@@ -154,35 +158,68 @@ class MicrostructureTrapFilter:
             )
             return True, reason, telemetry
 
-        # 2C. ORB Distance Extension Telemetry (11-Year benchmark proves >1.8x ATR runners carry 60.1% WR, +9.24 pts)
+        # 2C. ORB Distance Extension Check (Blocks late morning chasing > 2.50x ATR above ORB)
         orb_high = signal.get("orb_high")
         orb_low = signal.get("orb_low")
         if is_bull and orb_high is not None and float(orb_high) > 0:
             orb_ext_atr = (close_p - float(orb_high)) / max(atr_15m, 1e-6)
             telemetry["orb_ext_atr"] = round(orb_ext_atr, 2)
+            if orb_ext_atr > self.max_orb_atr_extension:
+                reason = (
+                    f"ORB Climax Veto on {symbol}: Spot ({close_p:.1f}) is already "
+                    f"{orb_ext_atr:.2f}x ATR above ORB High ({float(orb_high):.1f}) "
+                    f"(exceeds {self.max_orb_atr_extension:.2f}x ATR ceiling). Late chase blocked."
+                )
+                return True, reason, telemetry
         elif is_bear and orb_low is not None and float(orb_low) > 0:
             orb_ext_atr = (float(orb_low) - close_p) / max(atr_15m, 1e-6)
             telemetry["orb_ext_atr"] = round(orb_ext_atr, 2)
+            if orb_ext_atr > self.max_orb_atr_extension:
+                reason = (
+                    f"ORB Climax Veto on {symbol}: Spot ({close_p:.1f}) is already "
+                    f"{orb_ext_atr:.2f}x ATR below ORB Low ({float(orb_low):.1f}) "
+                    f"(exceeds {self.max_orb_atr_extension:.2f}x ATR floor). Late chase blocked."
+                )
+                return True, reason, telemetry
 
         # 2D. Daily ATR Fuel Gauge Check (Uses cached ATR if available for zero-latency)
         daily_atr = float(cached_daily_atr or 0.0)
         prev_day_close = 0.0
-        if daily_atr <= 0 and daily_df is not None and len(daily_df) >= 15:
+
+        # Robust resolution of today's date and previous day's close
+        ts_col_name = "timestamp" if "timestamp" in df_15m.columns else "date" if "date" in df_15m.columns else df_15m.columns[0]
+        ts_col = pd.to_datetime(df_15m[ts_col_name])
+        today_date = ts_col.iloc[-1].date()
+
+        if daily_df is not None and not daily_df.empty and len(daily_df) >= 2:
             try:
-                d_atr_s = calculate_atr(daily_df, period=14)
-                daily_atr = float(d_atr_s.iloc[-1]) if pd.notna(d_atr_s.iloc[-1]) else 0.0
-                prev_day_close = float(daily_df["close"].iloc[-2]) if len(daily_df) >= 2 else close_p
+                if daily_atr <= 0 and len(daily_df) >= 15:
+                    d_atr_s = calculate_atr(daily_df, period=14)
+                    daily_atr = float(d_atr_s.iloc[-1]) if pd.notna(d_atr_s.iloc[-1]) else 0.0
+
+                d_date_col = "timestamp" if "timestamp" in daily_df.columns else "date" if "date" in daily_df.columns else daily_df.columns[0]
+                last_daily_date = pd.to_datetime(daily_df[d_date_col].iloc[-1]).date()
+                if last_daily_date == today_date and len(daily_df) >= 2:
+                    prev_day_close = float(daily_df["close"].iloc[-2])
+                else:
+                    prev_day_close = float(daily_df["close"].iloc[-1])
             except Exception as e:
                 logger.debug(f"Daily ATR computation error for {symbol}: {e}")
 
+        # Fallback to prior intraday bars in df_15m if prev_day_close not yet found
+        if prev_day_close <= 0:
+            prior_bars = df_15m[ts_col.dt.date < today_date]
+            if len(prior_bars) > 0:
+                prev_day_close = float(prior_bars["close"].iloc[-1])
+
         if daily_atr > 0:
             try:
-                ts_col = pd.to_datetime(df_15m["timestamp"])
-                today_bars = df_15m[ts_col.dt.date == ts_col.iloc[-1].date()]
+                today_bars = df_15m[ts_col.dt.date == today_date]
                 day_range = float(today_bars["high"].max() - today_bars["low"].min()) if len(today_bars) > 0 else bar_range
                 move_from_pdc = abs(close_p - prev_day_close) if prev_day_close > 0 else day_range
                 daily_fuel_used = max(day_range, move_from_pdc) / daily_atr
                 telemetry["daily_atr_used_pct"] = round(daily_fuel_used, 2)
+                telemetry["prev_day_close"] = round(prev_day_close, 2)
                 if daily_fuel_used > self.max_daily_atr_used_pct:
                     reason = (
                         f"Daily ATR Exhaustion Veto on {symbol}: "

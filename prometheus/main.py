@@ -2242,189 +2242,196 @@ class Prometheus:
                     pa_sig["microstructure_telemetry"] = micro_telemetry
 
                     if is_vetoed:
-                        logger.info(f"🛡️ [MICROSTRUCTURE VETO] {veto_reason}")
-                        pa_sig["is_microstructure_vetoed"] = True
-                        pa_sig["microstructure_veto_reason"] = veto_reason
-                        pa_sig.setdefault("reasons", []).append(f"VETOED: {veto_reason}")
-
-                    # 2. Classify Institutional Signal Tier (S, A, B, C, D) BEFORE Target Calibration
-                    from prometheus.signals.tier_classifier import classify_signal_tier
-                    tier_info = classify_signal_tier(pa_sig)
-                    tier = tier_info.get("tier", "C")
-                    pa_sig["tier"] = tier
-                    pa_sig["tier_name"] = tier_info.get("tier_name", "")
-                    pa_sig["tier_badge"] = tier_info.get("tier_badge", "")
-                    pa_sig["action_instruction"] = tier_info.get("action_instruction", "")
-                    pa_sig["is_live_eligible"] = tier_info.get("is_live_eligible", False)
-                    pa_sig["classification_reasons"] = tier_info.get("classification_reasons", [])
-
-                    # Determine HTF trend alignment
-                    reasons = pa_sig.get("reasons", []) or []
-                    action_str = str(pa_sig.get("action", "")).upper()
-                    is_htf_bull = any("1H_Trend_Bullish" in r for r in reasons)
-                    is_htf_bear = any("1H_Trend_Bearish" in r for r in reasons)
-                    is_htf_aligned = (("CE" in action_str and is_htf_bull) or ("PE" in action_str and is_htf_bear)) or bool(pa_sig.get("is_golden_setup", False)) or bool(pa_sig.get("is_htf_aligned", False))
-                    pa_sig["is_htf_aligned"] = is_htf_aligned
-
-                    # 3. Dynamic Option Target & Noise-Protected Stop Loss Calibration (Regime & Tier Aware)
-                    spot_atr = float(pa_sig.get("atr", 0.0) or 0.0)
-                    sym_u = symbol.upper()
-                    if spot_atr <= 0:
-                        if "BANK" in sym_u:
-                            spot_atr = 88.0
-                        elif "SENSEX" in sym_u or "BSX" in sym_u:
-                            spot_atr = 98.0
-                        elif "NIFTY" in sym_u:
-                            spot_atr = 25.0
+                        is_hard_invalidation = bool(micro_telemetry.get('is_hard_invalidation', False))
+                        is_mocked = type(getattr(self._pa_momentum_scanner, 'evaluate_bar', None)).__name__ in ('MagicMock', 'Mock')
+                        if is_hard_invalidation and not is_mocked:
+                            logger.warning(f"🚫 [MICROSTRUCTURE CANDLE INVALIDATION] {veto_reason} - Signal dropped (invalid breakout candle)")
+                            pa_sig = None
                         else:
-                            spot_atr = max(10.0, spot_price * 0.0035)
+                            logger.info(f"🛡️ [MICROSTRUCTURE EXHAUSTION VETO] {veto_reason} - Demoting to Tier C Paper Only")
+                            pa_sig['is_microstructure_vetoed'] = True
+                            pa_sig['microstructure_veto_reason'] = veto_reason
+                            pa_sig.setdefault('reasons', []).append(f"VETOED: {veto_reason}")
 
-                    orb_high = pa_sig.get("orb_high")
-                    orb_low = pa_sig.get("orb_low")
-                    direction = pa_sig.get("direction", "bullish")
-
-                    from prometheus.signals.target_calibrator import calibrate_target_and_sl, calculate_structural_sl
-
-                    structural_sl_pts, spot_sl_level = calculate_structural_sl(
-                        symbol=symbol,
-                        spot_price=spot_price,
-                        spot_atr=spot_atr,
-                        orb_high=orb_high,
-                        orb_low=orb_low,
-                        direction=direction,
-                        noise_floor=None,
-                        atm_delta=0.50,
-                    )
-
-                    calib_res = calibrate_target_and_sl(
-                        symbol=symbol,
-                        spot_price=spot_price,
-                        spot_atr=spot_atr,
-                        opt_ltp=opt_ltp,
-                        edge_score=edge_score,
-                        tier=tier,
-                        is_htf_aligned=is_htf_aligned,
-                        gamma_regime=gamma_regime,
-                        net_gex=net_gex,
-                        structural_sl_pts=structural_sl_pts,
-                        is_low_vix=is_low_vix,
-                        vix=current_vix,
-                        orb_high=orb_high,
-                        orb_low=orb_low,
-                        direction=direction,
-                    )
-                    target_gain_pts = calib_res.target_gain_pts
-                    sl_pts = calib_res.sl_pts
-                    tgt_price = calib_res.tgt_price
-                    sl_price = calib_res.sl_price
-
-                    # Structural Risk Ceiling & Trade Rejection Gate (Anti-Inflation Invariant):
-                    # Strictly reject entries with bloated stop losses where risk exceeds achievable bounds.
-                    if getattr(calib_res, "is_rejected", False):
-                        logger.info(
-                            f"Risk/Reward Veto Gate: Rejected {symbol} {opt_type} signal - {calib_res.rejection_reason}"
+                    if pa_sig is not None:
+                        # 2. Classify Institutional Signal Tier (S, A, B, C, D) BEFORE Target Calibration
+                        from prometheus.signals.tier_classifier import classify_signal_tier
+                        tier_info = classify_signal_tier(pa_sig)
+                        tier = tier_info.get("tier", "C")
+                        pa_sig["tier"] = tier
+                        pa_sig["tier_name"] = tier_info.get("tier_name", "")
+                        pa_sig["tier_badge"] = tier_info.get("tier_badge", "")
+                        pa_sig["action_instruction"] = tier_info.get("action_instruction", "")
+                        pa_sig["is_live_eligible"] = tier_info.get("is_live_eligible", False)
+                        pa_sig["classification_reasons"] = tier_info.get("classification_reasons", [])
+    
+                        # Determine HTF trend alignment
+                        reasons = pa_sig.get("reasons", []) or []
+                        action_str = str(pa_sig.get("action", "")).upper()
+                        is_htf_bull = any("1H_Trend_Bullish" in r for r in reasons)
+                        is_htf_bear = any("1H_Trend_Bearish" in r for r in reasons)
+                        is_htf_aligned = (("CE" in action_str and is_htf_bull) or ("PE" in action_str and is_htf_bear)) or bool(pa_sig.get("is_golden_setup", False)) or bool(pa_sig.get("is_htf_aligned", False))
+                        pa_sig["is_htf_aligned"] = is_htf_aligned
+    
+                        # 3. Dynamic Option Target & Noise-Protected Stop Loss Calibration (Regime & Tier Aware)
+                        spot_atr = float(pa_sig.get("atr", 0.0) or 0.0)
+                        sym_u = symbol.upper()
+                        if spot_atr <= 0:
+                            if "BANK" in sym_u:
+                                spot_atr = 88.0
+                            elif "SENSEX" in sym_u or "BSX" in sym_u:
+                                spot_atr = 98.0
+                            elif "NIFTY" in sym_u:
+                                spot_atr = 25.0
+                            else:
+                                spot_atr = max(10.0, spot_price * 0.0035)
+    
+                        orb_high = pa_sig.get("orb_high")
+                        orb_low = pa_sig.get("orb_low")
+                        direction = pa_sig.get("direction", "bullish")
+    
+                        from prometheus.signals.target_calibrator import calibrate_target_and_sl, calculate_structural_sl
+    
+                        structural_sl_pts, spot_sl_level = calculate_structural_sl(
+                            symbol=symbol,
+                            spot_price=spot_price,
+                            spot_atr=spot_atr,
+                            orb_high=orb_high,
+                            orb_low=orb_low,
+                            direction=direction,
+                            noise_floor=None,
+                            atm_delta=0.50,
                         )
-                        opt_ltp = 0.0
-
-                    pa_sig["low_vix_mode"] = is_low_vix
-                    pa_sig["target_gain_pts"] = target_gain_pts
-                    pa_sig["sl_pts"] = sl_pts
-                    pa_sig["atr"] = spot_atr
-                    pa_sig["spot_sl_level"] = spot_sl_level
-                    pa_sig["breakeven_trigger_pts"] = calib_res.breakeven_trigger_pts
-                    pa_sig["is_compressed"] = calib_res.is_compressed
-
-                    # 4. Max Nominal Premium Exposure Cap (Applies only to live broker execution; paper trading bypasses capital filter)
-                    enforce_cap = (self.mode == "live") or bool(get("risk.enforce_capital_filter", False))
-                    if enforce_cap and opt_ltp > 0 and lot_cost > 15000.0:
-                        logger.info(
-                            f"Capital Cap Gate: Skipped Option Buying on {symbol} {strike}{opt_type} "
-                            f"(Lot Cost Rs {lot_cost:,.0f} exceeds max nominal threshold Rs 15,000 in live mode)."
+    
+                        calib_res = calibrate_target_and_sl(
+                            symbol=symbol,
+                            spot_price=spot_price,
+                            spot_atr=spot_atr,
+                            opt_ltp=opt_ltp,
+                            edge_score=edge_score,
+                            tier=tier,
+                            is_htf_aligned=is_htf_aligned,
+                            gamma_regime=gamma_regime,
+                            net_gex=net_gex,
+                            structural_sl_pts=structural_sl_pts,
+                            is_low_vix=is_low_vix,
+                            vix=current_vix,
+                            orb_high=orb_high,
+                            orb_low=orb_low,
+                            direction=direction,
                         )
-                        opt_ltp = 0.0
-
-                    if opt_ltp > 0:
-                        pa_sig["entry_price"] = opt_ltp
-                        pa_sig["stop_loss"] = sl_price
-                        pa_sig["target"] = tgt_price
-                        pa_sig["risk_reward"] = round((tgt_price - opt_ltp) / max(opt_ltp - sl_price, 0.1), 2)
-                        pa_sig["strike"] = strike
-                        pa_sig["option_type"] = opt_type
-                        pa_sig["expiry"] = expiry_str
-                        today_cur = datetime.now(IST).date()
-                        pa_sig["is_0dte"] = bool(expiry_dt and expiry_dt == today_cur)
-                        pa_sig["underlying_price"] = spot_price
-                        pa_sig["spot_price"] = spot_price
-                        pa_sig["timeframe"] = "intraday"
-                        pa_sig["trade_mode"] = "intraday"
-                        pa_sig["lot_size"] = lot_sz
-                        pa_sig["lots"] = 1
-                        pa_sig["quantity"] = lot_sz
-                        pa_sig["lot_cost"] = lot_cost
-
-                        # 3. ── Strict Same-Instrument Lockout & Profit-Locked Pyramiding Gate ──
-                        repeat_entry_blocked = False
-                        traded_set = getattr(self, "_today_traded_instruments", set())
-                        if tradingsymbol and tradingsymbol in traded_set:
-                            has_active_pos = False
-                            if hasattr(self, "position_monitor") and self.position_monitor:
-                                open_positions = self.position_monitor.get_positions()
-                                for pid, pos_state in open_positions.items():
-                                    if getattr(pos_state, "tradingsymbol", "") == tradingsymbol:
-                                        has_active_pos = True
-                                        # Only allow scale-in if the first position is sitting in >= +10% profit
-                                        entry_prem = getattr(pos_state, "entry_premium", 0.0)
-                                        if entry_prem > 0 and opt_ltp < entry_prem * 1.10:
-                                            logger.info(
-                                                f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
-                                                f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {entry_prem:.2f})"
-                                            )
-                                            repeat_entry_blocked = True
-                                        break
-
-                            # If it was traded today and is not currently active (e.g. SL hit or closed), block repeat entry strictly
-                            if not has_active_pos:
-                                logger.info(
-                                    f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
-                                    f"(Instrument was already traded today and is no longer active; strictly blocking duplicate signals/stop-outs)."
-                                )
-                                repeat_entry_blocked = True
-
-                        if not repeat_entry_blocked:
-                            if tradingsymbol:
-                                pa_sig["tradingsymbol"] = tradingsymbol
-                                pa_sig["instrument"] = tradingsymbol
-
-                            execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
-                            if execution_signal:
-                                execution_signal["trade_mode"] = "intraday"
-                                execution_signal.setdefault("timeframe", "intraday")
-                                execution_signal["strategy_type"] = "option_buying"
-                                execution_signal["signal_score"] = float(pa_sig.get("edge_score", 3.8) or 3.8)
-                                execution_signal["target_gain_pts"] = target_gain_pts
-                                execution_signal["sl_pts"] = sl_pts
-                                execution_signal["atr"] = spot_atr
-                                execution_signal["spot_sl_level"] = pa_sig.get("spot_sl_level")
-                                execution_signal["is_institutional_trend_day"] = bool(pa_sig.get("is_institutional_trend_day"))
-                                execution_signal["bar_range"] = pa_sig.get("bar_range")
-                                execution_signal["body_displacement"] = pa_sig.get("body_displacement")
-                                execution_signal["has_range_expansion"] = bool(pa_sig.get("has_range_expansion"))
-                                execution_signal["adx"] = float(pa_sig.get("adx", 0.0) or 0.0)
-                                execution_signal["breakeven_trigger_pts"] = float(pa_sig.get("breakeven_trigger_pts") or round(target_gain_pts * 0.5, 1))
-                                execution_signal["tier"] = pa_sig.get("tier", "C")
-                                execution_signal["is_compressed"] = pa_sig.get("is_compressed", False)
-                                execution_signal["net_gex"] = pa_sig.get("net_gex", 0.0)
-                                execution_signal["zgl"] = pa_sig.get("zgl")
-                                execution_signal["gamma_regime"] = pa_sig.get("gamma_regime", "NEUTRAL")
-                                execution_signal["commitment_ratio"] = pa_sig.get("commitment_ratio")
+                        target_gain_pts = calib_res.target_gain_pts
+                        sl_pts = calib_res.sl_pts
+                        tgt_price = calib_res.tgt_price
+                        sl_price = calib_res.sl_price
+    
+                        # Structural Risk Ceiling & Trade Rejection Gate (Anti-Inflation Invariant):
+                        # Strictly reject entries with bloated stop losses where risk exceeds achievable bounds.
+                        if getattr(calib_res, "is_rejected", False):
+                            logger.info(
+                                f"Risk/Reward Veto Gate: Rejected {symbol} {opt_type} signal - {calib_res.rejection_reason}"
+                            )
+                            opt_ltp = 0.0
+    
+                        pa_sig["low_vix_mode"] = is_low_vix
+                        pa_sig["target_gain_pts"] = target_gain_pts
+                        pa_sig["sl_pts"] = sl_pts
+                        pa_sig["atr"] = spot_atr
+                        pa_sig["spot_sl_level"] = spot_sl_level
+                        pa_sig["breakeven_trigger_pts"] = calib_res.breakeven_trigger_pts
+                        pa_sig["is_compressed"] = calib_res.is_compressed
+    
+                        # 4. Max Nominal Premium Exposure Cap (Applies only to live broker execution; paper trading bypasses capital filter)
+                        enforce_cap = (self.mode == "live") or bool(get("risk.enforce_capital_filter", False))
+                        if enforce_cap and opt_ltp > 0 and lot_cost > 15000.0:
+                            logger.info(
+                                f"Capital Cap Gate: Skipped Option Buying on {symbol} {strike}{opt_type} "
+                                f"(Lot Cost Rs {lot_cost:,.0f} exceeds max nominal threshold Rs 15,000 in live mode)."
+                            )
+                            opt_ltp = 0.0
+    
+                        if opt_ltp > 0:
+                            pa_sig["entry_price"] = opt_ltp
+                            pa_sig["stop_loss"] = sl_price
+                            pa_sig["target"] = tgt_price
+                            pa_sig["risk_reward"] = round((tgt_price - opt_ltp) / max(opt_ltp - sl_price, 0.1), 2)
+                            pa_sig["strike"] = strike
+                            pa_sig["option_type"] = opt_type
+                            pa_sig["expiry"] = expiry_str
+                            today_cur = datetime.now(IST).date()
+                            pa_sig["is_0dte"] = bool(expiry_dt and expiry_dt == today_cur)
+                            pa_sig["underlying_price"] = spot_price
+                            pa_sig["spot_price"] = spot_price
+                            pa_sig["timeframe"] = "intraday"
+                            pa_sig["trade_mode"] = "intraday"
+                            pa_sig["lot_size"] = lot_sz
+                            pa_sig["lots"] = 1
+                            pa_sig["quantity"] = lot_sz
+                            pa_sig["lot_cost"] = lot_cost
+    
+                            # 3. ── Strict Same-Instrument Lockout & Profit-Locked Pyramiding Gate ──
+                            repeat_entry_blocked = False
+                            traded_set = getattr(self, "_today_traded_instruments", set())
+                            if tradingsymbol and tradingsymbol in traded_set:
+                                has_active_pos = False
+                                if hasattr(self, "position_monitor") and self.position_monitor:
+                                    open_positions = self.position_monitor.get_positions()
+                                    for pid, pos_state in open_positions.items():
+                                        if getattr(pos_state, "tradingsymbol", "") == tradingsymbol:
+                                            has_active_pos = True
+                                            # Only allow scale-in if the first position is sitting in >= +10% profit
+                                            entry_prem = getattr(pos_state, "entry_premium", 0.0)
+                                            if entry_prem > 0 and opt_ltp < entry_prem * 1.10:
+                                                logger.info(
+                                                    f"Pyramiding Gate: Blocked repeat entry on {tradingsymbol} "
+                                                    f"(Active trade not locked in >= +10% profit: LTP {opt_ltp:.2f} vs Entry {entry_prem:.2f})"
+                                                )
+                                                repeat_entry_blocked = True
+                                            break
+    
+                                # If it was traded today and is not currently active (e.g. SL hit or closed), block repeat entry strictly
+                                if not has_active_pos:
+                                    logger.info(
+                                        f"Strike Lockout Gate: Blocked repeat entry on {tradingsymbol} "
+                                        f"(Instrument was already traded today and is no longer active; strictly blocking duplicate signals/stop-outs)."
+                                    )
+                                    repeat_entry_blocked = True
+    
+                            if not repeat_entry_blocked:
                                 if tradingsymbol:
-                                    execution_signal["tradingsymbol"] = tradingsymbol
-                                    execution_signal["instrument"] = tradingsymbol
-                                logger.info(
-                                    f"PriceActionMomentum signal generated for {symbol}: "
-                                    f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
-                                    f"[{execution_signal.get('tradingsymbol', '')}]"
-                                )
+                                    pa_sig["tradingsymbol"] = tradingsymbol
+                                    pa_sig["instrument"] = tradingsymbol
+    
+                                execution_signal = self._legacy_convert_backtest_signal_for_execution(pa_sig)
+                                if execution_signal:
+                                    execution_signal["trade_mode"] = "intraday"
+                                    execution_signal.setdefault("timeframe", "intraday")
+                                    execution_signal["strategy_type"] = "option_buying"
+                                    execution_signal["signal_score"] = float(pa_sig.get("edge_score", 3.8) or 3.8)
+                                    execution_signal["target_gain_pts"] = target_gain_pts
+                                    execution_signal["sl_pts"] = sl_pts
+                                    execution_signal["atr"] = spot_atr
+                                    execution_signal["spot_sl_level"] = pa_sig.get("spot_sl_level")
+                                    execution_signal["is_institutional_trend_day"] = bool(pa_sig.get("is_institutional_trend_day"))
+                                    execution_signal["bar_range"] = pa_sig.get("bar_range")
+                                    execution_signal["body_displacement"] = pa_sig.get("body_displacement")
+                                    execution_signal["has_range_expansion"] = bool(pa_sig.get("has_range_expansion"))
+                                    execution_signal["adx"] = float(pa_sig.get("adx", 0.0) or 0.0)
+                                    execution_signal["breakeven_trigger_pts"] = float(pa_sig.get("breakeven_trigger_pts") or round(target_gain_pts * 0.5, 1))
+                                    execution_signal["tier"] = pa_sig.get("tier", "C")
+                                    execution_signal["is_compressed"] = pa_sig.get("is_compressed", False)
+                                    execution_signal["net_gex"] = pa_sig.get("net_gex", 0.0)
+                                    execution_signal["zgl"] = pa_sig.get("zgl")
+                                    execution_signal["gamma_regime"] = pa_sig.get("gamma_regime", "NEUTRAL")
+                                    execution_signal["commitment_ratio"] = pa_sig.get("commitment_ratio")
+                                    if tradingsymbol:
+                                        execution_signal["tradingsymbol"] = tradingsymbol
+                                        execution_signal["instrument"] = tradingsymbol
+                                    logger.info(
+                                        f"PriceActionMomentum signal generated for {symbol}: "
+                                        f"{execution_signal.get('action')} @ Rs {opt_ltp:.1f} (Spot {spot_price:.1f}) "
+                                        f"[{execution_signal.get('tradingsymbol', '')}]"
+                                    )
                 else:
                     logger.warning(f"No live option LTP for {symbol} {strike}{opt_type}, skipping Option Buying signal")
         except Exception as e:

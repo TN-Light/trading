@@ -284,3 +284,104 @@ def test_tier_classifier_demotes_microstructure_vetoed_signal_to_tier_c():
     assert res["is_live_eligible"] is False
     assert "MICROSTRUCTURE_TRAP_VETOED" in res["tier_name"]
     assert "TIER C: MICROSTRUCTURE VETO" in res["tier_badge"]
+
+
+def test_gate1_hard_invalidation_flag():
+    """Verify that Gate 1 marks is_hard_invalidation=True (dropping signal),
+    while Gate 2-5 mark is_hard_invalidation=False (allowing Tier C shadow tracking)."""
+    filter_gate = MicrostructureTrapFilter()
+
+    # Gate 1 violation: shooting star
+    candles_g1 = [
+        (25100, 25130, 25090, 25120),
+        (25120, 25150, 25110, 25140),
+        (25140, 25170, 25130, 25160),
+        (25160, 25190, 25150, 25180),
+        (25180, 25210, 25170, 25200),
+        (25200, 25260, 25195, 25198),  # Bearish close at bottom, CLV = 3/65 = 0.046
+    ]
+    df_g1 = _create_mock_df(candles_g1)
+    sig_g1 = {"action": "BUY_CE", "direction": "LONG", "entry_price": 25200.0, "atr": 25.0}
+    is_vetoed, reason, telem_g1 = filter_gate.evaluate_all_vetoes(df_g1, sig_g1, "NIFTY 50")
+    assert is_vetoed is True
+    assert telem_g1.get("is_hard_invalidation") is True
+
+    # Gate 2B violation: clean green candle, but overextended from VWAP
+    candles_g2 = [
+        (25100, 25130, 25090, 25120),
+        (25120, 25150, 25110, 25140),
+        (25140, 25170, 25130, 25160),
+        (25160, 25190, 25150, 25180),
+        (25180, 25210, 25170, 25200),
+        (25200, 25250, 25198, 25248),  # Strong green candle, CLV = 0.96
+    ]
+    df_g2 = _create_mock_df(candles_g2)
+    sig_g2 = {"action": "BUY_CE", "direction": "LONG", "entry_price": 25248.0, "atr": 20.0, "vwap": 25180.0}  # 68 pts away = 3.4x ATR
+    is_vetoed, reason, telem_g2 = filter_gate.evaluate_all_vetoes(df_g2, sig_g2, "NIFTY 50")
+    assert is_vetoed is True
+    assert "VWAP Overextension" in reason
+    assert telem_g2.get("is_hard_invalidation") is False
+
+
+def test_gate2c_orb_climax_extension_calibrated_threshold():
+    """Verify that ORB extension at 2.20x ATR passes, while > 2.50x ATR triggers late-chase climax veto."""
+    filter_gate = MicrostructureTrapFilter(max_orb_atr_extension=2.50)
+
+    candles = [
+        (25100, 25130, 25090, 25120),
+        (25120, 25150, 25110, 25140),
+        (25140, 25170, 25130, 25160),
+        (25160, 25190, 25150, 25180),
+        (25180, 25210, 25170, 25200),
+        (25200, 25260, 25198, 25255),  # Strong green candle
+    ]
+    df = _create_mock_df(candles)
+
+    # Spot 25255 on ORB High 25200 with ATR 25: (25255 - 25200)/25 = 2.20x ATR (below 2.50x ceiling -> PASSES)
+    sig_pass = {"action": "BUY_CE", "direction": "LONG", "entry_price": 25255.0, "atr": 25.0, "orb_high": 25200.0, "vwap": 25220.0}
+    is_vetoed, reason, telem_pass = filter_gate.evaluate_all_vetoes(df, sig_pass, "NIFTY 50")
+    assert is_vetoed is False
+
+    # Spot 25255 on ORB High 25185 with ATR 25: (25255 - 25185)/25 = 2.80x ATR (above 2.50x ceiling -> VETOED)
+    sig_fail = {"action": "BUY_CE", "direction": "LONG", "entry_price": 25255.0, "atr": 25.0, "orb_high": 25185.0, "vwap": 25220.0}
+    is_vetoed, reason, telem_fail = filter_gate.evaluate_all_vetoes(df, sig_fail, "NIFTY 50")
+    assert is_vetoed is True
+    assert "ORB Climax Veto" in reason
+    assert telem_fail.get("is_hard_invalidation") is False
+
+
+def test_daily_atr_prev_day_close_date_resolution_off_by_one_fix():
+    """Verify Bug 1 fix: When daily_df.iloc[-1] is yesterday vs today, prev_day_close resolves correctly."""
+    filter_gate = MicrostructureTrapFilter()
+
+    base_date = datetime(2026, 11, 13).date()
+    candles_intra = [
+        (25200, 25220, 25190, 25210),
+        (25210, 25230, 25200, 25220),
+        (25220, 25240, 25210, 25230),
+        (25230, 25250, 25220, 25240),
+        (25240, 25260, 25230, 25250),
+        (25250, 25270, 25240, 25265),
+    ]
+    df_intra = _create_mock_df(candles_intra)
+
+    # Case A: Live market hours — daily_df contains only completed daily bars up to yesterday (2026-11-12)
+    daily_records_a = [
+        {"timestamp": datetime(2026, 11, 10), "open": 25000, "high": 25100, "low": 24950, "close": 25050},
+        {"timestamp": datetime(2026, 11, 11), "open": 25050, "high": 25150, "low": 25000, "close": 25100},
+        {"timestamp": datetime(2026, 11, 12), "open": 25100, "high": 25220, "low": 25080, "close": 25200},  # Yesterday PDC
+    ]
+    df_daily_a = pd.DataFrame(daily_records_a)
+
+    sig = {"action": "BUY_CE", "direction": "LONG", "entry_price": 25265.0, "atr": 25.0, "vwap": 25240.0}
+    _, _, telem_a = filter_gate.evaluate_all_vetoes(df_intra, sig, "NIFTY 50", daily_df=df_daily_a, cached_daily_atr=150.0)
+    assert telem_a["prev_day_close"] == 25200.0, f"Expected 25200.0, got {telem_a.get('prev_day_close')}"
+
+    # Case B: EOD / replay — daily_df contains today's incomplete/completed bar (2026-11-13) as iloc[-1]
+    daily_records_b = daily_records_a + [
+        {"timestamp": datetime(2026, 11, 13), "open": 25200, "high": 25270, "low": 25190, "close": 25265},  # Today
+    ]
+    df_daily_b = pd.DataFrame(daily_records_b)
+
+    _, _, telem_b = filter_gate.evaluate_all_vetoes(df_intra, sig, "NIFTY 50", daily_df=df_daily_b, cached_daily_atr=150.0)
+    assert telem_b["prev_day_close"] == 25200.0, f"Expected 25200.0 from iloc[-2], got {telem_b.get('prev_day_close')}"

@@ -17,14 +17,16 @@ class DummyPosState:
         self.entry_premium = entry_premium
 
 
-def _create_dummy_df():
+def _create_dummy_df(bullish: bool = False):
     dates = pd.date_range("2026-08-27 09:15", periods=20, freq="15min")
+    close_val = 24215.0 if bullish else 24190.0
+    open_val = 24190.0 if bullish else 24200.0
     return pd.DataFrame({
         "timestamp": dates,
-        "open": [24200.0] * 20,
+        "open": [open_val] * 20,
         "high": [24220.0] * 20,
         "low": [24180.0] * 20,
-        "close": [24190.0] * 20,
+        "close": [close_val] * 20,
         "volume": [10000] * 20,
     })
 
@@ -34,7 +36,7 @@ def test_low_vix_gate_suppresses_weak_momentum():
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=10.5)  # Extreme low-VIX
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=False))
     
     # Mock credit spread strategy to return None so we test Option Buying suppression
     p._credit_spread_strategy = MagicMock()
@@ -71,7 +73,7 @@ def test_low_vix_gate_allows_high_conviction_breakout():
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=10.5)  # Low-VIX
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=False))
     
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
@@ -107,7 +109,7 @@ def test_max_nominal_capital_cap_blocks_expensive_contracts():
     p = Prometheus()
     p.mode = "live"
     p.data.get_vix = MagicMock(return_value=14.0)
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=True))
 
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
@@ -141,7 +143,7 @@ def test_paper_trading_bypasses_capital_filter():
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=14.0)
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=True))
 
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
@@ -177,7 +179,7 @@ def test_same_strike_lockout_blocks_repeat_entries_in_loss_with_moderate_score()
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=14.0)
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=True))
     
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
@@ -221,7 +223,7 @@ def test_strong_signal_override_permits_repeat_entry():
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=14.0)
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=True))
     
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
@@ -264,7 +266,7 @@ def test_same_strike_pyramiding_allowed_when_profit_locked():
     p = Prometheus()
     p.mode = "paper"
     p.data.get_vix = MagicMock(return_value=14.0)
-    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df())
+    p.data.fetch_intraday = MagicMock(return_value=_create_dummy_df(bullish=True))
     
     p._credit_spread_strategy = MagicMock()
     p._credit_spread_strategy.evaluate_spread.return_value = None
