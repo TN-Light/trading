@@ -16,19 +16,25 @@ Key 11-Year Empirical Invariants:
      as is_ignition_bar.
    - Giant Bar (> 1.85x ATR) + Weak Close (CLV < 0.70) collapses 1h move by 78%
      (+0.12x ATR) -> VETOED (demoted to Tier C Paper Only).
-3. Gate 2B (Marginal ORB Poke Trap Veto):
-   ORB extensions of 0.00x - 0.12x ATR without range expansion (< 1.25x ATR)
-   produce +0.01x ATR average 1h move (40.1% Option Path WR) -> VETOED (Tier C).
-   (Note: High VWAP/ORB extensions > 1.80x ATR are NOT vetoed, as 11-year data
-   proves they represent fat-tail trend runners with +0.24x to +0.32x ATR 1h moves).
-4. Gate 2C (Daily ATR Fuel Gauge with Live Date Alignment):
-   Vetoes entries when >= 90% of 14-day Daily ATR is already exhausted.
-5. Gate 4 (Option Writer Absorption & OI Wall Clearance):
-   Vetoes breakouts where opposing ATM Delta-OI > 1.35x supporting ATM Delta-OI without
-   writer trapping, or where an opposing OI wall is < 0.70x ATR away.
-6. Gate 5 (Cross-Index SMT Divergence):
-   Vetoes NIFTY/SENSEX breakouts when BANKNIFTY diverges across Session VWAP
-   on an opposing candle.
+3. Gate 2B (Marginal ORB Poke Trap Veto & Conditional Climax Veto):
+   - ORB extensions of 0.00x - 0.15x ATR without range expansion (< 1.25x ATR)
+     produce +0.01x ATR average 1h move (35.0% BNF / 40.1% NIFTY Option Path WR) -> VETOED (Tier C).
+   - High VWAP/ORB extensions (> 1.80x / > 2.50x ATR) with STRONG close (CLV >= 0.70) are
+     PERMITTED as institutional momentum trend runners (53.25% NIFTY / 48.75%-50.4% BNF WR,
+     highest-WR bucket > 3.0x ATR: 47.6% NIFTY / 45.4% BNF).
+   - High VWAP/ORB extensions with WEAK close (CLV < 0.70) are VETOED as climax exhaustion.
+4. Gate 3 (Kaufman Path Efficiency):
+   - Disabled by default (min_efficiency_ratio = 0.0) because low 6-bar efficiency before
+     a breakout represents a coiling volatility-compression base (46.1% Option Path WR vs 41.9%).
+     kaufman_er_6 is computed and logged in telemetry.
+5. Gate 2C (Daily ATR Fuel Gauge with Live Date Alignment):
+   - Vetoes entries when >= 90% of 14-day Daily ATR is already exhausted.
+6. Gate 4 (Option Writer Absorption & OI Wall Clearance):
+   - Vetoes breakouts where opposing ATM Delta-OI > 1.35x supporting ATM Delta-OI without
+     writer trapping, or where an opposing OI wall is < 0.70x ATR away.
+7. Gate 5 (Cross-Index SMT Divergence):
+   - Vetoes NIFTY/SENSEX breakouts when BANKNIFTY diverges across Session VWAP
+     on an opposing candle.
 """
 
 from typing import Dict, Any, Optional, Tuple
@@ -47,7 +53,10 @@ class MicrostructureTrapFilter:
         max_adverse_wick_ratio: float = 0.55,
         max_single_bar_atr_mult: float = 1.85,
         min_giant_bar_clv: float = 0.70,
-        min_orb_poke_atr: float = 0.12,
+        min_orb_poke_atr: float = 0.15,
+        max_vwap_atr_extension: float = 1.80,
+        max_orb_atr_extension: float = 2.50,
+        min_efficiency_ratio: float = 0.0,
         max_daily_atr_used_pct: float = 0.90,
         min_wall_clearance_atr: float = 0.70,
     ):
@@ -56,6 +65,9 @@ class MicrostructureTrapFilter:
         self.max_single_bar_atr_mult = max_single_bar_atr_mult
         self.min_giant_bar_clv = min_giant_bar_clv
         self.min_orb_poke_atr = min_orb_poke_atr
+        self.max_vwap_atr_extension = max_vwap_atr_extension
+        self.max_orb_atr_extension = max_orb_atr_extension
+        self.min_efficiency_ratio = min_efficiency_ratio
         self.max_daily_atr_used_pct = max_daily_atr_used_pct
         self.min_wall_clearance_atr = min_wall_clearance_atr
 
@@ -169,7 +181,7 @@ class MicrostructureTrapFilter:
                 telemetry["is_ignition_bar"] = True
 
         # ------------------------------------------------------------------
-        # GATE 2B: Marginal ORB Poke Veto (0.00x - 0.12x ATR without expansion)
+        # GATE 2B: Marginal ORB Poke Trap Veto & Conditional Climax Veto
         # ------------------------------------------------------------------
         orb_high = signal.get("orb_high")
         orb_low = signal.get("orb_low")
@@ -180,7 +192,13 @@ class MicrostructureTrapFilter:
                 reason = (
                     f"Marginal ORB Poke Veto on {symbol}: Spot ({close_p:.1f}) barely poked "
                     f"{orb_ext_atr:.2f}x ATR above ORB High ({float(orb_high):.1f}) without range expansion "
-                    f"(+0.01x ATR historical expectancy)."
+                    f"(+0.01x ATR historical expectancy, 35.0% BNF win rate)."
+                )
+                return True, reason, telemetry
+            if orb_ext_atr > self.max_orb_atr_extension and clv_dir < self.min_giant_bar_clv:
+                reason = (
+                    f"ORB Climax Exhaustion Veto on {symbol}: Spot extended {orb_ext_atr:.2f}x ATR above ORB High "
+                    f"with weak close (CLV={clv_dir:.2f} < {self.min_giant_bar_clv:.2f})."
                 )
                 return True, reason, telemetry
         elif is_bear and orb_low is not None and float(orb_low) > 0:
@@ -190,9 +208,44 @@ class MicrostructureTrapFilter:
                 reason = (
                     f"Marginal ORB Poke Veto on {symbol}: Spot ({close_p:.1f}) barely poked "
                     f"{orb_ext_atr:.2f}x ATR below ORB Low ({float(orb_low):.1f}) without range expansion "
-                    f"(+0.01x ATR historical expectancy)."
+                    f"(+0.01x ATR historical expectancy, 35.0% BNF win rate)."
                 )
                 return True, reason, telemetry
+            if orb_ext_atr > self.max_orb_atr_extension and clv_dir < self.min_giant_bar_clv:
+                reason = (
+                    f"ORB Climax Exhaustion Veto on {symbol}: Spot extended {orb_ext_atr:.2f}x ATR below ORB Low "
+                    f"with weak close (CLV={clv_dir:.2f} < {self.min_giant_bar_clv:.2f})."
+                )
+                return True, reason, telemetry
+
+        # VWAP Overextension: Only veto if accompanied by weak close (CLV < 0.70)
+        # When CLV >= 0.70, VWAP > 1.8x ATR represents 53.25% NIFTY / 48.75%-50.4% BNF momentum expansion
+        if vwap_dist_atr > self.max_vwap_atr_extension and clv_dir < self.min_giant_bar_clv:
+            reason = (
+                f"VWAP Climax Exhaustion Veto on {symbol}: "
+                f"Spot extended {vwap_dist_atr:.2f}x ATR from VWAP with weak close "
+                f"(CLV={clv_dir:.2f} < {self.min_giant_bar_clv:.2f}). High mean-reversion risk."
+            )
+            return True, reason, telemetry
+
+        # ------------------------------------------------------------------
+        # GATE 3: Kaufman Path Efficiency (Telemetry Only by default)
+        # ------------------------------------------------------------------
+        if len(df_15m) >= 7:
+            net_change = abs(close_p - float(df_15m["close"].iloc[-7]))
+            sum_changes = float((df_15m["close"].diff().abs().iloc[-6:]).sum())
+            kaufman_er_6 = net_change / max(sum_changes, 1e-6)
+        else:
+            kaufman_er_6 = 1.0
+        telemetry["kaufman_er_6"] = round(kaufman_er_6, 3)
+
+        if self.min_efficiency_ratio > 0.0 and kaufman_er_6 < self.min_efficiency_ratio:
+            reason = (
+                f"Low Path Efficiency Veto on {symbol}: "
+                f"Kaufman ER_6={kaufman_er_6:.2f} (< {self.min_efficiency_ratio:.2f}). "
+                f"Choppy price action."
+            )
+            return True, reason, telemetry
 
         # ------------------------------------------------------------------
         # GATE 2C: Daily ATR Fuel Gauge Check (With Live Date Alignment)

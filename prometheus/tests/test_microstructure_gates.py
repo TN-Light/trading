@@ -194,9 +194,10 @@ def test_option_writer_absorption_vetoes_call_buy():
     assert "Option Writer Absorption Veto" in reason
 
 
-def test_vwap_overextension_permitted_as_trend_runner():
+def test_vwap_overextension_permitted_when_strong_close():
     """Verify the 11-Year Empirical Law: A strong breakout stretched > 1.80x ATR from Session VWAP
-    is an institutional trend runner (62.1% WR, +0.32x ATR move) and is PERMITTED (not vetoed)."""
+    with strong close (CLV >= 0.70) is an institutional trend runner (53.25% NIFTY / 48.75%-50.4% BNF WR)
+    and is PERMITTED (not vetoed)."""
     filter_gate = MicrostructureTrapFilter()
 
     candles = [
@@ -205,7 +206,7 @@ def test_vwap_overextension_permitted_as_trend_runner():
         (25050, 25100, 25040, 25090),
         (25090, 25150, 25080, 25140),
         (25140, 25200, 25130, 25190),
-        (25190, 25260, 25180, 25255),  # 25,255 vs VWAP 25,200 is 55 pts away on ATR 25 (2.2x ATR)
+        (25190, 25260, 25180, 25255),  # 25,255 vs VWAP 25,200 is 55 pts away on ATR 25 (2.2x ATR), CLV = 75/80 = 0.938
     ]
     df = _create_mock_df(candles)
 
@@ -215,7 +216,7 @@ def test_vwap_overextension_permitted_as_trend_runner():
         "entry_price": 25255.0,
         "atr": 25.0,
         "vwap": 25200.0,  # 55 pts away -> 2.2x ATR > 1.80x ATR
-        "orb_high": 25200.0,  # (25255 - 25200)/25 = 2.20x ATR >= 0.12x ATR
+        "orb_high": 25200.0,
     }
 
     is_vetoed, reason, telemetry = filter_gate.evaluate_all_vetoes(
@@ -224,17 +225,56 @@ def test_vwap_overextension_permitted_as_trend_runner():
         symbol="NIFTY 50",
     )
 
-    assert is_vetoed is False, f"Trend runner > 1.8x ATR from VWAP was wrongly vetoed: {reason}"
+    assert is_vetoed is False, f"Trend runner > 1.8x ATR from VWAP with strong close was wrongly vetoed: {reason}"
     assert telemetry["vwap_dist_atr"] >= 1.80
+    assert telemetry["clv_directional"] >= 0.70
+
+
+def test_vwap_overextension_vetoed_when_weak_close():
+    """Verify that VWAP extension > 1.80x ATR is VETOED when accompanied by a weak close (CLV < 0.70)
+    as a Climax Exhaustion trap."""
+    filter_gate = MicrostructureTrapFilter()
+
+    # Candle 6: Range 30 pts on ATR 25 (1.20x ATR <= 1.85x, so passes Gate 2A)
+    # High 25255, Low 25225, Open 25230, Close 25245 -> CLV = 20/30 = 0.667 (< 0.70)
+    # Adverse upper wick = 10/30 = 33.3% (<= 55% -> passes Gate 1)
+    candles = [
+        (25000, 25030, 24990, 25020),
+        (25020, 25060, 25010, 25050),
+        (25050, 25100, 25040, 25090),
+        (25090, 25150, 25080, 25140),
+        (25140, 25200, 25130, 25190),
+        (25230, 25255, 25225, 25245),
+    ]
+    df = _create_mock_df(candles)
+
+    signal = {
+        "action": "BUY_CE",
+        "direction": "LONG",
+        "entry_price": 25245.0,
+        "atr": 25.0,
+        "vwap": 25180.0,  # 65 pts away -> 2.60x ATR > 1.80x ATR
+        "orb_high": 25200.0,
+    }
+
+    is_vetoed, reason, telemetry = filter_gate.evaluate_all_vetoes(
+        df_15m=df,
+        signal=signal,
+        symbol="NIFTY 50",
+    )
+
+    assert is_vetoed is True, "VWAP overextension with weak close was NOT vetoed!"
+    assert "VWAP Climax Exhaustion Veto" in reason
+    assert telemetry.get("is_hard_invalidation") is False
 
 
 def test_gate2b_marginal_orb_poke_vetoed():
-    """Verify Gate 2B: Marginal poke (0.00x - 0.12x ATR above ORB) on normal bar is VETOED,
-    preventing entry into +0.01x ATR dead noise."""
-    filter_gate = MicrostructureTrapFilter(min_orb_poke_atr=0.12)
+    """Verify Gate 2B: Marginal poke (0.00x - 0.15x ATR above ORB) on normal bar is VETOED,
+    preventing entry into +0.01x ATR dead noise (35.0% BNF win rate)."""
+    filter_gate = MicrostructureTrapFilter()
 
     # Normal candle range = 20 pts on ATR 25 (0.80x ATR < 1.25x)
-    # ORB High = 25200. Close = 25202 -> ORB extension = 2 / 25 = 0.08x ATR (< 0.12x ATR)
+    # ORB High = 25200. Close = 25202 -> ORB extension = 2 / 25 = 0.08x ATR (< 0.15x ATR)
     candles = [
         (25100, 25130, 25090, 25120),
         (25120, 25150, 25110, 25140),
@@ -263,6 +303,117 @@ def test_gate2b_marginal_orb_poke_vetoed():
     assert is_vetoed is True, "Marginal ORB poke was NOT vetoed!"
     assert "Marginal ORB Poke Veto" in reason
     assert telemetry.get("is_hard_invalidation") is False
+
+
+def test_orb_high_extension_permitted_when_strong_close():
+    """Verify that ORB extension > 2.50x ATR is PERMITTED when accompanied by strong close (CLV >= 0.70)
+    as it represents the highest-WR trend runner bucket (47.6% NIFTY / 45.4% BNF)."""
+    filter_gate = MicrostructureTrapFilter()
+
+    candles = [
+        (25100, 25130, 25090, 25120),
+        (25120, 25150, 25110, 25140),
+        (25140, 25170, 25130, 25160),
+        (25160, 25190, 25150, 25180),
+        (25180, 25210, 25170, 25200),
+        (25200, 25275, 25198, 25270),  # Strong green bar, Close 25270 on ORB High 25200 (70/25 = 2.8x ATR), CLV = 72/77 = 0.935
+    ]
+    df = _create_mock_df(candles)
+
+    signal = {
+        "action": "BUY_CE",
+        "direction": "LONG",
+        "entry_price": 25270.0,
+        "atr": 25.0,
+        "orb_high": 25200.0,
+        "vwap": 25230.0,
+    }
+
+    is_vetoed, reason, telemetry = filter_gate.evaluate_all_vetoes(
+        df_15m=df,
+        signal=signal,
+        symbol="NIFTY 50",
+    )
+
+    assert is_vetoed is False, f"ORB extension > 2.5x with strong close was wrongly vetoed: {reason}"
+    assert telemetry["orb_ext_atr"] >= 2.50
+    assert telemetry["clv_directional"] >= 0.70
+
+
+def test_orb_high_extension_vetoed_when_weak_close():
+    """Verify that ORB extension > 2.50x ATR is VETOED when accompanied by weak close (CLV < 0.70)."""
+    filter_gate = MicrostructureTrapFilter()
+
+    # Candle 6: Range 35 pts on ATR 25 (1.40x ATR <= 1.85x, passes Gate 2A)
+    # Open 25240, High 25270, Low 25235, Close 25255 -> CLV = 20/35 = 0.571 (< 0.70)
+    # Adverse upper wick = 15/35 = 42.9% (<= 55% -> passes Gate 1)
+    # ORB High = 25180. Close = 25255 -> ORB extension = 75 / 25 = 3.00x ATR (> 2.50x)
+    # VWAP = 25235 -> VWAP distance = 20 / 25 = 0.80x ATR (passes VWAP check)
+    candles = [
+        (25100, 25130, 25090, 25120),
+        (25120, 25150, 25110, 25140),
+        (25140, 25170, 25130, 25160),
+        (25160, 25190, 25150, 25180),
+        (25180, 25210, 25170, 25200),
+        (25240, 25270, 25235, 25255),
+    ]
+    df = _create_mock_df(candles)
+
+    signal = {
+        "action": "BUY_CE",
+        "direction": "LONG",
+        "entry_price": 25255.0,
+        "atr": 25.0,
+        "orb_high": 25180.0,
+        "vwap": 25235.0,
+    }
+
+    is_vetoed, reason, telemetry = filter_gate.evaluate_all_vetoes(
+        df_15m=df,
+        signal=signal,
+        symbol="NIFTY 50",
+    )
+
+    assert is_vetoed is True, "ORB extension > 2.5x with weak close was NOT vetoed!"
+    assert "ORB Climax Exhaustion Veto" in reason
+
+
+def test_kaufman_er_disabled_by_default_telemetry_logged():
+    """Verify Gate 3: Kaufman ER_6 < 0.38 passes by default (min_efficiency_ratio = 0.0)
+    because pre-breakout low efficiency is a coiling base (46.1% WR). Telemetry is still logged."""
+    filter_gate = MicrostructureTrapFilter()
+
+    # 8 zig-zag choppy candles to produce low Kaufman ER
+    candles = [
+        (25100, 25130, 25090, 25120),
+        (25120, 25140, 25100, 25110),
+        (25110, 25140, 25100, 25135),
+        (25135, 25150, 25110, 25115),
+        (25115, 25145, 25105, 25140),
+        (25140, 25150, 25110, 25115),
+        (25115, 25150, 25110, 25140),
+        (25140, 25160, 25130, 25150),  # CLV = 20/30 = 0.667
+    ]
+    df = _create_mock_df(candles)
+
+    signal = {
+        "action": "BUY_CE",
+        "direction": "LONG",
+        "entry_price": 25150.0,
+        "atr": 25.0,
+        "vwap": 25130.0,
+        "orb_high": 25140.0,
+    }
+
+    is_vetoed, reason, telemetry = filter_gate.evaluate_all_vetoes(
+        df_15m=df,
+        signal=signal,
+        symbol="NIFTY 50",
+    )
+
+    assert is_vetoed is False, f"Coiling base with low ER was wrongly vetoed: {reason}"
+    assert "kaufman_er_6" in telemetry
+    assert telemetry["kaufman_er_6"] < 0.50
 
 
 def test_institutional_range_expansion_tagged_as_ignition_bar():

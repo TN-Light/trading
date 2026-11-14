@@ -106,8 +106,10 @@ def run_analysis(csv_path, name="NIFTY 50"):
     for label, mask in [
         ("First Breakout Weak Close (CLV < 0.65)", first_brk["clv_bull"] < 0.65),
         ("First Breakout Strong Close (CLV >= 0.65)", first_brk["clv_bull"] >= 0.65),
-        ("First Breakout Ignition (CLV >= 0.70 & VWAP <= 1.5x)", (first_brk["clv_bull"] >= 0.70) & (first_brk["vwap_ext_atr"] <= 1.50)),
-        ("First Breakout Exhaustion (CLV < 0.65 or VWAP > 1.8x)", (first_brk["clv_bull"] < 0.65) | (first_brk["vwap_ext_atr"] > 1.80)),
+        ("First Breakout Near VWAP (CLV >= 0.70 & VWAP <= 1.5x)", (first_brk["clv_bull"] >= 0.70) & (first_brk["vwap_ext_atr"] <= 1.50)),
+        ("First Breakout Union (CLV < 0.65 or VWAP > 1.8x)", (first_brk["clv_bull"] < 0.65) | (first_brk["vwap_ext_atr"] > 1.80)),
+        ("First Breakout Isolated: CLV >= 0.65 & VWAP > 1.8x", (first_brk["clv_bull"] >= 0.65) & (first_brk["vwap_ext_atr"] > 1.80)),
+        ("First Breakout Isolated: CLV < 0.65 & VWAP > 1.8x", (first_brk["clv_bull"] < 0.65) & (first_brk["vwap_ext_atr"] > 1.80)),
     ]:
         sub = first_brk[mask]
         print(f"{label:52s} | N={len(sub):5d} | Naive Spot WR={sub['win_naive'].mean()*100:5.1f}% | True Option Path WR={sub['win_path'].mean()*100:5.1f}%")
