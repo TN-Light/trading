@@ -2240,6 +2240,7 @@ class Prometheus:
                         peer_symbol="NIFTY BANK",
                     )
                     pa_sig["microstructure_telemetry"] = micro_telemetry
+                    pa_sig["is_ignition_bar"] = bool(micro_telemetry.get("is_ignition_bar", False))
 
                     if is_vetoed:
                         is_hard_invalidation = bool(micro_telemetry.get('is_hard_invalidation', False))
@@ -2424,6 +2425,7 @@ class Prometheus:
                                     execution_signal["zgl"] = pa_sig.get("zgl")
                                     execution_signal["gamma_regime"] = pa_sig.get("gamma_regime", "NEUTRAL")
                                     execution_signal["commitment_ratio"] = pa_sig.get("commitment_ratio")
+                                    execution_signal["is_ignition_bar"] = bool(pa_sig.get("is_ignition_bar", False))
                                     if tradingsymbol:
                                         execution_signal["tradingsymbol"] = tradingsymbol
                                         execution_signal["instrument"] = tradingsymbol
