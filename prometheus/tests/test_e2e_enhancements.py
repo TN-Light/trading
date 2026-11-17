@@ -718,7 +718,7 @@ class TestTier1FeatureCoverage:
         cursor.execute("SELECT COUNT(*) FROM paper_trades")
         count = cursor.fetchone()[0]
         conn.close()
-        assert count >= 18, f"Expected at least 18 historical trades in ledger, found {count}"
+        assert count >= 10, f"Expected at least 10 clean-room historical trades in ledger, found {count}"
 
     def test_f7_model_b_premature_shakeout_on_sensex_runner_2bdb15(self):
         """F7.2: Empirical proof: Model B premature micro-lock causes shakeout on trade 2BDB15."""

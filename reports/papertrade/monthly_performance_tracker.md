@@ -2,8 +2,8 @@
 
 **Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 15,000  
-**Current Realized Net P&L:** **🔴 -Rs 42,986.78 (-286.58%)**  
-**Last Updated:** 2026-11-13 22:36:45 IST  
+**Current Realized Net P&L:** **🔴 -Rs 46,871.77 (-312.48%)**  
+**Last Updated:** 2026-11-17 16:00:15 IST  
 
 ---
 
@@ -11,15 +11,15 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Net Realized P&L** | **-Rs 42,986.78** | +Rs 5,000 / month | 🔴 |
-| **Month Return %** | **-286.58%** | +30.0% / month | Drawdown |
-| **Total Trading Days** | **48** | 20–22 days | In Progress |
-| **Green / Red Days** | **15 Green / 22 Red / 11 BE** | > 65% Green | 31.2% |
-| **Total Trades** | **172** | ~3–5 / day | Tracked |
-| **Win Rate** | **40.1%** (69W / 103L) | > 55.0% | ⚠️ Under Review |
-| **Profit Factor** | **0.67** | > 1.50 | ⚠️ Under Review |
-| **Gross Profit** | +Rs 59,713.24 | — | Winning Trades |
-| **Gross Loss** | -Rs 89,707.45 | — | Losing Trades |
+| **Net Realized P&L** | **-Rs 46,871.77** | +Rs 5,000 / month | 🔴 |
+| **Month Return %** | **-312.48%** | +30.0% / month | Drawdown |
+| **Total Trading Days** | **49** | 20–22 days | In Progress |
+| **Green / Red Days** | **15 Green / 23 Red / 11 BE** | > 65% Green | 30.6% |
+| **Total Trades** | **174** | ~3–5 / day | Tracked |
+| **Win Rate** | **39.1%** (68W / 106L) | > 55.0% | ⚠️ Under Review |
+| **Profit Factor** | **0.63** | > 1.50 | ⚠️ Under Review |
+| **Gross Profit** | +Rs 57,445.12 | — | Winning Trades |
+| **Gross Loss** | -Rs 91,158.83 | — | Losing Trades |
 
 ---
 
@@ -74,7 +74,8 @@
 | **2026-11-06** | 6 | 3W / 3L | 50% | +Rs 832 | -Rs 2,500 | **🔴 -Rs 2,292.0** | -2.9% | **-Rs 46,371.2** | nan |
 | **2026-11-09** | 2 | 2W / 0L | 100% | +Rs 1,088 | -Rs 0 | **🟢 +Rs 844.5** | +1.1% | **-Rs 45,526.6** | nan |
 | **2026-11-11** | 4 | 2W / 2L | 50% | +Rs 3,448 | -Rs 2,707 | **🟢 +Rs 239.9** | +0.3% | **-Rs 45,286.8** | nan |
-| **2026-11-13** | 2 | 2W / 0L | 100% | +Rs 2,500 | -Rs 0 | **🟢 +Rs 2,300.0** | +2.2% | **-Rs 42,986.8** | Intraday paper trading session: 2 trades (2W / 0L), Net P&L: Rs +2,300.00 |
+| **2026-11-13** | 3 | 0W / 3L | 0% | +Rs 0 | -Rs 1,451 | **🔴 -Rs 1,731.5** | -2.2% | **-Rs 47,018.3** | Day 23: 3 trades executed (0 Wins / 3 Losses). Gross -Rs 1451.38, Costs Rs 280.11, Net -Rs 1731.49. SENSEX Golden Setup stopped out (-Rs 1199.16), NIFTY/SENSEX Put trades stopped out. |
+| **2026-11-17** | 1 | 1W / 0L | 100% | +Rs 232 | -Rs 0 | **🟢 +Rs 146.5** | +0.1% | **-Rs 46,871.8** | Intraday paper trading session: 1 trades (1W / 0L), Net P&L: Rs +146.50 |
 
 ---
 

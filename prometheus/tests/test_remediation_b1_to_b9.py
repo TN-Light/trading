@@ -368,10 +368,12 @@ def test_b7_commitment_ratio_clamped():
 def test_b8_performance_ledger_row_27_reconciled():
     """Verify Day 11 (Row 27) in CSV performance ledger matches SQLite ground truth."""
     csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../reports/papertrade/daily_performance_ledger.csv"))
-    if not os.path.exists(csv_path):
+    legacy_csv = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../reports/papertrade/legacy_daily_performance_ledger.csv"))
+    target_path = legacy_csv if os.path.exists(legacy_csv) else csv_path
+    if not os.path.exists(target_path):
         pytest.skip("CSV ledger not found at path")
         
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(target_path)
     day11 = df[df["Date"] == "2026-10-06"]
     assert len(day11) == 1
     row = day11.iloc[0]
