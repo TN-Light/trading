@@ -1929,23 +1929,35 @@ class TelegramBot:
         gross_pnl = summary.get("gross_pnl", pnl + total_costs)
         guardrail_audit = summary.get("intraday_guardrail_audit", "")
 
+        tier_c_pnl = summary.get("tier_c_pnl", 0.0)
+        tier_c_trades = summary.get("tier_c_trades", 0)
+        tier_c_wins = summary.get("tier_c_wins", 0)
+
         wr_line = f"Win Rate: <code>{wins/trades*100:.0f}%</code>\n" if trades > 0 else ""
 
         text = (
-            f"{pnl_emoji} <b>DAILY SUMMARY</b>\n"
+            f"{pnl_emoji} <b>DAILY SUMMARY (Live Capital Tier S/A/B)</b>\n"
             f"<code>{datetime.now().strftime('%d %b %Y')}</code>\n"
             f"Gross P&L: <code>Rs {gross_pnl:+,.0f}</code>\n"
         )
         if total_costs > 0:
             text += f"Costs: <code>Rs {total_costs:,.0f}</code>\n"
         text += (
-            f"<b>Net P&L: <code>Rs {pnl:+,.0f}</code></b>\n"
-            f"Trades: <code>{trades}</code> (Won: {wins})\n"
+            f"<b>Live Net P&L: <code>Rs {pnl:+,.0f}</code></b>\n"
+            f"Live Trades: <code>{trades}</code> (Won: {wins})\n"
             f"{wr_line}"
         )
         if guardrail_audit:
             text += f"Intraday Guardrail: <code>{html.escape(str(guardrail_audit))}</code>\n"
-        text += f"\n\U0001f4b0 Portfolio: <b><code>Rs {equity:,.0f}</code></b>"
+        text += f"\U0001f4b0 Live Capital: <b><code>Rs {equity:,.0f}</code></b>"
+        
+        if tier_c_trades > 0:
+            tc_wr = f"{tier_c_wins/tier_c_trades*100:.0f}%"
+            text += (
+                f"\n\n\U0001f9ea <b>Experimental Sandbox (Tier C):</b>\n"
+                f"Trades: <code>{tier_c_trades}</code> (Won: {tier_c_wins}, WR: <code>{tc_wr}</code>)\n"
+                f"Sandbox Net: <code>Rs {tier_c_pnl:+,.0f}</code> <i>(Quarantined — ₹0 capital impact)</i>"
+            )
         self.send_message(text)
 
     def alert_system_start(self) -> bool:

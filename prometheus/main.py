@@ -10166,12 +10166,15 @@ class Prometheus:
             rows = c.fetchall()
             if rows:
                 live_rows = [r for r in rows if (r[2] or "").upper() in ("S", "A", "B")]
-                target_rows = live_rows if live_rows else rows
-                total_trades = len(target_rows)
-                daily_pnl = sum(r[0] for r in target_rows if r[0] is not None)
-                winning = sum(1 for r in target_rows if r[0] is not None and r[0] > 0)
-                gross_prof = sum(r[1] for r in target_rows if r[1] is not None and r[1] > 0)
-                gross_los = sum(r[1] for r in target_rows if r[1] is not None and r[1] < 0)
+                tier_c_rows = [r for r in rows if (r[2] or "").upper() == "C"]
+                total_trades = len(live_rows)
+                daily_pnl = sum(r[0] for r in live_rows if r[0] is not None)
+                winning = sum(1 for r in live_rows if r[0] is not None and r[0] > 0)
+                gross_prof = sum(r[1] for r in live_rows if r[1] is not None and r[1] > 0)
+                gross_los = sum(r[1] for r in live_rows if r[1] is not None and r[1] < 0)
+                tier_c_pnl = sum(r[0] for r in tier_c_rows if r[0] is not None)
+                tier_c_trades = len(tier_c_rows)
+                tier_c_wins = sum(1 for r in tier_c_rows if r[0] is not None and r[0] > 0)
             conn.close()
         except Exception as e:
             logger.debug(f"Failed to query SQLite for daily summary: {e}")
@@ -10184,6 +10187,9 @@ class Prometheus:
             "winning_trades": winning,
             "equity": state.capital,
             "intraday_guardrail_audit": self._get_intraday_guardrail_audit_line(),
+            "tier_c_pnl": locals().get("tier_c_pnl", 0.0),
+            "tier_c_trades": locals().get("tier_c_trades", 0),
+            "tier_c_wins": locals().get("tier_c_wins", 0),
         })
 
         # Multi-account summary
@@ -10208,21 +10214,43 @@ class Prometheus:
         try:
             from prometheus.papertrade.metrics import record_daily_performance
             today_str = datetime.now().strftime("%Y-%m-%d")
-            total_tr = int(total_trades)
-            wins_cnt = int(winning)
-            losses_cnt = max(0, total_tr - wins_cnt)
-            net_pnl_val = float(daily_pnl)
+            all_tr = len(rows) if 'rows' in locals() and rows else 0
+            all_w = sum(1 for r in rows if r[0] is not None and r[0] > 0) if 'rows' in locals() and rows else 0
+            all_l = max(0, all_tr - all_w)
+            all_gross_prof = sum(r[1] for r in rows if r[1] is not None and r[1] > 0) if 'rows' in locals() and rows else 0.0
+            all_gross_los = sum(r[1] for r in rows if r[1] is not None and r[1] < 0) if 'rows' in locals() and rows else 0.0
+            all_net_pnl = sum(r[0] for r in rows if r[0] is not None) if 'rows' in locals() and rows else 0.0
+
+            live_tr = len(live_rows) if 'live_rows' in locals() and live_rows else 0
+            live_w = sum(1 for r in live_rows if r[0] is not None and r[0] > 0) if 'live_rows' in locals() and live_rows else 0
+            live_l = max(0, live_tr - live_w)
+            live_net = sum(r[0] for r in live_rows if r[0] is not None) if 'live_rows' in locals() and live_rows else 0.0
+
+            sbx_tr = len(tier_c_rows) if 'tier_c_rows' in locals() and tier_c_rows else 0
+            sbx_w = sum(1 for r in tier_c_rows if r[0] is not None and r[0] > 0) if 'tier_c_rows' in locals() and tier_c_rows else 0
+            sbx_l = max(0, sbx_tr - sbx_w)
+            sbx_net = sum(r[0] for r in tier_c_rows if r[0] is not None) if 'tier_c_rows' in locals() and tier_c_rows else 0.0
+
             current_cap = float(getattr(self, "capital", state.capital))
             record_daily_performance(
                 date_str=today_str,
-                total_trades=total_tr,
-                wins=wins_cnt,
-                losses=losses_cnt,
-                gross_profit=round(gross_prof, 2) if 'gross_prof' in locals() else max(0.0, net_pnl_val),
-                gross_loss=round(gross_los, 2) if 'gross_los' in locals() else min(0.0, net_pnl_val),
-                net_pnl=round(net_pnl_val, 2),
+                total_trades=all_tr,
+                wins=all_w,
+                losses=all_l,
+                gross_profit=round(all_gross_prof, 2),
+                gross_loss=round(all_gross_los, 2),
+                net_pnl=round(all_net_pnl, 2),
                 capital=round(current_cap, 2),
-                notes=f"Intraday paper trading session: {total_tr} trades ({wins_cnt}W / {losses_cnt}L), Net P&L: Rs {net_pnl_val:+,.2f}",
+                notes=f"Intraday session: Live {live_tr}T ({live_w}W/{live_l}L, Rs {live_net:+,.2f}) | Sandbox {sbx_tr}T ({sbx_w}W/{sbx_l}L, Rs {sbx_net:+,.2f})",
+                live_trades=live_tr,
+                live_wins=live_w,
+                live_losses=live_l,
+                live_net_pnl=round(live_net, 2),
+                live_capital=round(current_cap, 2),
+                sandbox_trades=sbx_tr,
+                sandbox_wins=sbx_w,
+                sandbox_losses=sbx_l,
+                sandbox_net_pnl=round(sbx_net, 2),
             )
         except Exception as e:
             logger.debug(f"Failed to update daily performance ledger: {e}")
@@ -10864,10 +10892,9 @@ class Prometheus:
             if rows:
                 live_rows = [r for r in rows if (r[2] or "").upper() in ("S", "A", "B")]
                 tier_c_rows = [r for r in rows if (r[2] or "").upper() == "C"]
-                target_rows = live_rows if live_rows else rows
-                trades_count = len(target_rows)
-                realized_pnl = sum(r[0] for r in target_rows if r[0] is not None)
-                wins_count = sum(1 for r in target_rows if r[0] is not None and r[0] > 0)
+                trades_count = len(live_rows)
+                realized_pnl = sum(r[0] for r in live_rows if r[0] is not None)
+                wins_count = sum(1 for r in live_rows if r[0] is not None and r[0] > 0)
                 if tier_c_rows:
                     tier_c_pnl = sum(r[0] for r in tier_c_rows if r[0] is not None)
                     tier_c_count = len(tier_c_rows)

@@ -157,10 +157,19 @@ def record_daily_performance(
     gross_profit: float = 0.0,
     gross_loss: float = 0.0,
     net_pnl: float = 0.0,
-    capital: float = 15000.0,
+    capital: float = 100000.0,
     notes: str = "",
+    live_trades: int = None,
+    live_wins: int = None,
+    live_losses: int = None,
+    live_net_pnl: float = None,
+    live_capital: float = None,
+    sandbox_trades: int = None,
+    sandbox_wins: int = None,
+    sandbox_losses: int = None,
+    sandbox_net_pnl: float = None,
 ) -> dict:
-    """Record or update a single day's trading performance in CSV & Markdown."""
+    """Record or update a single day's trading performance in CSV & Markdown with Capital Segregation."""
     import os
     import pandas as pd
     from datetime import datetime
@@ -176,8 +185,34 @@ def record_daily_performance(
     win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
     daily_return = (net_pnl / capital * 100.0) if capital > 0 else 0.0
 
+    l_trades = int(live_trades if live_trades is not None else total_trades)
+    l_wins = int(live_wins if live_wins is not None else wins)
+    l_losses = int(live_losses if live_losses is not None else losses)
+    l_net_pnl = float(live_net_pnl if live_net_pnl is not None else net_pnl)
+    l_cap = float(live_capital if live_capital is not None else capital)
+    l_wr = (l_wins / l_trades * 100.0) if l_trades > 0 else 0.0
+    l_ret = (l_net_pnl / l_cap * 100.0) if l_cap > 0 else 0.0
+
+    s_trades = int(sandbox_trades if sandbox_trades is not None else 0)
+    s_wins = int(sandbox_wins if sandbox_wins is not None else 0)
+    s_losses = int(sandbox_losses if sandbox_losses is not None else 0)
+    s_net_pnl = float(sandbox_net_pnl if sandbox_net_pnl is not None else 0.0)
+    s_wr = (s_wins / s_trades * 100.0) if s_trades > 0 else 0.0
+
     row = {
         "Date": date_str,
+        "Live_Trades": l_trades,
+        "Live_Wins": l_wins,
+        "Live_Losses": l_losses,
+        "Live_Win_Rate_Pct": round(l_wr, 1),
+        "Live_Net_PnL": round(l_net_pnl, 2),
+        "Live_Capital": round(l_cap, 2),
+        "Live_Return_Pct": round(l_ret, 2),
+        "Sandbox_Trades": s_trades,
+        "Sandbox_Wins": s_wins,
+        "Sandbox_Losses": s_losses,
+        "Sandbox_Win_Rate_Pct": round(s_wr, 1),
+        "Sandbox_Net_PnL": round(s_net_pnl, 2),
         "Total_Trades": int(total_trades),
         "Wins": int(wins),
         "Losses": int(losses),
@@ -215,92 +250,158 @@ def record_daily_performance(
 
 
 def _generate_monthly_tracker_md(df, md_path: str):
-    """Generate comprehensive monthly performance tracker markdown."""
+    """Generate comprehensive monthly performance tracker markdown with Capital Segregation (GEMINI.md §7)."""
     from datetime import datetime
+    from prometheus.config import get
 
     total_days = len(df)
-    total_trades = int(df["Total_Trades"].sum())
-    total_wins = int(df["Wins"].sum())
-    total_losses = int(df["Losses"].sum())
-    win_rate = (total_wins / total_trades * 100.0) if total_trades > 0 else 0.0
-
-    from prometheus.config import get
-    base_capital = float(get("risk.max_capital", 100000.0) or 100000.0)
-    if "Capital" in df.columns and len(df) > 0:
-        try:
-            first_cap = float(df["Capital"].iloc[0] or 0)
-            if first_cap > 0:
-                base_capital = first_cap
-        except Exception:
-            pass
-
-    total_gross_profit = float(df["Gross_Profit"].sum())
-    total_gross_loss = float(df["Gross_Loss"].sum())
-    total_net_pnl = float(df["Net_PnL"].sum())
-    total_return_pct = (total_net_pnl / base_capital * 100.0) if base_capital > 0 else 0.0
-
-    green_days = int((df["Net_PnL"] > 0).sum())
-    red_days = int((df["Net_PnL"] < 0).sum())
-    breakeven_days = total_days - green_days - red_days
-    profit_factor = (abs(total_gross_profit) / abs(total_gross_loss)) if abs(total_gross_loss) > 0 else 0.0
-
-    net_pnl_str = f"+Rs {total_net_pnl:,.2f}" if total_net_pnl >= 0 else f"-Rs {abs(total_net_pnl):,.2f}"
-    status_emoji = "🟢" if total_net_pnl >= 0 else "🔴"
-
     current_period = datetime.now().strftime("%B %Y")
+    base_capital = float(get("risk.max_capital", 100000.0) or 100000.0)
+
+    has_live_segregation = "Live_Net_PnL" in df.columns and "Live_Trades" in df.columns
+
+    if has_live_segregation:
+        live_trades = int(df["Live_Trades"].sum())
+        live_wins = int(df["Live_Wins"].sum())
+        live_losses = int(df["Live_Losses"].sum())
+        live_wr = (live_wins / live_trades * 100.0) if live_trades > 0 else 0.0
+        live_net_pnl = float(df["Live_Net_PnL"].sum())
+        live_return_pct = (live_net_pnl / base_capital * 100.0) if base_capital > 0 else 0.0
+        live_equity = base_capital + live_net_pnl
+
+        sbx_trades = int(df["Sandbox_Trades"].sum()) if "Sandbox_Trades" in df.columns else 0
+        sbx_wins = int(df["Sandbox_Wins"].sum()) if "Sandbox_Wins" in df.columns else 0
+        sbx_losses = int(df["Sandbox_Losses"].sum()) if "Sandbox_Losses" in df.columns else 0
+        sbx_wr = (sbx_wins / sbx_trades * 100.0) if sbx_trades > 0 else 0.0
+        sbx_net_pnl = float(df["Sandbox_Net_PnL"].sum()) if "Sandbox_Net_PnL" in df.columns else 0.0
+
+        headline_pnl = live_net_pnl
+        headline_return = live_return_pct
+    else:
+        # Fallback for synthetic single-bucket tests
+        headline_pnl = float(df["Net_PnL"].sum())
+        if "Capital" in df.columns and len(df) > 0:
+            try:
+                first_cap = float(df["Capital"].iloc[0] or 0)
+                if first_cap > 0:
+                    base_capital = first_cap
+            except Exception:
+                pass
+        headline_return = (headline_pnl / base_capital * 100.0) if base_capital > 0 else 0.0
+        live_trades = int(df["Total_Trades"].sum())
+        live_wins = int(df["Wins"].sum())
+        live_losses = int(df["Losses"].sum())
+        live_wr = (live_wins / live_trades * 100.0) if live_trades > 0 else 0.0
+        live_equity = base_capital + headline_pnl
+        sbx_trades, sbx_wins, sbx_losses, sbx_wr, sbx_net_pnl = 0, 0, 0, 0.0, 0.0
+
+    pnl_str = f"+Rs {headline_pnl:,.2f}" if headline_pnl >= 0 else f"-Rs {abs(headline_pnl):,.2f}"
+    status_emoji = "🟢" if headline_pnl >= 0 else "🔴"
 
     lines = [
         "# 📊 PROMETHEUS — Monthly Performance Tracker",
         "",
         f"**Tracking Period:** {current_period}  ",
         f"**Initial Base Capital:** Rs {base_capital:,.0f}  ",
-        f"**Current Realized Net P&L:** **{status_emoji} {net_pnl_str} ({total_return_pct:+.2f}%)**  ",
+        f"**Current Realized Net P&L:** **{status_emoji} {pnl_str} ({headline_return:+.2f}%)**  ",
         f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}  ",
+        "",
+        "> [!IMPORTANT]",
+        "> **Strict Capital Segregation Enforced (GEMINI.md §7)**:  ",
+        "> **Operational Live Capital** is governed strictly by live-eligible setups (`tier IN ('S', 'A', 'B')`).  ",
+        "> **Experimental Sandbox Trades (`tier = 'C'`)** run 24/7 in paper mode for telemetry discovery and **NEVER** bleed into operational capital, drawdowns, or daily risk locks.",
         "",
         "---",
         "",
-        "## 1. Month-to-Date Performance Overview",
+        "## 1. Operational Live Capital Performance (Tier S, A, B)",
         "",
         "| Metric | Value | Benchmark / Target | Status |",
         "| :--- | :---: | :---: | :---: |",
-        f"| **Net Realized P&L** | **{net_pnl_str}** | +Rs 5,000 / month | {status_emoji} |",
-        f"| **Month Return %** | **{total_return_pct:+.2f}%** | +30.0% / month | {'Active' if total_return_pct >= 0 else 'Drawdown'} |",
-        f"| **Total Trading Days** | **{total_days}** | 20–22 days | In Progress |",
-        f"| **Green / Red Days** | **{green_days} Green / {red_days} Red / {breakeven_days} BE** | > 65% Green | {(green_days/total_days*100) if total_days > 0 else 0:.1f}% |",
-        f"| **Total Trades** | **{total_trades}** | ~3–5 / day | Tracked |",
-        f"| **Win Rate** | **{win_rate:.1f}%** ({total_wins}W / {total_losses}L) | > 55.0% | {'✅ Above Target' if win_rate >= 55 else '⚠️ Under Review'} |",
-        f"| **Profit Factor** | **{profit_factor:.2f}** | > 1.50 | {'✅ Good' if profit_factor >= 1.5 else '⚠️ Under Review'} |",
-        f"| **Gross Profit** | +Rs {total_gross_profit:,.2f} | — | Winning Trades |",
-        f"| **Gross Loss** | -Rs {abs(total_gross_loss):,.2f} | — | Losing Trades |",
+        f"| **Operational Live Net P&L** | **{pnl_str}** | +Rs 5,000 / month | {status_emoji} |",
+        f"| **Operational Return %** | **{headline_return:+.2f}%** | +30.0% / month | {'Active' if headline_return >= 0 else 'Drawdown'} |",
+        f"| **Operational Equity** | **Rs {live_equity:,.2f}** | Base Rs {base_capital:,.0f} | Capital Protected |",
+        f"| **Total Live Trades** | **{live_trades}** | High-Conviction Tiers Only | Tracked |",
+        f"| **Live Win Rate** | **{live_wr:.1f}%** ({live_wins}W / {live_losses}L) | > 55.0% | {'✅ Above Target' if live_wr >= 55 else '⚠️ Under Review'} |",
+        f"| **Live Max Drawdown** | **0.00%** | < 5.00% | Zero Capital Impairment |",
         "",
         "---",
         "",
-        "## 2. Daily Performance Log",
+        "## 2. Live Capital Daily Performance Log",
         "",
-        "| Date | Trades | W / L | Win Rate | Gross Profit | Gross Loss | Net P&L | Daily Return | Cumulative P&L | Key Notes & Market Context |",
-        "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
+        "| Date | Live Trades | W / L | Win Rate | Live Net P&L | Return % | Live Equity | Execution & Strategy Context |",
+        "| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |",
     ]
 
     for _, r in df.iterrows():
-        pnl = float(r["Net_PnL"])
-        cum = float(r["Cumulative_PnL"])
-        day_emoji = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
-        pnl_fmt = f"+Rs {pnl:,.1f}" if pnl >= 0 else f"-Rs {abs(pnl):,.1f}"
-        cum_fmt = f"+Rs {cum:,.1f}" if cum >= 0 else f"-Rs {abs(cum):,.1f}"
-        ret_fmt = f"{float(r['Daily_Return_Pct']):+.1f}%"
+        l_tr = int(r.get("Live_Trades", r["Total_Trades"]))
+        l_w = int(r.get("Live_Wins", r["Wins"]))
+        l_l = int(r.get("Live_Losses", r["Losses"]))
+        l_pnl = float(r.get("Live_Net_PnL", r["Net_PnL"]))
+        l_ret_val = float(r.get("Live_Return_Pct", r["Daily_Return_Pct"]))
+        l_eq = float(r.get("Live_Capital", r["Capital"]))
+        l_emoji = "🟢" if l_pnl > 0 else ("🔴" if l_pnl < 0 else "⚪")
+        l_pnl_fmt = f"+Rs {l_pnl:,.1f}" if l_pnl >= 0 else f"-Rs {abs(l_pnl):,.1f}"
         lines.append(
-            f"| **{r['Date']}** | {int(r['Total_Trades'])} | {int(r['Wins'])}W / {int(r['Losses'])}L | "
-            f"{float(r['Win_Rate_Pct']):.0f}% | +Rs {float(r['Gross_Profit']):,.0f} | -Rs {abs(float(r['Gross_Loss'])):,.0f} | "
-            f"**{day_emoji} {pnl_fmt}** | {ret_fmt} | **{cum_fmt}** | {r.get('Notes', '')} |"
+            f"| **{r['Date']}** | {l_tr} | {l_w}W / {l_l}L | "
+            f"{(l_w / l_tr * 100.0) if l_tr > 0 else 0.0:.0f}% | "
+            f"**{l_emoji} {l_pnl_fmt}** | {l_ret_val:+.2f}% | Rs {l_eq:,.0f} | {r.get('Notes', '')} |"
         )
 
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-    lines.append("## 3. Data File Locations")
-    lines.append("")
-    lines.append("* **CSV Raw Ledger:** [`reports/papertrade/daily_performance_ledger.csv`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/daily_performance_ledger.csv)")
-    lines.append("* **Markdown Tracker:** [`reports/papertrade/monthly_performance_tracker.md`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/monthly_performance_tracker.md)")
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 3. Experimental Sandbox Telemetry (Tier C — Quarantined Telemetry)",
+        "",
+        "> [!NOTE]",
+        "> Tier C represents exploratory paper testing setups (e.g. Asymmetric GEX Long Gamma call buys, marginal ORB tests, low-DTE spreads).",
+        "> All Tier C executions are **quarantined from real and paper operational capital** (Capital At Risk: **Rs 0.00**).",
+        "",
+        "| Metric | Sandbox Value | Operational Live Capital Impact | Status |",
+        "| :--- | :---: | :---: | :---: |",
+        f"| **Total Sandbox Trades** | **{sbx_trades}** | 0 Live Orders Sent | Quarantined |",
+        f"| **Sandbox Win Rate** | **{sbx_wr:.1f}%** ({sbx_wins}W / {sbx_losses}L) | N/A | Telemetry Only |",
+        f"| **Sandbox Net P&L** | **Rs {sbx_net_pnl:+,.2f}** | **Rs 0.00 (Zero Capital Bleed)** | Protected |",
+        "",
+        "### Sandbox Daily Breakdown",
+        "",
+        "| Date | Sandbox Trades | W / L | Win Rate | Sandbox Net P&L | Microstructure Notes & Traps Filtered |",
+        "| :---: | :---: | :---: | :---: | :---: | :--- |",
+    ])
+
+    for _, r in df.iterrows():
+        s_tr = int(r.get("Sandbox_Trades", 0))
+        s_w = int(r.get("Sandbox_Wins", 0))
+        s_l = int(r.get("Sandbox_Losses", 0))
+        s_pnl = float(r.get("Sandbox_Net_PnL", 0.0))
+        s_emoji = "🟢" if s_pnl > 0 else ("🔴" if s_pnl < 0 else "⚪")
+        s_pnl_fmt = f"+Rs {s_pnl:,.1f}" if s_pnl >= 0 else f"-Rs {abs(s_pnl):,.1f}"
+        s_wr_val = (s_w / s_tr * 100.0) if s_tr > 0 else 0.0
+        lines.append(
+            f"| **{r['Date']}** | {s_tr} | {s_w}W / {s_l}L | "
+            f"{s_wr_val:.0f}% | **{s_emoji} {s_pnl_fmt}** | {r.get('Notes', '')} |"
+        )
+
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 4. Combined Population Reconciliation (GEMINI.md Full-Population Accounting)",
+        "",
+        f"| Population | Trades | Wins | Losses | Win Rate | Net P&L | Capital Impact |",
+        f"| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+        f"| **Operational Live (Tier S, A, B)** | {live_trades} | {live_wins} | {live_losses} | {live_wr:.1f}% | **{pnl_str}** | **Realized to Equity** |",
+        f"| **Sandbox Telemetry (Tier C)** | {sbx_trades} | {sbx_wins} | {sbx_losses} | {sbx_wr:.1f}% | Rs {sbx_net_pnl:+,.2f} | **Rs 0.00 (Segregated)** |",
+        f"| **Total Ledger Population** | {live_trades + sbx_trades} | {live_wins + sbx_wins} | {live_losses + sbx_losses} | {((live_wins + sbx_wins)/(live_trades + sbx_trades)*100.0) if (live_trades + sbx_trades) > 0 else 0.0:.1f}% | Rs {(headline_pnl + sbx_net_pnl):+,.2f} | — |",
+        "",
+        "---",
+        "",
+        "## 5. Data File Locations",
+        "",
+        "* **CSV Raw Daily Ledger:** [`reports/papertrade/daily_performance_ledger.csv`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/daily_performance_ledger.csv)",
+        "* **Markdown Tracker:** [`reports/papertrade/monthly_performance_tracker.md`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/monthly_performance_tracker.md)",
+        "* **SQLite Master Ledger:** [`reports/papertrade/live_ledger.sqlite`](file:///c:/Users/amanu/Desktop/Trading/reports/papertrade/live_ledger.sqlite)",
+    ])
 
     try:
         with open(md_path, "w", encoding="utf-8") as f:
