@@ -2,3 +2,4 @@ Date,Live_Trades,Live_Wins,Live_Losses,Live_Win_Rate_Pct,Live_Net_PnL,Live_Capit
 2026-11-16,0,0,0,0.0,0.0,100000.0,0.0,3,1,2,33.3,-584.3,3,1,2,33.3,698.61,-1002.17,-584.3,100000.0,-0.58,-584.3,Clean Room Session Open: 0 Live setups triggered; 3 Tier C paper tests
 2026-11-17,1,1,0,100.0,146.5,100146.5,0.15,8,7,1,87.5,2408.3,9,8,1,88.9,4479.07,-1140.77,2554.8,100146.5,2.55,1970.5,SENSEX Long Tier B target hit (+Rs 146.50 net); 8 Tier C paper tests
 2026-11-18,0,0,0,0.0,0.0,100146.5,0.0,5,0,5,0.0,-2755.46,5,0,5,0.0,42.53,-2353.51,-2755.46,100146.5,-2.75,-784.96,0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss)
+2026-11-19,1,1,0,100.0,155.36,100301.86,0.16,4,1,3,25.0,-2993.29,5,2,3,40.0,484.74,-2895.2,-2837.93,100146.5,-2.83,-3622.89,"Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29)"

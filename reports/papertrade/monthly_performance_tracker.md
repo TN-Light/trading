@@ -2,8 +2,8 @@
 
 **Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 100,000  
-**Current Realized Net P&L:** **🟢 +Rs 146.50 (+0.15%)**  
-**Last Updated:** 2026-11-18 18:36:53 IST  
+**Current Realized Net P&L:** **🟢 +Rs 301.86 (+0.30%)**  
+**Last Updated:** 2026-11-19 17:30:49 IST  
 
 > [!IMPORTANT]
 > **Strict Capital Segregation Enforced (GEMINI.md §7)**:  
@@ -16,11 +16,11 @@
 
 | Metric | Value | Benchmark / Target | Status |
 | :--- | :---: | :---: | :---: |
-| **Operational Live Net P&L** | **+Rs 146.50** | +Rs 5,000 / month | 🟢 |
-| **Operational Return %** | **+0.15%** | +30.0% / month | Active |
-| **Operational Equity** | **Rs 100,146.50** | Base Rs 100,000 | Capital Protected |
-| **Total Live Trades** | **1** | High-Conviction Tiers Only | Tracked |
-| **Live Win Rate** | **100.0%** (1W / 0L) | > 55.0% | ✅ Above Target |
+| **Operational Live Net P&L** | **+Rs 301.86** | +Rs 5,000 / month | 🟢 |
+| **Operational Return %** | **+0.30%** | +30.0% / month | Active |
+| **Operational Equity** | **Rs 100,301.86** | Base Rs 100,000 | Capital Protected |
+| **Total Live Trades** | **2** | High-Conviction Tiers Only | Tracked |
+| **Live Win Rate** | **100.0%** (2W / 0L) | > 55.0% | ✅ Above Target |
 | **Live Max Drawdown** | **0.00%** | < 5.00% | Zero Capital Impairment |
 
 ---
@@ -32,6 +32,7 @@
 | **2026-11-16** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,000 | Clean Room Session Open: 0 Live setups triggered; 3 Tier C paper tests |
 | **2026-11-17** | 1 | 1W / 0L | 100% | **🟢 +Rs 146.5** | +0.15% | Rs 100,146 | SENSEX Long Tier B target hit (+Rs 146.50 net); 8 Tier C paper tests |
 | **2026-11-18** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,146 | 0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss) |
+| **2026-11-19** | 1 | 1W / 0L | 100% | **🟢 +Rs 155.4** | +0.16% | Rs 100,302 | Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29) |
 
 ---
 
@@ -43,9 +44,9 @@
 
 | Metric | Sandbox Value | Operational Live Capital Impact | Status |
 | :--- | :---: | :---: | :---: |
-| **Total Sandbox Trades** | **16** | 0 Live Orders Sent | Quarantined |
-| **Sandbox Win Rate** | **50.0%** (8W / 8L) | N/A | Telemetry Only |
-| **Sandbox Net P&L** | **Rs -931.46** | **Rs 0.00 (Zero Capital Bleed)** | Protected |
+| **Total Sandbox Trades** | **20** | 0 Live Orders Sent | Quarantined |
+| **Sandbox Win Rate** | **45.0%** (9W / 11L) | N/A | Telemetry Only |
+| **Sandbox Net P&L** | **Rs -3,924.75** | **Rs 0.00 (Zero Capital Bleed)** | Protected |
 
 ### Sandbox Daily Breakdown
 
@@ -54,6 +55,7 @@
 | **2026-11-16** | 3 | 1W / 2L | 33% | **🔴 -Rs 584.3** | Clean Room Session Open: 0 Live setups triggered; 3 Tier C paper tests |
 | **2026-11-17** | 8 | 7W / 1L | 88% | **🟢 +Rs 2,408.3** | SENSEX Long Tier B target hit (+Rs 146.50 net); 8 Tier C paper tests |
 | **2026-11-18** | 5 | 0W / 5L | 0% | **🔴 -Rs 2,755.5** | 0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss) |
+| **2026-11-19** | 4 | 1W / 3L | 25% | **🔴 -Rs 2,993.3** | Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29) |
 
 ---
 
@@ -61,9 +63,9 @@
 
 | Population | Trades | Wins | Losses | Win Rate | Net P&L | Capital Impact |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Operational Live (Tier S, A, B)** | 1 | 1 | 0 | 100.0% | **+Rs 146.50** | **Realized to Equity** |
-| **Sandbox Telemetry (Tier C)** | 16 | 8 | 8 | 50.0% | Rs -931.46 | **Rs 0.00 (Segregated)** |
-| **Total Ledger Population** | 17 | 9 | 8 | 52.9% | Rs -784.96 | — |
+| **Operational Live (Tier S, A, B)** | 2 | 2 | 0 | 100.0% | **+Rs 301.86** | **Realized to Equity** |
+| **Sandbox Telemetry (Tier C)** | 20 | 9 | 11 | 45.0% | Rs -3,924.75 | **Rs 0.00 (Segregated)** |
+| **Total Ledger Population** | 22 | 11 | 11 | 50.0% | Rs -3,622.89 | — |
 
 ---
 
