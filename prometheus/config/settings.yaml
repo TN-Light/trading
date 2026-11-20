@@ -206,6 +206,7 @@ intraday:
     trailing_be_pts: 20.0
     partial_profit_pct: 0.0  # Physically disabled under single-lot constraint (GEMINI.md Rule 2)
   last_entry_time: '14:15'
+  last_entry_time_trend_day: '15:00'
   max_daily_trades: 4  # Up to 2 morning trades + 2 afternoon trades; strictly caps daily risk
   trading_windows:
     morning_start: '09:30'

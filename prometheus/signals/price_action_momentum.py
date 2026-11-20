@@ -74,7 +74,7 @@ class PriceActionMomentumScanner:
         current_date = current_ts.date() if hasattr(current_ts, "date") else None
 
         min_start_time = dtime(9, 35) if golden_mode else dtime(9, 50)
-        if current_time < min_start_time or current_time > dtime(14, 30):
+        if current_time < min_start_time or current_time > dtime(15, 0):
             return None
 
         # Extract today's bars
@@ -233,10 +233,13 @@ class PriceActionMomentumScanner:
         #    On non-expiry days, allows confirmed trend continuation setups
         #    (Institutional Trend Day or 1H Macro Trend Aligned).
         #    On expiry days, afternoon option buying is strictly blocked to eliminate terminal theta decay traps.
-        # 4. Hard Cutoff: Past 14:30 IST, all new entries blocked.
+        # 4. Afternoon & Hard Cutoff:
+        # On normal days, entries blocked past 14:30 IST.
+        # On confirmed Institutional Trend Days (non-expiry), extended to 15:00 IST (GEMINI.md Afternoon Power Session).
         cutoff_morning = dtime(11, 45) if golden_mode else dtime(12, 0)
         is_lunch_window = (dtime(11, 30) <= current_time < dtime(13, 15))
-        is_afternoon_window = (dtime(13, 15) <= current_time <= dtime(14, 30))
+        afternoon_cutoff = dtime(15, 0) if (is_institutional_trend_day and not is_expiry_day) else dtime(14, 30)
+        is_afternoon_window = (dtime(13, 15) <= current_time <= afternoon_cutoff)
 
         if current_time > cutoff_morning:
             if is_lunch_window:
@@ -469,13 +472,17 @@ class PriceActionMomentumScanner:
 
         if bull_score >= min_threshold and net_edge >= 1.5:
             # Climax Bar Overextension Gate (Mean-Reversion Trap Prevention):
-            # Veto entry if price is extended >= 60 bps (0.60%) above VWAP or
-            # current bar is >= 1.8x ATR without prior consolidation (exhaustion climax).
-            is_climax_extended = ((close - vwap) / max(close, 1.0) >= 0.0060) or (bar_stretch >= 1.80 and not has_prior_consolidation)
+            # Phase 1 Empirical Standard: On confirmed Institutional Trend Days or strong closes (CLV >= 0.70),
+            # allow momentum runners up to 160 bps (1.60%) above VWAP (N=68,076 bars, 63% profitable continuation rate).
+            # On normal/chop days or weak closes (CLV < 0.70), preserve the 60 bps (0.60%) ceiling to prevent buying exhausted tops.
+            # True exhaustion climax (>= 1.80x ATR without prior consolidation) is always vetoed.
+            clv_bull = (close - low) / max(bar_range, 1e-6)
+            vwap_threshold = 0.0160 if (is_institutional_trend_day or clv_bull >= 0.70) else 0.0060
+            is_climax_extended = ((close - vwap) / max(close, 1.0) >= vwap_threshold) or (bar_stretch >= 1.80 and not has_prior_consolidation)
             if is_climax_extended:
                 logger.debug(
                     f"[PA-MOMENTUM] Climax overextension veto for {symbol} BUY_CE: "
-                    f"vwap_dist={(close - vwap) / close:.4%}, bar_stretch={bar_stretch:.2f}x ATR"
+                    f"vwap_dist={(close - vwap) / close:.4%}, threshold={vwap_threshold:.4%}, bar_stretch={bar_stretch:.2f}x ATR, CLV={clv_bull:.2f}"
                 )
                 return None
 
@@ -530,13 +537,17 @@ class PriceActionMomentumScanner:
 
         elif bear_score >= min_threshold and net_edge <= -1.5:
             # Climax Bar Overextension Gate (Mean-Reversion Trap Prevention):
-            # Veto entry if price is plunged >= 60 bps (0.60%) below VWAP or
-            # current bar is >= 1.8x ATR without prior consolidation (exhaustion plunge).
-            is_climax_extended = ((vwap - close) / max(close, 1.0) >= 0.0060) or (bar_stretch >= 1.80 and not has_prior_consolidation)
+            # Phase 1 Empirical Standard: On confirmed Institutional Trend Days or strong closes (CLV >= 0.70),
+            # allow momentum runners up to 160 bps (1.60%) below VWAP (N=68,076 bars, 63% profitable continuation rate).
+            # On normal/chop days or weak closes (CLV < 0.70), preserve the 60 bps (0.60%) ceiling to prevent buying exhausted plunge bottoms.
+            # True exhaustion climax (>= 1.80x ATR without prior consolidation) is always vetoed.
+            clv_bear = (high - close) / max(bar_range, 1e-6)
+            vwap_threshold = 0.0160 if (is_institutional_trend_day or clv_bear >= 0.70) else 0.0060
+            is_climax_extended = ((vwap - close) / max(close, 1.0) >= vwap_threshold) or (bar_stretch >= 1.80 and not has_prior_consolidation)
             if is_climax_extended:
                 logger.debug(
                     f"[PA-MOMENTUM] Climax plunge veto for {symbol} BUY_PE: "
-                    f"vwap_dist={(vwap - close) / close:.4%}, bar_stretch={bar_stretch:.2f}x ATR"
+                    f"vwap_dist={(vwap - close) / close:.4%}, threshold={vwap_threshold:.4%}, bar_stretch={bar_stretch:.2f}x ATR, CLV={clv_bear:.2f}"
                 )
                 return None
 

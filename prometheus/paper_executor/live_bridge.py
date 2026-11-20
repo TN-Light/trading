@@ -314,6 +314,7 @@ class LivePaperCapture:
         self._on_close_listeners = []
         self._today_closed_instruments = set()
         self._today_stopped_out_symbol_directions = StoppedOutDirectionsDict()
+        self._today_reentry_counts = {}
 
         # Construct the recorder (CSV+SQLite) directory-safe.
         Path(config.csv_path).parent.mkdir(parents=True, exist_ok=True)
@@ -488,6 +489,13 @@ class LivePaperCapture:
         try:
             trade_id = self._engine.process_new_signal(notif)
             if trade_id:
+                key = (sig_symbol, sig_direction)
+                if key in self._today_stopped_out_symbol_directions:
+                    self._today_reentry_counts[key] = self._today_reentry_counts.get(key, 0) + 1
+                    logger.info(
+                        f"[PaperCapture] Ignition re-entry #{self._today_reentry_counts[key]} opened for {sig_symbol} "
+                        f"({sig_direction}, Tier {sig_tier}) TradeID={trade_id}"
+                    )
                 logger.info(
                     f"[PaperCapture] opened {notif.symbol} {notif.direction.value} "
                     f"{notif.instrument} @ hint={notif.entry_price_hint:.2f} "
@@ -553,6 +561,13 @@ class LivePaperCapture:
             return ("S" in stopped_tiers) or ("B" in stopped_tiers)
 
         # Low-conviction setups (Tier C) are locked out if ANY setup stopped out in that direction.
+        # Phase 1 Tier 2 Invariant: On confirmed Institutional Ignition Bars (Range >= 1.85x ATR, CLV >= 0.70),
+        # permit exactly ONE secondary re-entry in Tier C paper sandbox for empirical tracking.
+        is_ignition = bool(refined_signal.get("is_ignition_bar") or refined_signal.get("has_range_expansion")) if refined_signal else False
+        reentry_count = getattr(self, "_today_reentry_counts", {}).get(key, 0)
+        if is_ignition and candidate_tier in ("C", "D") and reentry_count < 1:
+            return False
+
         return len(stopped_tiers) > 0
 
     def get_today_realized_net_pnl(self, tiers: tuple = None) -> float:

@@ -243,6 +243,18 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
 
         is_gex_gated_call = (is_dealer_long_gamma or is_gap_trapped_call) and is_call
 
+        # Check if 0-DTE expiry session for this option buying signal
+        is_0dte_buying = False
+        if signal.get("expiry") and signal.get("bar_timestamp"):
+            try:
+                exp_d = pd.to_datetime(signal["expiry"]).date()
+                curr_d = pd.to_datetime(signal["bar_timestamp"]).date()
+                is_0dte_buying = (exp_d == curr_d)
+            except Exception:
+                pass
+        if not is_0dte_buying and bool(signal.get("is_0dte", False)):
+            is_0dte_buying = True
+
         # Time Window Validation (60-day Angel One empirical tick distribution):
         # Window A (Morning): 09:30 - 11:30 IST (Primary ORB & momentum impulses)
         # Lunch Dead Zone: 11:30 - 13:15 IST (Directional movement collapses by ~60%; Option Buying BLOCKED)
@@ -251,25 +263,26 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         is_afternoon_squeeze = True
         is_valid_entry_window = True
         is_lunch_dead_zone = False
+        is_trend_day = bool(signal.get("is_institutional_trend_day"))
+        afternoon_end_time = dtime(15, 0) if (is_trend_day and not is_0dte_buying) else dtime(14, 15)
 
         if bar_time:
             # Morning power hour: 09:35 - 10:35 AM IST
             is_morning_power_hour = (dtime(9, 35) <= bar_time <= dtime(10, 35))
-            # Afternoon squeeze window: 13:15 - 14:15 PM IST
-            is_afternoon_squeeze = (dtime(13, 15) <= bar_time <= dtime(14, 15))
+            # Afternoon squeeze window: 13:15 - 14:15 PM IST (extended to 15:00 on confirmed non-0DTE trend days)
+            is_afternoon_squeeze = (dtime(13, 15) <= bar_time <= afternoon_end_time)
             # Lunch dead zone: 11:30 - 13:15 IST
             is_lunch_dead_zone = (dtime(11, 30) < bar_time < dtime(13, 15))
-            # Valid entry windows (09:30-11:30 or 13:15-14:15)
+            # Valid entry windows (09:30-11:30 or 13:15-14:15 / 15:00)
             is_valid_entry_window = (
                 (dtime(9, 30) <= bar_time <= dtime(11, 30)) or
-                (dtime(13, 15) <= bar_time <= dtime(14, 15))
+                (dtime(13, 15) <= bar_time <= afternoon_end_time)
             )
 
         # LUNCH DEAD ZONE HARD GATE:
         # Strictly prevent option buying between 11:30 and 13:15 to eliminate theta decay cremation
         # EXCEPTION: Institutional Trend Day (ADX >= 25, Volume >= 1.5x 20-SMA, ORB Breakout,
         # HTF trend aligned, and NOT in dealer long gamma)
-        is_trend_day = bool(signal.get("is_institutional_trend_day"))
         if is_lunch_dead_zone:
             if is_trend_day and (is_htf_aligned if has_htf_explicit else True) and not is_dealer_long_gamma:
                 adx_disp = signal.get("adx", 25.0)
@@ -316,7 +329,7 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
         #   6. Morning Power Hour (09:35 - 10:35) OR Afternoon Squeeze Window (13:15 - 14:15)
         #   7. Dealer Regime NOT Long Gamma (net_gex <= 1.5 Cr)
         if has_orb and has_vwap and has_vol_surge and is_htf_aligned and score >= 7.0 and (is_morning_power_hour or is_afternoon_squeeze) and not is_dealer_long_gamma:
-            window_label = "Morning Power Hour (09:35-10:35 AM)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Squeeze Window (13:15-14:15 PM)"
+            window_label = "Morning Power Hour (09:35-10:35 AM)" if (bar_time and bar_time <= dtime(11, 30)) else f"Afternoon Squeeze Window (13:15-{afternoon_end_time.strftime('%H:%M')} PM)"
             return _build_tier_result(
                 tier="S",
                 tier_name="PERFECT_STORM",
@@ -334,28 +347,16 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
                 instruction="🔥 <b>ACTION:</b> Live Trade — Conservative 1 Lot Execution"
             )
 
-        # Check if 0-DTE expiry session for this option buying signal
-        is_0dte_buying = False
-        if signal.get("expiry") and signal.get("bar_timestamp"):
-            try:
-                exp_d = pd.to_datetime(signal["expiry"]).date()
-                curr_d = pd.to_datetime(signal["bar_timestamp"]).date()
-                is_0dte_buying = (exp_d == curr_d)
-            except Exception:
-                pass
-        if not is_0dte_buying and bool(signal.get("is_0dte", False)):
-            is_0dte_buying = True
-
         # TIER B ("Golden Setup" / "Regime Scalp in Long Gamma"):
         # Requirements:
         #   1. 15M ORB + Session VWAP alignment
         #   2. STRICT 1H HTF Trend Alignment (BULLISH for CE, BEARISH for PE; NEUTRAL is banned)
         #   3. Edge score >= 6.5 (Standard non-0DTE) OR >= 8.0 (0-DTE Golden Setup or Long Gamma Put Scalp)
-        #   4. Valid Trading Window: 09:30-11:30 AM OR 13:15-14:15 PM
+        #   4. Valid Trading Window: 09:30-11:30 AM OR 13:15-14:15 PM (extended to 15:00 on non-expiry Trend Day)
         #   5. Asymmetric GEX Invariant: Call Buying (LONG) is strictly gated in Long Gamma.
         min_tier_b_score = 8.0 if (is_0dte_buying or is_dealer_long_gamma) else 6.5
         if (is_golden or (has_orb and has_vwap)) and is_htf_aligned and score >= min_tier_b_score and is_valid_entry_window and not is_gex_gated_call:
-            window_desc = "Morning Window (09:30-11:30)" if (bar_time and bar_time <= dtime(11, 30)) else "Afternoon Window (13:15-14:15)"
+            window_desc = "Morning Window (09:30-11:30)" if (bar_time and bar_time <= dtime(11, 30)) else f"Afternoon Window (13:15-{afternoon_end_time.strftime('%H:%M')})"
             reasons_b = [
                 "15M Opening Range Breakout (with ATR Buffer)",
                 "Session VWAP Clearance >= 0.10%",
@@ -412,10 +413,10 @@ def _classify_signal_tier_core(signal: Dict[str, Any]) -> Dict[str, Any]:
             if is_dealer_long_gamma and is_put and score < 8.0:
                 missing.append(f"Dealer Long Gamma Regime (Net GEX +{net_gex_cr:.1f}Cr >= +1.5Cr: Requires Score >= 8.0 for Tier B Put Scalp, got {score:.1f}/10; routed to Paper)")
             if not is_valid_entry_window:
-                if bar_time and bar_time > dtime(14, 15):
-                    missing.append("Post-Cutoff Window (After 14:15 IST)")
+                if bar_time and bar_time > afternoon_end_time:
+                    missing.append(f"Post-Cutoff Window (After {afternoon_end_time.strftime('%H:%M')} IST)")
                 else:
-                    missing.append("Outside Valid Entry Windows (09:30-11:30, 13:15-14:15)")
+                    missing.append(f"Outside Valid Entry Windows (09:30-11:30, 13:15-{afternoon_end_time.strftime('%H:%M')})")
             return _build_tier_result(
                 tier="C",
                 tier_name="STANDARD_MOMENTUM",

@@ -373,6 +373,7 @@ class Prometheus:
         )
 
         # Daily intraday guardrail audit (included in end-of-day summary)
+        self._session_trend_day_detected = False
         self._intraday_guardrail_audit = {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "mode": "",
@@ -5206,6 +5207,7 @@ class Prometheus:
         self._today_traded_instruments = _today_traded_instruments
         _intraday_trades_today = self._get_daily_state("dry_intraday_trades_today", 0)
         _did_square_off = self._get_daily_state("dry_did_square_off", False)
+        self._session_trend_day_detected = False
         _last_scan_time = None
         _last_feed_bars_time = None
         _did_send_daily_summary = self._get_daily_state("dry_did_send_daily_summary", False)
@@ -5379,7 +5381,14 @@ class Prometheus:
                 any_expiry_today = any(is_weekly_expiry_day(sym) for sym in intraday_instruments)
 
                 effective_last_entry = last_entry_time
-                if any_expiry_today and bool(get("intraday.expiry_fast_trigger.enabled", False)):
+                if getattr(self, "_session_trend_day_detected", False) and not any_expiry_today:
+                    trend_last_entry_str = intraday_cfg.get("last_entry_time_trend_day", "15:00")
+                    try:
+                        tlh, tlm = map(int, trend_last_entry_str.split(":"))
+                        effective_last_entry = dtime(tlh, tlm)
+                    except Exception:
+                        effective_last_entry = dtime(15, 0)
+                elif any_expiry_today and bool(get("intraday.expiry_fast_trigger.enabled", False)):
                     expiry_last_entry_str = get("intraday.expiry_fast_trigger.last_entry_time_expiry", "15:05")
                     try:
                         elh, elm = map(int, expiry_last_entry_str.split(":"))
@@ -5525,6 +5534,7 @@ class Prometheus:
                                         refined["is_institutional_trend_day"] = True
 
                             if is_trend_day:
+                                self._session_trend_day_detected = True
                                 # Climax Exhaustion Check:
                                 # Even on a trend day, do NOT enter option buying during lunch if spot is already
                                 # >= 2.0x ATR extended from the ORB boundary, or >= 2.2x ATR from session VWAP.
@@ -6237,6 +6247,7 @@ class Prometheus:
                                                     refined["is_institutional_trend_day"] = True
 
                                         if is_trend_day:
+                                            self._session_trend_day_detected = True
                                             # Climax Exhaustion Check:
                                             # Even on a trend day, do NOT enter option buying during lunch if spot is already
                                             # >= 2.0x ATR extended from the ORB boundary, or >= 2.2x ATR from session VWAP.
