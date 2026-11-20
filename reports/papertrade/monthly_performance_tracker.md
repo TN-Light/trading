@@ -3,7 +3,7 @@
 **Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 100,000  
 **Current Realized Net P&L:** **🟢 +Rs 301.86 (+0.30%)**  
-**Last Updated:** 2026-11-19 17:30:49 IST  
+**Last Updated:** 2026-11-20 15:46:18 IST  
 
 > [!IMPORTANT]
 > **Strict Capital Segregation Enforced (GEMINI.md §7)**:  
@@ -33,6 +33,7 @@
 | **2026-11-17** | 1 | 1W / 0L | 100% | **🟢 +Rs 146.5** | +0.15% | Rs 100,146 | SENSEX Long Tier B target hit (+Rs 146.50 net); 8 Tier C paper tests |
 | **2026-11-18** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,146 | 0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss) |
 | **2026-11-19** | 1 | 1W / 0L | 100% | **🟢 +Rs 155.4** | +0.16% | Rs 100,302 | Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29) |
+| **2026-11-20** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | 0 Live setups (3 Long Gamma traps demoted to Tier C by Asymmetric GEX gate; Rs 0 live loss) |
 
 ---
 
@@ -44,9 +45,9 @@
 
 | Metric | Sandbox Value | Operational Live Capital Impact | Status |
 | :--- | :---: | :---: | :---: |
-| **Total Sandbox Trades** | **20** | 0 Live Orders Sent | Quarantined |
-| **Sandbox Win Rate** | **45.0%** (9W / 11L) | N/A | Telemetry Only |
-| **Sandbox Net P&L** | **Rs -3,924.75** | **Rs 0.00 (Zero Capital Bleed)** | Protected |
+| **Total Sandbox Trades** | **23** | 0 Live Orders Sent | Quarantined |
+| **Sandbox Win Rate** | **39.1%** (9W / 14L) | N/A | Telemetry Only |
+| **Sandbox Net P&L** | **Rs -7,251.66** | **Rs 0.00 (Zero Capital Bleed)** | Protected |
 
 ### Sandbox Daily Breakdown
 
@@ -56,6 +57,7 @@
 | **2026-11-17** | 8 | 7W / 1L | 88% | **🟢 +Rs 2,408.3** | SENSEX Long Tier B target hit (+Rs 146.50 net); 8 Tier C paper tests |
 | **2026-11-18** | 5 | 0W / 5L | 0% | **🔴 -Rs 2,755.5** | 0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss) |
 | **2026-11-19** | 4 | 1W / 3L | 25% | **🔴 -Rs 2,993.3** | Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29) |
+| **2026-11-20** | 3 | 0W / 3L | 0% | **🔴 -Rs 3,326.9** | 0 Live setups (3 Long Gamma traps demoted to Tier C by Asymmetric GEX gate; Rs 0 live loss) |
 
 ---
 
@@ -64,8 +66,8 @@
 | Population | Trades | Wins | Losses | Win Rate | Net P&L | Capital Impact |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Operational Live (Tier S, A, B)** | 2 | 2 | 0 | 100.0% | **+Rs 301.86** | **Realized to Equity** |
-| **Sandbox Telemetry (Tier C)** | 20 | 9 | 11 | 45.0% | Rs -3,924.75 | **Rs 0.00 (Segregated)** |
-| **Total Ledger Population** | 22 | 11 | 11 | 50.0% | Rs -3,622.89 | — |
+| **Sandbox Telemetry (Tier C)** | 23 | 9 | 14 | 39.1% | Rs -7,251.66 | **Rs 0.00 (Segregated)** |
+| **Total Ledger Population** | 25 | 11 | 14 | 44.0% | Rs -6,949.80 | — |
 
 ---
 
