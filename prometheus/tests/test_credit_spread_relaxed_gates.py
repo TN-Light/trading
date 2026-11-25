@@ -343,7 +343,7 @@ def test_credit_spread_0dte_strike_placement_bear_call():
     interval = get_strike_interval("NIFTY 50")
 
     expected_strike = max(
-        strategy.get_atm_strike(today_high + 150.0, "NIFTY 50"),
+        strategy.get_atm_strike(today_high + 100.0, "NIFTY 50"),
         atm_strike + (2 * interval),
     )
     assert sig["short_strike"] == expected_strike, f"Expected {expected_strike}, got {sig['short_strike']}"
@@ -382,7 +382,7 @@ def test_credit_spread_0dte_strike_placement_bull_put():
     interval = get_strike_interval("NIFTY 50")
 
     expected_strike = min(
-        strategy.get_atm_strike(today_low - 150.0, "NIFTY 50"),
+        strategy.get_atm_strike(today_low - 100.0, "NIFTY 50"),
         atm_strike - (2 * interval),
     )
     assert sig["short_strike"] == expected_strike, f"Expected {expected_strike}, got {sig['short_strike']}"
@@ -408,8 +408,8 @@ def test_credit_spread_0dte_strike_placement_anchoring_above_high_when_gap_ran()
     # 24280 + 50 = 24330 -> get_atm_strike(24330) = 24350
     # atm_strike = 24000, atm_strike + 2*50 = 24100
     # short_strike should be max(24350, 24100) = 24350!
-    # 24280 + sigma_buffer(150) = 24430 -> get_atm_strike(24430) = 24450
-    assert sig["short_strike"] == 24450.0, f"Expected 24450.0 anchored above session high with sigma buffer, got {sig['short_strike']}"
+    # 24280 + sigma_buffer(100) = 24380 -> get_atm_strike(24380) = 24400
+    assert sig["short_strike"] == 24400.0, f"Expected 24400.0 anchored above session high with sigma buffer, got {sig['short_strike']}"
 
 
 # ============================================================================
@@ -506,8 +506,8 @@ def test_credit_spread_settings_injection():
     assert cs_cfg.get("target_decay_pct") == 0.70
     assert cs_cfg.get("breakeven_decay_pct") == 0.50
     assert cs_cfg.get("max_loss_multiplier") == 1.5
-    assert cs_cfg.get("min_credit_pct") == 0.15
-    assert cs_cfg.get("max_days_to_expiry") == 1
+    assert cs_cfg.get("min_credit_pct") == 0.10
+    assert cs_cfg.get("max_days_to_expiry") == 3
     assert cs_cfg.get("max_days_to_expiry_monthly") == 1
     assert cs_cfg.get("max_range_pct") == 0.018
 
@@ -518,8 +518,8 @@ def test_credit_spread_settings_injection():
         target_decay_pct=float(cs_cfg.get("target_decay_pct", 0.70)),
         breakeven_decay_pct=float(cs_cfg.get("breakeven_decay_pct", 0.50)),
         max_loss_multiplier=float(cs_cfg.get("max_loss_multiplier", 1.5)),
-        min_credit_pct=float(cs_cfg.get("min_credit_pct", 0.15)),
-        max_days_to_expiry=int(cs_cfg.get("max_days_to_expiry", 1)),
+        min_credit_pct=float(cs_cfg.get("min_credit_pct", 0.10)),
+        max_days_to_expiry=int(max_dte) if (max_dte := cs_cfg.get("max_days_to_expiry", 3)) is not None else 3,
         max_days_to_expiry_monthly=int(cs_cfg.get("max_days_to_expiry_monthly", 1)),
         max_range_pct=float(cs_cfg.get("max_range_pct", 0.018)),
     )
@@ -529,8 +529,8 @@ def test_credit_spread_settings_injection():
     assert strategy.target_decay_pct == 0.70
     assert strategy.breakeven_decay_pct == 0.50
     assert strategy.max_loss_multiplier == 1.5
-    assert strategy.min_credit_pct == 0.15
-    assert strategy.max_days_to_expiry == 1
+    assert strategy.min_credit_pct == 0.10
+    assert strategy.max_days_to_expiry == 3
     assert strategy.max_days_to_expiry_monthly == 1
     assert strategy.max_range_pct == 0.018
 
@@ -561,7 +561,7 @@ def test_main_py_actual_instantiation_from_settings():
     assert strategy.target_decay_pct == 0.70
     assert strategy.breakeven_decay_pct == 0.50
     assert strategy.max_loss_multiplier == 1.5
-    assert strategy.min_credit_pct == 0.15
-    assert strategy.max_days_to_expiry == 1
+    assert strategy.min_credit_pct == 0.10
+    assert strategy.max_days_to_expiry == 3
     assert strategy.max_days_to_expiry_monthly == 1
     assert strategy.max_range_pct == 0.018

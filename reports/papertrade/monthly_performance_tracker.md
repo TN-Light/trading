@@ -3,7 +3,7 @@
 **Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 100,000  
 **Current Realized Net P&L:** **🟢 +Rs 301.86 (+0.30%)**  
-**Last Updated:** 2026-11-20 16:00:03 IST  
+**Last Updated:** 2026-11-25 16:00:16 IST  
 
 > [!IMPORTANT]
 > **Strict Capital Segregation Enforced (GEMINI.md §7)**:  
@@ -34,6 +34,8 @@
 | **2026-11-18** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,146 | 0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss) |
 | **2026-11-19** | 1 | 1W / 0L | 100% | **🟢 +Rs 155.4** | +0.16% | Rs 100,302 | Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29) |
 | **2026-11-20** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 3T (0W/3L, Rs -3,326.91) |
+| **2026-11-23** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
+| **2026-11-25** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
 
 ---
 
@@ -58,6 +60,8 @@
 | **2026-11-18** | 5 | 0W / 5L | 0% | **🔴 -Rs 2,755.5** | 0 Live setups (5 trapped setups demoted to Tier C by Trap Gates; Rs 0 live loss) |
 | **2026-11-19** | 4 | 1W / 3L | 25% | **🔴 -Rs 2,993.3** | Intraday session: Live 1T (1W/0L, Rs +155.36) | Sandbox 4T (1W/3L, Rs -2,993.29) |
 | **2026-11-20** | 3 | 0W / 3L | 0% | **🔴 -Rs 3,326.9** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 3T (0W/3L, Rs -3,326.91) |
+| **2026-11-23** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
+| **2026-11-25** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
 
 ---
 

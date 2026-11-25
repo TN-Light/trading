@@ -294,6 +294,16 @@ class CreditSpreadStrategy:
             elif is_1h_bull and is_above_vwap:
                 is_bullish = True
                 is_bearish = False
+            elif not is_1h_bull and not is_1h_bear:
+                # 1H is Neutral/Sideways: no HTF trend against us; align with intraday VWAP/EMA or range midpoint
+                is_bearish = (close < vwap) and (ema9 <= ema21)
+                is_bullish = (close > vwap) and (ema9 >= ema21)
+                if not is_bearish and not is_bullish:
+                    midpoint = (today_high + today_low) / 2.0
+                    if close >= midpoint or st_dir == -1:
+                        is_bearish = True
+                    else:
+                        is_bullish = True
             else:
                 logger.info(
                     f"CreditSpread skipped for {symbol}: Macro trend co-alignment failed "
@@ -328,9 +338,9 @@ class CreditSpreadStrategy:
 
         # ── Dynamic 2.0σ Strike Buffer (Pillar 2) ──
         _base_index_buffer = {
-            "NIFTY 50": 150.0,
-            "NIFTY BANK": 400.0,
-            "SENSEX": 600.0,
+            "NIFTY 50": 100.0,
+            "NIFTY BANK": 300.0,
+            "SENSEX": 400.0,
             "NIFTY MIDCAP SELECT": 100.0,
             "NIFTY FIN SERVICE": 150.0,
         }.get(symbol, 3.0 * interval)
@@ -348,7 +358,7 @@ class CreditSpreadStrategy:
             # 0-DTE: full buffer — need maximum distance for terminal gamma safety
             min_index_buffer = _base_index_buffer
 
-        daily_proxy_buffer = round((3.5 * atr) / interval) * interval
+        daily_proxy_buffer = round((2.0 * atr) / interval) * interval
         sigma_buffer = max(min_index_buffer, daily_proxy_buffer)
 
         # ── Institutional Open Interest (OI) Wall Scan (Pillar 3) ──
