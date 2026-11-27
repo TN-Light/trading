@@ -2059,6 +2059,7 @@ class Prometheus:
         symbol: str,
         bar_interval: str,
         use_backtest_generator: bool,
+        allow_option_buying: bool = True,
     ) -> Optional[Dict]:
         """Return an executable intraday signal dict for the given mode."""
         execution_signal = None
@@ -2135,7 +2136,7 @@ class Prometheus:
 
             pa_sig = None
             is_exp = is_weekly_expiry_day(symbol)
-            if intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
+            if allow_option_buying and intra_df is not None and not intra_df.empty and len(intra_df) >= 15:
                 pa_sig = self._pa_momentum_scanner.evaluate_bar(
                     intra_df, symbol=symbol, is_expiry_day=is_exp, df_1h=df_1h, golden_mode=True,
                     oi_data=oi_data, atm_option_volume=atm_option_vol
@@ -2143,7 +2144,7 @@ class Prometheus:
 
             # Option C: 5-Minute Expiry Fast-Trigger (disabled by default to prevent afternoon theta traps)
             fast_trigger_enabled = bool(get("intraday.expiry_fast_trigger.enabled", False))
-            if not pa_sig and is_exp and fast_trigger_enabled:
+            if allow_option_buying and not pa_sig and is_exp and fast_trigger_enabled:
                 try:
                     df_5m = self.data.fetch_intraday(symbol, interval="5minute", days=1)
                     if df_5m is not None and not df_5m.empty and len(df_5m) >= 15:
@@ -5396,6 +5397,19 @@ class Prometheus:
                     except Exception:
                         effective_last_entry = dtime(15, 5)
 
+                # Option Selling (CreditSpreadStrategy) runs up to credit_spread.end_time (15:00)
+                # even when Option Buying stops at effective_last_entry (14:15).
+                scan_loop_cutoff = effective_last_entry
+                if bool(get("intraday.credit_spread.enabled", False)):
+                    cs_end_str = str(get("intraday.credit_spread.end_time", "15:00") or "15:00")
+                    try:
+                        csh, csm = map(int, cs_end_str.split(":"))
+                        cs_end_time = dtime(csh, csm)
+                        if cs_end_time > scan_loop_cutoff:
+                            scan_loop_cutoff = cs_end_time
+                    except Exception:
+                        pass
+
                 bar_interval = self._select_intraday_interval()
 
                 # Always evaluate exits on open paper positions regardless of cutoff or max trades
@@ -5411,7 +5425,7 @@ class Prometheus:
                             logger.debug(f"[PaperCapture] continuous exit evaluation error: {e}")
 
                 # No new entries after cutoff — monitor only
-                if current_time >= effective_last_entry:
+                if current_time >= scan_loop_cutoff:
                     self.dashboard.show_status_line(
                         f"{mode_label}: No new entries. Monitoring {n_pos} position(s). "
                         f"Square-off at {square_off_str}."
@@ -5500,7 +5514,8 @@ class Prometheus:
                         continue
 
                     refined = self._get_intraday_signal_for_execution(
-                        symbol, bar_interval, use_backtest_generator
+                        symbol, bar_interval, use_backtest_generator,
+                        allow_option_buying=(current_time < effective_last_entry),
                     )
                     if refined and refined.get("action") != "HOLD":
                         strat_type = str(refined.get("strategy_type", "")).lower()

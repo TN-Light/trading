@@ -136,3 +136,42 @@ def test_1_to_3_dte_spread_routed_strictly_to_tier_c_paper():
     tier_res = classify_signal_tier(sig)
     assert tier_res["tier"] == "C"
     assert tier_res["is_live_eligible"] is False
+
+
+def test_post_1415_allows_credit_spread_but_blocks_option_buying():
+    """Verify allow_option_buying=False skips PA option buying while still evaluating CreditSpreadStrategy."""
+    from unittest.mock import MagicMock
+    from prometheus.main import Prometheus
+
+    p = Prometheus()
+    p.data = MagicMock()
+    df_15m = _create_sideways_15m_df(25000.0)
+    df_1h = _create_neutral_1h_df(25000.0)
+    p.data.fetch_intraday.return_value = df_15m
+    p.data.fetch_historical.return_value = df_1h
+    p.data.fetch_options_chain.return_value = pd.DataFrame()
+    p.data.get_vix.return_value = 15.0
+    p.data.angelone_options = MockOptionChain()
+
+    p._pa_momentum_scanner = MagicMock()
+    p._credit_spread_strategy = MagicMock()
+    p._credit_spread_strategy.evaluate_spread.return_value = {
+        "strategy_type": "credit_spread",
+        "spread_type": "BULL_PUT_SPREAD",
+        "action": "SELL_PUT_SPREAD",
+        "net_credit": 18.0,
+        "tradingsymbol": "NIFTY25000PE",
+        "expiry": df_15m.iloc[-1]["timestamp"].date().isoformat(),
+        "bar_timestamp": df_15m.iloc[-1]["timestamp"],
+        "otm_sigma": 2.0,
+        "signal_score": 9.0,
+    }
+
+    sig = p._get_intraday_signal_for_execution(
+        "NIFTY 50", "15minute", False, allow_option_buying=False
+    )
+
+    p._pa_momentum_scanner.evaluate_bar.assert_not_called()
+    p._credit_spread_strategy.evaluate_spread.assert_called_once()
+    assert sig is not None
+    assert sig["strategy_type"] == "credit_spread"

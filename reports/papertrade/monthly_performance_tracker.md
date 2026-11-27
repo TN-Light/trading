@@ -3,7 +3,7 @@
 **Tracking Period:** November 2026  
 **Initial Base Capital:** Rs 100,000  
 **Current Realized Net P&L:** **🟢 +Rs 301.86 (+0.30%)**  
-**Last Updated:** 2026-11-25 16:00:16 IST  
+**Last Updated:** 2026-11-27 16:00:22 IST  
 
 > [!IMPORTANT]
 > **Strict Capital Segregation Enforced (GEMINI.md §7)**:  
@@ -36,6 +36,8 @@
 | **2026-11-20** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 3T (0W/3L, Rs -3,326.91) |
 | **2026-11-23** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
 | **2026-11-25** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
+| **2026-11-26** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 1T (0W/1L, Rs -997.06) |
+| **2026-11-27** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | +0.00% | Rs 100,302 | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 3T (0W/3L, Rs -2,670.17) |
 
 ---
 
@@ -47,9 +49,9 @@
 
 | Metric | Sandbox Value | Operational Live Capital Impact | Status |
 | :--- | :---: | :---: | :---: |
-| **Total Sandbox Trades** | **23** | 0 Live Orders Sent | Quarantined |
-| **Sandbox Win Rate** | **39.1%** (9W / 14L) | N/A | Telemetry Only |
-| **Sandbox Net P&L** | **Rs -7,251.66** | **Rs 0.00 (Zero Capital Bleed)** | Protected |
+| **Total Sandbox Trades** | **27** | 0 Live Orders Sent | Quarantined |
+| **Sandbox Win Rate** | **33.3%** (9W / 18L) | N/A | Telemetry Only |
+| **Sandbox Net P&L** | **Rs -10,918.89** | **Rs 0.00 (Zero Capital Bleed)** | Protected |
 
 ### Sandbox Daily Breakdown
 
@@ -62,6 +64,8 @@
 | **2026-11-20** | 3 | 0W / 3L | 0% | **🔴 -Rs 3,326.9** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 3T (0W/3L, Rs -3,326.91) |
 | **2026-11-23** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
 | **2026-11-25** | 0 | 0W / 0L | 0% | **⚪ +Rs 0.0** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 0T (0W/0L, Rs +0.00) |
+| **2026-11-26** | 1 | 0W / 1L | 0% | **🔴 -Rs 997.1** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 1T (0W/1L, Rs -997.06) |
+| **2026-11-27** | 3 | 0W / 3L | 0% | **🔴 -Rs 2,670.2** | Intraday session: Live 0T (0W/0L, Rs +0.00) | Sandbox 3T (0W/3L, Rs -2,670.17) |
 
 ---
 
@@ -70,8 +74,8 @@
 | Population | Trades | Wins | Losses | Win Rate | Net P&L | Capital Impact |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Operational Live (Tier S, A, B)** | 2 | 2 | 0 | 100.0% | **+Rs 301.86** | **Realized to Equity** |
-| **Sandbox Telemetry (Tier C)** | 23 | 9 | 14 | 39.1% | Rs -7,251.66 | **Rs 0.00 (Segregated)** |
-| **Total Ledger Population** | 25 | 11 | 14 | 44.0% | Rs -6,949.80 | — |
+| **Sandbox Telemetry (Tier C)** | 27 | 9 | 18 | 33.3% | Rs -10,918.89 | **Rs 0.00 (Segregated)** |
+| **Total Ledger Population** | 29 | 11 | 18 | 37.9% | Rs -10,617.03 | — |
 
 ---
 
